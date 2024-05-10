@@ -58,6 +58,8 @@ EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
 # [n_edge, dim] (possibly equivariant) features of the edges
 EDGE_FEATURES_KEY: Final[str] = "edge_features"
 
+NOISE: Final[str] = "noise"
+
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [
     getattr(sys.modules[__name__], k)

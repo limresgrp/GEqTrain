@@ -1,5 +1,5 @@
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
-from ._node import EmbeddingNodeAttrs
+from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
 from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
 from ._edgewise import (  # noqa: F401
     EdgewiseReduce,
@@ -11,6 +11,7 @@ from .readout import ReadoutModule
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
+    OneHotAtomEncoding,
     EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,

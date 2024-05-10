@@ -509,7 +509,7 @@ def load_model(model: Path, device="cpu"):
 
     return model, model_config
 
-def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[str] = []):
+def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[str] = [], batch_max_atoms: int = 1000):
     device = next(model.parameters()).device
     batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
     num_batch_center_nodes = len(batch_index[0].unique())
@@ -522,6 +522,7 @@ def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[s
             already_computed_nodes=already_computed_nodes,
             batch=batch,
             data=batch,
+            batch_max_atoms=batch_max_atoms,
             device=device,
         )
 

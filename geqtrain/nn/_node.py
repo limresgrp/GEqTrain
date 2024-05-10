@@ -29,7 +29,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         self.num_types = num_types
         self.embedding_dim = embedding_dim
 
-        embeddings = 0.1 * torch.randn((self.num_types, self.embedding_dim), dtype=torch.get_default_dtype())
+        embeddings = torch.ones((self.num_types, self.embedding_dim), dtype=torch.get_default_dtype())
         self.embeddings = torch.nn.Parameter(embeddings)
 
         irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(self.embedding_dim, (0, 1))])}
@@ -41,18 +41,6 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         
         data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
         return data
-
-
-"""
-from typing import List, Optional
-import torch
-import torch.nn.functional
-
-from e3nn.o3 import Irreps
-from e3nn.util.jit import compile_mode
-
-from nequip.data import AtomicDataDict
-from .._graph_mixin import GraphModuleMixin
 
 
 @compile_mode("script")
@@ -87,7 +75,7 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        type_numbers = data.get(AtomicDataDict.ATOM_TYPE_KEY, data["node_types"]).squeeze(-1)
+        type_numbers = data.get(AtomicDataDict.NODE_TYPE_KEY, data["node_types"]).squeeze(-1)
         one_hot = torch.nn.functional.one_hot(
             type_numbers, num_classes=self.num_types
         ).to(device=type_numbers.device, dtype=data[AtomicDataDict.POSITIONS_KEY].dtype)
@@ -106,5 +94,3 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
         if self.set_features:
             data[AtomicDataDict.NODE_FEATURES_KEY] = one_hot
         return data
-
-"""

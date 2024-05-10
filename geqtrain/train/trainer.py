@@ -843,7 +843,7 @@ class Trainer:
             )
 
             if self.noise is not None:
-                input_data[AtomicDataDict.POSITIONS_KEY] += self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+                input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
             
             with cm:
                 out = self.model(input_data)
