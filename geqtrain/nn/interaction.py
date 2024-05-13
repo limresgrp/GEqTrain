@@ -4,7 +4,8 @@ import torch
 import torch.nn.functional as F
 
 from typing import Callable, Optional, List, Union
-from torch_runstats.scatter import scatter
+from torch_scatter import scatter
+from torch_scatter.composite import scatter_softmax
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -62,6 +63,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         env_embed_multiplicity: int = 64,
+        head_dim: int = 32,
         product_correlation: int = 3,
         
         # MLP parameters:
@@ -92,6 +94,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field = out_field
         self.env_embed_mul = env_embed_multiplicity
+        self.head_dim = head_dim
+        self.isqrtd = math.isqrt(head_dim)
         self.polynomial_cutoff_p = float(PolynomialCutoff_p)
         self.avg_num_neighbors = avg_num_neighbors
 
@@ -123,6 +127,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         self.latents = torch.nn.ModuleList([])
         self.env_embed_mlps = torch.nn.ModuleList([])
+        self.node_attr_to_queries = torch.nn.ModuleList([])
+        self.edge_feat_to_keys = torch.nn.ModuleList([])
         self.tps = torch.nn.ModuleList([])
         self.products = torch.nn.ModuleList([])
         self.reshape_in_modules = torch.nn.ModuleList([])
@@ -283,6 +289,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # Make env embed mlp
             generate_n_weights = (self._env_weighter.weight_numel)  # the weight for the edge embedding
+            generate_n_weights += self.env_embed_mul                # + the weights for the edge attention
             if layer_idx == 0:
                 # also need weights to embed the edge itself
                 # this is because the 2 body latent is mixed in with the first layer
@@ -313,8 +320,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                             )
                         ),
                         mlp_output_dimension=None,
-                        weight_norm=True,
-                        dim=0,
+                        # weight_norm=True,
+                        # dim=0,
                     )
                 )
                 self._latent_dim = self.latents[-1].out_features
@@ -328,8 +335,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                             + env_embed_multiplicity * self._n_scalar_outs[layer_idx - 1]
                         ),
                         mlp_output_dimension=None,
-                        weight_norm=True,
-                        dim=0,
+                        # weight_norm=True,
+                        # dim=0,
                     )
                 )
 
@@ -339,8 +346,24 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 env_embed(
                     mlp_input_dimension=self.latents[-1].out_features,
                     mlp_output_dimension=generate_n_weights,
-                    weight_norm=True,
-                    dim=0,
+                    # weight_norm=True,
+                    # dim=0,
+                )
+            )
+
+            # Take the node attrs and obtain a query matrix
+            self.node_attr_to_queries.append(
+                env_embed(
+                    mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
+                    mlp_output_dimension=env_embed_multiplicity * head_dim,
+                )
+            )
+
+            # Take the node attrs and obtain a query matrix
+            self.edge_feat_to_keys.append(
+                env_embed(
+                    mlp_input_dimension=self.env_embed_mul,
+                    mlp_output_dimension=env_embed_multiplicity * head_dim,
                 )
             )
 
@@ -352,8 +375,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 + env_embed_multiplicity * self._n_scalar_outs[layer_idx]
             ),
             mlp_output_dimension=env_embed_multiplicity * self._n_scalar_outs[layer_idx],
-            weight_norm=True,
-            dim=0,
+            # weight_norm=True,
+            # dim=0,
         )
 
         self.reshape_back_features = inverse_reshape_irreps(full_out_irreps)
@@ -442,10 +465,23 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         )
 
         # This goes through layer0, layer1, ..., layer_max-1
-        for latent, env_embed_mlp, env_linear, linear, \
-            prod, tp in zip(
-            self.latents, self.env_embed_mlps, self.env_linears, self.linears, \
-            self.products, self.tps
+        for (latent,
+            env_embed_mlp,
+            node_attr_to_query,
+            edge_feat_to_key,
+            env_linear,
+            linear,
+            prod,
+            tp
+        ) in zip(
+            self.latents,
+            self.env_embed_mlps,
+            self.node_attr_to_queries,
+            self.edge_feat_to_keys,
+            self.env_linears,
+            self.linears,
+            self.products,
+            self.tps
         ):
             # Determine which edges are still in play
             cutoff_coeffs = cutoff_coeffs_all[layer_index]
@@ -505,18 +541,31 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             # Extract weights for the environment builder
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
             w_index += self._env_weighter.weight_numel
-
             emb_latent = self._env_weighter(edge_attr[active_edges], env_w)
-            norm_const = self.env_sum_normalizations[layer_index]
+
+            # Apply attention on emb_latent
+            Q = node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
+            Q = Q.reshape(-1, self.env_embed_mul, self.head_dim)[edge_center[active_edges]]
+
+            key_w = weights.narrow(-1, w_index, self.env_embed_mul)
+            w_index += self.env_embed_mul
+            K = edge_feat_to_key(key_w)
+            K = K.reshape(-1, self.env_embed_mul, self.head_dim)
+
+            A = torch.einsum('ijk,ijk -> ij', Q, K) * self.isqrtd
+            emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(A, edge_center[active_edges], dim=0))
+
+            # Pool over all attention-weighted edge features to build node local environment embedding
+            # norm_const = self.env_sum_normalizations[layer_index]
             local_env_per_node = scatter(
                 emb_latent,
                 edge_center[active_edges],
                 dim=0,
                 dim_size=num_nodes,
-            ) * norm_const
+            ) # * norm_const
             
             active_node_centers = edge_center[active_edges].unique()
-            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers]) / norm_const
+            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers]) # / norm_const
             
             # expanded_features_per_active_atom: torch.Tensor = prod(
             #     node_feats=local_env_per_active_atom, sc=None, node_attrs=node_invariants[active_node_centers]

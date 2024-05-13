@@ -862,20 +862,19 @@ class Trainer:
                 loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
                 
                 self.optim.zero_grad(set_to_none=True)
-                if loss < 1e3:
                     
-                    loss.backward()
+                loss.backward()
 
-                    if self.max_gradient_norm < float("inf"):
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.max_gradient_norm
-                        )
+                if self.max_gradient_norm < float("inf"):
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.max_gradient_norm
+                    )
 
-                    self.optim.step()
-                    # self.model.normalize_weights()
+                self.optim.step()
+                # self.model.normalize_weights()
 
-                    if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                        self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
 
             with torch.no_grad():
                 if validation:

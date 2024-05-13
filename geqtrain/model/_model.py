@@ -10,7 +10,6 @@ from geqtrain.nn import (
 )
 from geqtrain.nn import (
     OneHotAtomEncoding,
-    EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
@@ -40,7 +39,7 @@ def Model(
 
     layers = {
         # -- Encode --
-        "node_attrs":         OneHotAtomEncoding, # EmbeddingNodeAttrs,
+        "node_attrs":         OneHotAtomEncoding,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
     }

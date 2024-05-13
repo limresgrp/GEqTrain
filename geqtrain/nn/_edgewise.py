@@ -1,10 +1,13 @@
 import torch
-import torch.nn as nn
+import math
 from typing import Optional
-from torch_runstats.scatter import scatter
+from torch_scatter import scatter
+from torch_scatter.composite import scatter_softmax
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
+from geqtrain.nn.allegro._fc import ScalarMLPFunction
+from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
 class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
@@ -20,42 +23,75 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         self,
         field: str,
         out_field: Optional[str] = None,
+        readout_latent=ScalarMLPFunction,
+        readout_latent_kwargs={},
+        head_dim: int = 32,
         irreps_in={},
     ):
         """Sum edges into nodes."""
         super().__init__()
         self.field = field
         self.out_field = f"weighted_sum_{field}" if out_field is None else out_field
+        irreps = irreps_in[field]
 
         self._init_irreps(
             irreps_in=irreps_in,
-            my_irreps_in={field: irreps_in[field]},
-            irreps_out={out_field: irreps_in[field]},
+            my_irreps_in={field: irreps},
+            irreps_out={out_field: irreps},
         )
 
-        # self.embed_size = embed_size
-        # self.heads = heads
-        # self.head_dim = embed_size // heads
+        irreps_muls = []
+        n_l = {}
+        n_dim = 0
+        for mul, ir in irreps:
+            irreps_muls.append(mul)
+            n_l[ir.l] = n_l.get(ir.l, 0) + 1
+            n_dim += ir.dim
+        assert all([irreps_mul == irreps_muls[0] for irreps_mul in irreps_muls])
+        
+        self.irreps_mul = irreps_muls[0]
+        self.n_l = n_l
+        self.n_dim = n_dim
 
-        # self.values =  nn.Linear(self.head_dim, self.head_dim, bias=False)
-        # self.keys =    nn.Linear(self.head_dim, self.head_dim, bias=False)
-        # self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.reshape_in = reshape_irreps(irreps)
+        self.reshape_out = inverse_reshape_irreps(irreps)
+
+
+        if 'mlp_latent_dimensions' not in readout_latent_kwargs:
+            readout_latent_kwargs['mlp_latent_dimensions'] = [64, 64]
+
+        self.head_dim = head_dim
+        self.isqrtd = math.isqrt(head_dim)
+        self.node_attr_to_query = readout_latent(
+            mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
+            mlp_output_dimension=self.irreps_mul * self.head_dim,
+            **readout_latent_kwargs,
+        )
+
+        self.edge_feat_to_key = readout_latent(
+            mlp_input_dimension=self.irreps_mul * self.n_l[0],
+            mlp_output_dimension=self.irreps_mul * self.head_dim,
+            **readout_latent_kwargs,
+        )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-
         edge_feat = data[self.field]
+        
+        Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
+        Q = Q.reshape(-1, self.irreps_mul, self.head_dim)[edge_center]
+
+        K = self.edge_feat_to_key(edge_feat[:, :self.irreps_mul * self.n_l[0]])
+        K = K.reshape(-1, self.irreps_mul, self.head_dim)
+
+        A = torch.einsum('ijk,ijk -> ij', Q, K) * self.isqrtd
+
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
 
-        # edges_per_node = torch.bincount(edge_center, minlength=num_nodes)
-        # edge_center_incremental = torch.cat([torch.arange(0, num_edges) for num_edges in edges_per_node])
-        # index_tensor = torch.stack([edge_center, edge_center_incremental], dim=0)
-        
-        # self.irreps_in[self.field][0].mul
-
-        # sparse_tensor = torch.sparse_coo_tensor(index_tensor, b, torch.Size([num_nodes, edges_per_node.max()]))
-        # softmax_values = torch.sparse.softmax(sparse_tensor, dim=1).values()
+        edge_feat = self.reshape_in(edge_feat)
+        edge_feat = torch.einsum('emd,em->emd', edge_feat, scatter_softmax(A, edge_center, dim=0))
+        edge_feat = self.reshape_out(edge_feat)
 
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
         return data

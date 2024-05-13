@@ -6,7 +6,7 @@ import inspect
 import logging
 
 import torch.nn
-from torch_runstats.scatter import scatter, scatter_mean
+from torch_scatter import scatter, scatter_mean
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import instantiate_from_cls_name
