@@ -51,7 +51,6 @@ def with_edge_vectors(data: Type, with_lengths: bool = True) -> Type:
     """
     if _keys.EDGE_VECTORS_KEY not in data:
         pos = data[_keys.POSITIONS_KEY]
-        # pos += torch.randn_like(pos) * 0.2 # !!!
         edge_index_src = data[_keys.EDGE_INDEX_KEY][0]
         edge_index_trg = data[_keys.EDGE_INDEX_KEY][1]
         data[_keys.EDGE_VECTORS_KEY] = pos[edge_index_trg] - pos[edge_index_src]

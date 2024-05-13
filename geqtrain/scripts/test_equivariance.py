@@ -2,15 +2,13 @@
 import logging
 import argparse
 import warnings
+import torch
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
 import numpy as np  # noqa: F401
 
 from os.path import isdir
-from pathlib import Path
-
-import torch
 
 from geqtrain.model import model_from_config
 from geqtrain.utils import Config
@@ -50,6 +48,8 @@ def main(args=None, running_as_script: bool = True):
 
     if running_as_script:
         set_up_script_logger(config.get("log", None), config.verbose)
+    logger = logging.getLogger("geqtrain-test-equivariance")
+    logger.setLevel(logging.INFO)
 
     found_restart_file = isdir(f"{config.root}/{config.run_name}")
     if found_restart_file and not (config.append or config.fine_tune):
@@ -58,7 +58,7 @@ def main(args=None, running_as_script: bool = True):
             "either set append to True or use a different root or runname"
         )
 
-    test_equivariance(config)
+    test_equivariance(config, logger)
 
     return
 
@@ -83,18 +83,18 @@ def parse_command_line(args=None):
     return config
 
 
-def test_equivariance(config):
+def test_equivariance(config, logger):
     _set_global_options(config)
 
     # = Load the dataset =
     dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully loaded the data set of type {dataset}...")
+    logger.info(f"Successfully loaded the data set of type {dataset}...")
 
     # = Build model =
     final_model = model_from_config(
         config=config, initialize=True, dataset=dataset
     )
-    logging.info("Successfully built the network...")
+    logger.info("Successfully built the network...")
 
     # by doing this here we check also any keys custom builders may have added
     _check_old_keys(config)
@@ -103,6 +103,7 @@ def test_equivariance(config):
     
     n_train: int = len(dataset)
     final_model.eval()
+    final_model.to(config.get('device', 'cpu'))
     indexes = torch.randperm(n_train)[:1]
     errstr = assert_AtomicData_equivariant(
         final_model,
@@ -110,7 +111,7 @@ def test_equivariance(config):
         config.get("cartesian_fields", []),
     )
 
-    logging.info(
+    logger.info(
         "Equivariance test passed; equivariance errors:\n"
         "   Errors are in real units, where relevant.\n"
         "   Please note that the large scale of the typical\n"

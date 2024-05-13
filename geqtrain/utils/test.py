@@ -125,7 +125,7 @@ def assert_permutation_equivariant(
                 err = (out_orig[k] != out_perm[k]).max()
             else:
                 err = (torch.nan_to_num(out_orig[k]) - torch.nan_to_num(out_perm[k])).abs().max()
-            fail = not torch.allclose(out_orig[k], out_perm[k], atol=atol)
+            fail = not torch.allclose(torch.nan_to_num(out_orig[k]), torch.nan_to_num(out_perm[k]), atol=atol)
             if fail:
                 num_problems += 1
             messages.append(
@@ -169,9 +169,10 @@ def assert_AtomicData_equivariant(
     # Prevent pytest from showing this function in the traceback
     __tracebackhide__ = True
 
+    device = next(func.parameters()).device
     if not isinstance(data_in, list):
         data_in = [data_in]
-    data_in = [AtomicData.to_AtomicDataDict(d) for d in data_in]
+    data_in = [AtomicData.to_AtomicDataDict(d.to(device)) for d in data_in]
 
     # == Test permutation of graph nodes ==
     # since permutation is discrete and should not be data dependent, run only on one frame.
