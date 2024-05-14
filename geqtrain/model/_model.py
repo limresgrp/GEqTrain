@@ -61,6 +61,7 @@ def Model(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_irreps=None,
+                    eq_has_internal_weights=True,
                     has_bias=False,
                 ),
             ),

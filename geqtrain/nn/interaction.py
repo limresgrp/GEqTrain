@@ -117,8 +117,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # one per layer
         self.register_buffer(
             "env_sum_normalizations",
-            # dividing by sqrt(N)
-            torch.as_tensor([avg_num_neighbors] * num_layers).reciprocal(),
+            torch.as_tensor([5.] * num_layers),
         )
 
         latent =          functools.partial(latent,    **latent_kwargs)
@@ -138,7 +137,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Embed to the spharm * it as mul
         input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
         assert all(mul == 1 for mul, _ in input_edge_eq_irreps)
-        
+
         env_embed_irreps = o3.Irreps([(env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
         assert (
             env_embed_irreps[0].ir == SCALAR
@@ -154,7 +153,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_irreps = o3.Irreps(
                 [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps if ir.l in [0] + out_irreps.ls]
             )
-        self.out_irreps = out_irreps
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges
         # (possibly embedded)
@@ -168,8 +166,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             ir_out = env_embed_irreps
             # Create higher order terms cause there are more TPs coming
             if layer_idx == self.num_layers - 1:
-                # No more TPs follow this, so only need ls that are present in self.out_irreps
-                ir_out = o3.Irreps([ir for ir in env_embed_irreps if ir.ir.l in self.out_irreps.ls])
+                # No more TPs follow this, so only need ls that are present in out_irreps
+                ir_out = o3.Irreps([ir for ir in env_embed_irreps if ir.ir.l in out_irreps.ls])
 
             # Prune impossible paths
             ir_out = o3.Irreps(
@@ -186,26 +184,26 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # - end build irreps -
 
         # - Remove unneeded paths -
-        out_irreps = tps_irreps[-1]
-        new_tps_irreps = [out_irreps]
+        temp_out_irreps = tps_irreps[-1]
+        new_tps_irreps = [temp_out_irreps]
         for arg_irreps in reversed(tps_irreps[:-1]):
             new_arg_irreps = []
             for mul, arg_ir in arg_irreps:
                 for _, env_ir in env_embed_irreps:
-                    if any(i in out_irreps for i in arg_ir * env_ir):
+                    if any(i in temp_out_irreps for i in arg_ir * env_ir):
                         # arg_ir is useful: arg_ir * env_ir has a path to something we want
                         new_arg_irreps.append((mul, arg_ir))
                         # once its useful once, we keep it no matter what
                         break
             new_arg_irreps = o3.Irreps(new_arg_irreps)
             new_tps_irreps.append(new_arg_irreps)
-            out_irreps = new_arg_irreps
+            temp_out_irreps = new_arg_irreps
 
         assert len(new_tps_irreps) == len(tps_irreps)
         tps_irreps = list(reversed(new_tps_irreps))
         del new_tps_irreps
 
-        assert tps_irreps[-1].lmax == self.out_irreps.lmax
+        assert tps_irreps[-1].lmax == out_irreps.lmax
 
         tps_irreps_in = tps_irreps[:-1]
         tps_irreps_out = tps_irreps[1:]
@@ -491,7 +489,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             # Compute latents
             new_latents = latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
             # Apply cutoff, which propagates through to everything else
-            new_latents = cutoff_coeffs[active_edges].unsqueeze(-1) * new_latents
+            norm_const = self.env_sum_normalizations[layer_index]
+            new_latents = cutoff_coeffs[active_edges].unsqueeze(-1) * new_latents * norm_const
 
             if layer_index > 0:
                 this_layer_update_coeff = layer_update_coefficients[layer_index - 1]
@@ -524,7 +523,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # From the latents, compute the weights for active edges:
             weights = env_embed_mlp(latents[active_edges])
-
             w_index: int = 0
 
             if layer_index == 0:
@@ -556,16 +554,15 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(A, edge_center[active_edges], dim=0))
 
             # Pool over all attention-weighted edge features to build node local environment embedding
-            # norm_const = self.env_sum_normalizations[layer_index]
             local_env_per_node = scatter(
                 emb_latent,
                 edge_center[active_edges],
                 dim=0,
                 dim_size=num_nodes,
-            ) # * norm_const
+            )
             
             active_node_centers = edge_center[active_edges].unique()
-            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers]) # / norm_const
+            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
             
             # expanded_features_per_active_atom: torch.Tensor = prod(
             #     node_feats=local_env_per_active_atom, sc=None, node_attrs=node_invariants[active_node_centers]
@@ -603,6 +600,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             layer_index += 1
 
         # - final layer -
+        n_scalars = self._n_scalar_outs[layer_index- 1]
+
+        # - output non-scalar values
+        out_features[active_edges, :, n_scalars:] = features[..., n_scalars:]
+        out_features = self.reshape_back_features(out_features)
 
         # - output scalar values
         cutoff_coeffs = cutoff_coeffs_all[layer_index]
@@ -610,14 +612,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
         scalars = self.final_latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
         
-        n_scalars = self._n_scalar_outs[layer_index- 1]
-        out_features[active_edges, :, :n_scalars] = scalars.reshape(len(scalars), -1, n_scalars)
+        out_features[active_edges, :n_scalars * self.env_embed_mul] = scalars
 
-        # - output non-scalar values
-        out_features[active_edges, :, n_scalars:] = features[:, :, n_scalars:]
-
-        # data[self.out_field] = out_features # self.reshape_back_features(out_features)
-        data[self.out_field] = self.reshape_back_features(out_features)
+        data[self.out_field] = out_features
         return data
     
     def normalize_weights(self) -> None:

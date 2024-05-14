@@ -869,9 +869,13 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.max_gradient_norm
                     )
+                
+                for n, param in self.model.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        param.grad[torch.isnan(param.grad)] = 0
 
                 self.optim.step()
-                # self.model.normalize_weights()
+                self.model.normalize_weights()
 
                 if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
                     self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)

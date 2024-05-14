@@ -22,6 +22,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         readout_latent_kwargs={},
         per_species_bias=None,
         has_bias=True,
+        eq_has_internal_weights=False,
         irreps_in=None,
     ):
         super().__init__()
@@ -30,6 +31,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.has_inv_out = False
         self.has_eq_out = False
         self.has_bias = has_bias
+        self.eq_has_internal_weights = eq_has_internal_weights
 
         in_irreps = irreps_in[field]
         out_irreps = (
@@ -82,16 +84,17 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             self.eq_readout = Linear(
                     eq_linear_input_irreps,
                     eq_linear_output_irreps,
-                    shared_weights=False,
-                    internal_weights=False,
+                    shared_weights=self.eq_has_internal_weights,
+                    internal_weights=self.eq_has_internal_weights,
                     pad_to_alignment=1,
                 )
             
-            self.weights_emb = readout_latent(
-                mlp_input_dimension=self.n_scalars_in,
-                mlp_output_dimension=self.eq_readout.weight_numel,
-                **readout_latent_kwargs,
-            )
+            if not self.eq_has_internal_weights:
+                self.weights_emb = readout_latent(
+                    mlp_input_dimension=self.n_scalars_in,
+                    mlp_output_dimension=self.eq_readout.weight_numel,
+                    **readout_latent_kwargs,
+                )
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         else:
             assert in_irreps.dim == self.n_scalars_in, (
@@ -118,9 +121,12 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             out_features[:, :self.n_scalars_out] += inv_features
 
         if self.has_eq_out:
-            weights = self.weights_emb(features[:, :self.n_scalars_in])
             eq_features = self.reshape_in(features[:, self.n_scalars_in:])
-            eq_features = self.eq_readout(eq_features, weights)
+            if self.eq_has_internal_weights:
+                eq_features = self.eq_readout(eq_features)
+            else:
+                weights = self.weights_emb(features[:, :self.n_scalars_in])
+                eq_features = self.eq_readout(eq_features, weights)
             out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)
         
         data[self.out_field] = out_features
