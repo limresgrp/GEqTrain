@@ -10,6 +10,18 @@ of the excellent [`e3nn`](https://github.com/e3nn/e3nn) general framework for bu
 We have adapted the code to work on generic Equivariant Graphs, detaching from NequIP original purpose of learning interatomic potentials.
 To improve generalizability and to simplify installation, we include and modify here a subset of `nequip` that is neccessary for our code.
 
+To use first create a conda environment:
+
+```
+conda create --name geqtrain python=3.10
+conda activate geqtrain
+```
+then run:
+```
+chmod +x install.sh
+./install.sh
+```
+
 We are grateful for their contribution to the open-source community.
 
   [1] Batzner, S., Musaelian, A., Sun, L. et al. E(3)-equivariant graph neural networks for data-efficient and accurate interatomic potentials. Nat Commun 13, 2453 (2022). https://doi.org/10.1038/s41467-022-29939-5

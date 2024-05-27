@@ -26,7 +26,7 @@ def Model(
 
     if "l_max" in config:
         l_max = int(config["l_max"])
-        parity_setting = config.get("parity", "o3")
+        parity_setting = config.get("parity", "o3_full")
         assert parity_setting in ("o3_full", "so3")
         irreps_edge_sh = repr(
             o3.Irreps.spherical_harmonics(

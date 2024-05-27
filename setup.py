@@ -29,7 +29,6 @@ setup(
         "numpy",
         "tqdm",
         "torch>=1.10.0,<=1.13,!=1.9.0",
-        "pytorch-scatter", # conda install pytorch-scatter -c pyg
         "wandb>=0.13",
         "e3nn>=0.4.4,<0.6.0",
         "pyyaml",
