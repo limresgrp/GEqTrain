@@ -179,7 +179,7 @@ def fine_tune(config):
                 "n_train", "n_val", "batch_size", "validation_batch_size",
                 "max_epochs", "learning_rate", "loss_coeffs", "device",
                 "optimizer_name", "optimizer_params", "metrics_components",
-                "lr_scheduler_name", "lr_scheduler_patience", "lr_scheduler_factor",
+                "lr_scheduler_name", "lr_scheduler_patience", "lr_scheduler_factor", "noise",
             ]:
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
@@ -242,19 +242,11 @@ def restart(config):
     # compare dictionary to config and update stop condition related arguments
     for k in config.keys():
         if config[k] != dictionary.get(k, ""):
-            if k == "max_epochs":
+            if k in ["max_epochs", "loss_coeffs", "learning_rate",
+                     "metrics_components", "noise"]:
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif k.startswith("early_stop"):
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif k == "loss_coeffs":
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif k == "learning_rate":
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif k == "metrics_components":
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
             elif isinstance(config[k], type(dictionary.get(k, ""))):
