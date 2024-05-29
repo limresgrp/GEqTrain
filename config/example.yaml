@@ -22,7 +22,7 @@ num_basis: 8
 
 # symmetry
 l_max: 2
-parity: o3
+parity: o3_full
 
 # layers:
 num_layers: 2
@@ -40,6 +40,9 @@ latent_mlp_nonlinearity: ssp
 product_correlation: 2   # Maximum correlation order of tensor product expansion
 
 # - end layers -
+
+# default of pre_pooling_readout readout
+pre_pooling_readout_mlp_latent_dimensions: [256, 256]
 
 # Final MLP to go from latent space to node output:
 readout_mlp_latent_dimensions: [256, 256]
