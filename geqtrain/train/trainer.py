@@ -242,7 +242,8 @@ class Trainer:
         # what do we train on?
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
-            assert set(train_on_keys) == set(self.train_on_keys)
+            if set(train_on_keys) != set(self.train_on_keys):
+                logging.info("Different training keys found.")
         
         # initialize n_train and n_val
         self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
