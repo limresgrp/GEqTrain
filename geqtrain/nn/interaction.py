@@ -35,7 +35,7 @@ def pick_mpl_function(func):
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
     # saved params
     num_layers: int
-    
+
     node_invariant_field: str
     edge_invariant_field: str
     edge_equivariant_field: str
@@ -66,7 +66,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed_multiplicity: int = 64,
         head_dim: int = 32,
         product_correlation: int = 3,
-        
+
         # MLP parameters:
         env_embed=ScalarMLPFunction,
         env_embed_kwargs={},
@@ -74,7 +74,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         two_body_latent_kwargs={},
         latent=ScalarMLPFunction,
         latent_kwargs={},
-        
+
         # Performance parameters:
         pad_to_alignment: int = 1,
         sparse_mode: Optional[str] = None,
@@ -89,7 +89,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             num_layers >= 1
         )  # zero layers is "two body", but we don't need to support that fallback case
         self.num_layers = num_layers
-        
+
         self.node_invariant_field = node_invariant_field
         self.edge_invariant_field = edge_invariant_field
         self.edge_equivariant_field = edge_equivariant_field
@@ -295,7 +295,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # the linear acts after the extractor
             linear_out_irreps = out_irreps if layer_idx == self.num_layers - 1 else env_embed_irreps
-            
+
             _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
             self._features_n_scalar_outs.append(_features_n_scalar_outs)
 
@@ -422,7 +422,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         num_edges: int = len(edge_invariants)
         num_nodes: int = len(node_invariants)
-        
+
         # pre-declare variables as Tensors for TorchScript
         scalars = self._zero
         coefficient_old = scalars
@@ -563,10 +563,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 dim=0,
                 dim_size=num_nodes,
             )
-            
+
             active_node_centers = edge_center[active_edges].unique()
             local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
-            
+
             expanded_features_per_active_atom: torch.Tensor = prod(
                 node_feats=local_env_per_active_atom,
                 node_attrs=node_invariants[active_node_centers],
@@ -579,7 +579,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             # Copy to get per-edge
             # Large allocation, but no better way to do this:
             local_env_per_active_edge = expanded_features_per_node[edge_center[active_edges]]
-            
+
             # Now do the TP
             # recursively tp current features with the environment embeddings
             features = tp(features, local_env_per_active_edge)
@@ -616,12 +616,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         prev_mask = cutoff_coeffs[active_edges] > 0
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
         scalars = self.final_latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
-        
+
         out_features[active_edges, :self.out_multiplicity * features_n_scalars] = scalars
 
         data[self.out_field] = out_features
         return data
-    
+
     def normalize_weights(self) -> None:
         for name, param in self.named_parameters():
             if 'weight' in name:
