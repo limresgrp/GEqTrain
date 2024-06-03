@@ -50,19 +50,23 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
     def __init__(
         self,
+
         # required params
         num_layers: int,
         r_max: float,
         out_irreps: Optional[Union[o3.Irreps, str]] = None,
         output_hidden_irreps: bool = False,
         avg_num_neighbors: Optional[float] = None,
+
         # cutoffs
         PolynomialCutoff_p: float = 6,
+
         # general hyperparameters:
         node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
         edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
         edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+
         env_embed_multiplicity: int = 64,
         head_dim: int = 32,
         product_correlation: int = 3,
@@ -78,6 +82,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Performance parameters:
         pad_to_alignment: int = 1,
         sparse_mode: Optional[str] = None,
+
         # Other:
         irreps_in=None,
     ):
@@ -111,8 +116,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             ],
         )
 
-        # register class buffers
-        # The residual update at layer L is computed as a weighted sum: x_ij,layer = (1/sqrt(1 + α**2)) * x_ij,layer−1 + (α/sqrt(1 + α**2) * x_ij,layer ; α = 1/2
         # for normalization of features: one per layer, eg: torch.as_tensor([5.] * 2) = tensor([5., 5.,)]
         self.register_buffer("env_sum_normalizations", torch.as_tensor([5.] * num_layers))
         self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
@@ -126,11 +129,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         latent = _init_layer(latent, latent_kwargs)
 
 
-        self.latents        = torch.nn.ModuleList([]) # self.latents: list of traditional MLPs that act on scalars, thus no need for them to be equivariant
-        self.env_embed_mlps = torch.nn.ModuleList([])
-        self.tps            = torch.nn.ModuleList([]) # self.tps: list of tensor products modules
-        self.linears        = torch.nn.ModuleList([])
-        self.env_linears    = torch.nn.ModuleList([])
+        self.latents        = torch.nn.ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant
+        self.env_embed_mlps = torch.nn.ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant
+        self.tps            = torch.nn.ModuleList([]) # list of tensor products modules
+        self.linears        = torch.nn.ModuleList([]) # list of equivariant linear layers to embed current geom tensors
+        self.env_linears    = torch.nn.ModuleList([]) # list of equivariant linear layers to embed current scalars in
 
         # Embed to the spharm * it as mul
         input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
@@ -276,6 +279,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 pad_to_alignment=pad_to_alignment,
                 sparse_mode=sparse_mode,
             )
+
             self.tps.append(tp)
 
             generate_n_weights = (self._env_weighter.weight_numel) # Make env embed mlp, the weight for the edge embedding
@@ -390,27 +394,49 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             }
         )
 
+    def apply_residual_connection(self, new_latents, latents):
+        '''applies residual path
+        At init, we assume new and old to be approximately uncorrelated
+        Thus their variances add
+        we always want the latent space to be normalized to variance = 1.0,
+        because it is critical for learnability. Still, we want to preserve
+        the _relative_ magnitudes of the current latent and the residual update
+        to be controled by `this_layer_update_coeff`
+        Solving the simple system for the two coefficients:
+            a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+        gives:
+            a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+        rsqrt is reciprocal sqrt
+        The residual update at layer L is computed as a weighted sum above
+        Note that it only runs when there are latents to resnet with, so not at the first layer'''
+
+        this_layer_update_coeff = self.layer_update_coefficients[self.layer_index - 1]
+        coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
+        coefficient_new = this_layer_update_coeff * coefficient_old
+        return (coefficient_old * latents) + (coefficient_new * new_latents)
+
+
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
         edge_center     = data[AtomicDataDict.EDGE_INDEX_KEY][0] # starting nodes idxs
         edge_neighbor   = data[AtomicDataDict.EDGE_INDEX_KEY][1] # ending nodes idxs
-        edge_length     = data[AtomicDataDict.EDGE_LENGTH_KEY]   # edge lenghts
-        edge_attr       = data[self.edge_equivariant_field]      # angular embedding of displacement vectors: SH enc
+        edge_length     = data[AtomicDataDict.EDGE_LENGTH_KEY]   # edge lengths
+        edge_attr       = data[self.edge_equivariant_field]      # angular embedding of displacement vectors: SH enc Lmax=2
         edge_invariants = data[self.edge_invariant_field]        # radial embedding of displacement vectors: BESSEL(8) enc
-        node_invariants = data[self.node_invariant_field]        # atom types
-        features        = edge_attr                              # The nonscalar features. Initially, the edge data.
+        node_invariants = data[self.node_invariant_field]        # 1hot atom types
+        features        = edge_attr                              # The non-scalar features. Initially, the edge data.
         num_edges       = len(edge_invariants)
         num_nodes       = len(node_invariants)
 
         # pre-declare variables as Tensors for TorchScript
-        scalars = self._zero  # torch.as_tensor(0.0) #! replaceable?
-        coefficient_old, coefficient_new = scalars, scalars
-
-        # compute the sigmoids vectorized instead of each loop, params for resnet updates
-        layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
+        scalars = self._zero  # initially torch.as_tensor(0.0)
+        coefficient_old, coefficient_new = scalars, scalars # all passed by-copy, all indipendent instances
 
         # Vectorized precompute per-layer treshold cutoffs
         cutoff_coeffs_all = polynomial_cutoff(edge_length, self.per_layer_cutoffs, p=self.polynomial_cutoff_p)
+
+        # compute the sigmoids vectorized instead of each loop, Params for resnet updates
+        self.layer_update_coefficients = self._latent_resnet_update_params.sigmoid() # initially outs a tensor of shape (self.num_layers) filled with .5, learnt coeffs
 
         # Initialize state
         out_features = torch.zeros(
@@ -502,9 +528,31 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     coefficient_new * new_latents,
                 )
             else:
-                # Normal (non-residual) update
-                # index_copy replaces, unlike index_add
-                latents = torch.index_copy(latents, 0, active_edges, new_latents)
+                latents = self.apply_residual_connection(new_latents, latents)
+
+            # # residual path
+            # if layer_index > 0:
+            #     this_layer_update_coeff = layer_update_coefficients[layer_index - 1]
+            #     # At init, we assume new and old to be approximately uncorrelated
+            #     # Thus their variances add
+            #     # we always want the latent space to be normalized to variance = 1.0,
+            #     # because it is critical for learnability. Still, we want to preserve
+            #     # the _relative_ magnitudes of the current latent and the residual update
+            #     # to be controled by `this_layer_update_coeff`
+            #     # Solving the simple system for the two coefficients:
+            #     #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+            #     # gives:
+            #     #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+            #     # rsqrt is reciprocal sqrt
+            #     # The residual update at layer L is computed as a weighted sum above
+            #     coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
+            #     coefficient_new = this_layer_update_coeff * coefficient_old
+            #     # Residual update
+            #     # Note that it only runs when there are latents to resnet with, so not at the first layer
+            #     # index_add adds only to the edges for which we have something to contribute
+            #     latents = (coefficient_old * latents) + (coefficient_new * new_latents)
+            # else: # non-residual update
+            #     latents = new_latents
 
             # From the latents, compute the weights for active edges: (weights for tp)
             weights = env_embed_mlp(latents[active_edges])
