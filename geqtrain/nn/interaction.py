@@ -140,10 +140,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed       = _init_layer(env_embed, env_embed_kwargs)
         latent          = _init_layer(latent, latent_kwargs)
 
-        self.latents        = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant
-        self.env_embed_mlps = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant
-        self.tps            = ModuleList([]) # list of tensor products modules
-        self.linears        = ModuleList([]) # list of equivariant linear layers to embed current geom tensors
+        self.latents        = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant, acts on scalar in step 1 updates invariant edge_feature
+        self.env_embed_mlps = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant, acts on scalar in step 2 embeds invariant edge_feature to tp weights
+        self.tps            = ModuleList([]) # list of tensor products modules, the actual tensor product module
+        self.linears        = ModuleList([]) # list of equivariant linear layers to embed current geom tensors, acts on geom tens that are output of tp
         self.env_linears    = ModuleList([]) # list of equivariant linear layers to embed current scalars in
 
         # Embed to the spharm * it as mul
@@ -230,7 +230,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 Linear(
                     [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps],
                     [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps],
-                    shared_weights=True, internal_weights=True))
+                    shared_weights=True,
+                    internal_weights=True
+                )
+            )
 
             # Make TP
             tmp_i_out: int = 0
@@ -252,16 +255,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             assert all(ir == SCALAR for _, ir in full_out_irreps[:n_scalar_outs])
 
             tp = Contracter(
-                irreps_in1=o3.Irreps(
-                    [(env_embed_multiplicity, ir) for _, ir in arg_irreps]
-                ),
-                irreps_in2=o3.Irreps(
-                    [(env_embed_multiplicity, ir)
-                     for _, ir in env_embed_irreps]
-                ),
-                irreps_out=o3.Irreps(
-                    [(env_embed_multiplicity, ir) for _, ir in full_out_irreps]
-                ),
+                irreps_in1=o3.Irreps([(env_embed_multiplicity, ir) for _, ir in arg_irreps]),
+                irreps_in2=o3.Irreps([(env_embed_multiplicity, ir)for _, ir in env_embed_irreps]),
+                irreps_out=o3.Irreps([(env_embed_multiplicity, ir) for _, ir in full_out_irreps]),
                 instructions=instr,
                 connection_mode=("uuu"), # non fully connected  ma tp slo tra stesse l
                 shared_weights=False,
@@ -283,16 +279,25 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 Linear(
                     full_out_irreps,
                     full_out_irreps if layer_idx == self.num_layers - 1 else env_embed_irreps,
-                    shared_weights=True, internal_weights=True, pad_to_alignment=pad_to_alignment))
+                    shared_weights=True,
+                    internal_weights=True,
+                    pad_to_alignment=pad_to_alignment
+                )
+            )
 
             if layer_idx == 0: # at layer0 no invariants from previous TPs
                 self.latents.append(
                     two_body_latent(
                         mlp_input_dimension=((
                             2 * self.irreps_in[self.node_invariant_field].num_irreps  # Node invariants for center and neighbor (chemistry)
-                            + self.irreps_in[self.edge_invariant_field].num_irreps)), # Plus edge invariants for the edge (radius).
-                        mlp_output_dimension=None,  # weight_norm=True, # dim=0,
-                    ))
+                            + self.irreps_in[self.edge_invariant_field].num_irreps    # Plus edge invariants for the edge (radius)
+                            )
+                        ),
+                        mlp_output_dimension=None,
+                        # weight_norm=True,
+                        # dim=0,
+                    )
+                )
                 self._latent_dim = self.latents[-1].out_features
             else:
                 self.latents.append(
@@ -300,8 +305,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                         mlp_input_dimension=(
                             self.latents[-1].out_features                                   # the embedded latent invariants from the previous layer(s)
                             + env_embed_multiplicity * self._n_scalar_outs[layer_idx - 1]), # and the invariants extracted from the last layer's TP:
-                        mlp_output_dimension=None,  # weight_norm=True, # dim=0,
-                    ))
+                        mlp_output_dimension=None,
+                        # weight_norm=True,
+                        # dim=0,
+                    )
+                )
 
             # the env embed MLP takes the last latent's output as input and outputs enough weights for the env embedder
             self.env_embed_mlps.append(
@@ -316,7 +324,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             mlp_input_dimension=(
                  self.latents[-1].out_features                            # the embedded latent invariants from the previous layer(s)
                 + env_embed_multiplicity * self._n_scalar_outs[layer_idx] # and the invariants extracted from the last layer's TP:
-            ), mlp_output_dimension=env_embed_multiplicity * self._n_scalar_outs[layer_idx], # weight_norm=True, # dim=0,
+            ),
+            mlp_output_dimension=env_embed_multiplicity * self._n_scalar_outs[layer_idx],
+            # weight_norm=True,
+            # dim=0,
         )
 
         self.reshape_back_features = inverse_reshape_irreps(full_out_irreps)
@@ -361,6 +372,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         return (self._coefficient_old * latents) + (self._coefficient_new * new_latents)
 
 
+    def normalize_weights(self) -> None:
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                normalized_param = F.normalize(param, p=2, dim=0)
+                # Assign normalized parameter back to the model
+                param.data.copy_(normalized_param)#
+
+
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
         # * ---- SETUP ---- #
@@ -371,78 +390,82 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_attr: float        = data[self.edge_equivariant_field]      # angular embedding of displacement vectors: SH enc Lmax=2; shape: ([num_edges, 9]) (eg 9 if Lmax=2)
         edge_invariants: float  = data[self.edge_invariant_field]        # radial embedding of displacement vectors: BESSEL(8) enc; shape: ([num_edges, 8]) 8= number of bessel for encoding
         node_invariants: int    = data[self.node_invariant_field]        # 1-hot atom types; shape ([2385, 375]), 375 number of type of atoms (look at yaml for more info)
-        features: float         = edge_attr                              # The non-scalar features. Initially, the edge data; shape: ([num_edges, 9])
+        features: float         = edge_attr                              # The non-scalar features. Initially, the edge sh; shape: ([num_edges, 9])
         num_edges: int          = len(edge_invariants)
         num_nodes: int          = len(node_invariants)
 
         # Vectorized precompute per-layer treshold cutoffs, must be called in frwd cuz batch-dependant in edge_length
         cutoff_coeffs_all = polynomial_cutoff(edge_length, self.per_layer_cutoffs, p=self.polynomial_cutoff_p) # shape: ([num_layers x num_edges])
-        # in this case the cutoff is the same for every layer -> all the num_layers are euqual
+        # in this case the cutoff is the same for every layer -> all the num_layers are equal
 
-        # Initialize state (for torchscript?)
-        out_features = torch.zeros((num_edges, self.env_embed_mul, sum([irr.ir.dim for irr in self.out_irreps])), dtype=torch.get_default_dtype(), device=edge_attr.device)
-        latents      = torch.zeros((num_edges, self._latent_dim), dtype=edge_attr.dtype, device=edge_attr.device)
+        # compute the sigmoids vectorized instead of each loop, weights used of the lc of resnet update
+        self.layer_update_coefficients = self._latent_resnet_update_params.sigmoid() # shape: ([num_layers]), learnable, initialized as 0s -> w1-1/2, w2=1/2
 
-        # input data: cat(Z_i, Z_j, ||r_ij||)
-        latent_inputs_to_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim = -1)
+        # Initialize state/container for output
+        out_features = torch.zeros((num_edges, self.env_embed_mul, sum([irr.ir.dim for irr in self.out_irreps])), dtype=torch.get_default_dtype(), device=edge_attr.device) # self.env_embed_mul=64; out: 64x1o
 
         # * ---- FORWARD ---- #
+        # input data: cat(Z_i, Z_j, ||r_ij||), only invariant info, first radial input
+        latent_inputs_to_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim = -1) # (num_edges, 8+375*2)
+
         layer_index: int = 0
         # iterable where idx:i returns a set of nn.Modules used in layer i
-        _layers = zip(self.latents, self.env_embed_mlps, self.env_linears, self.linears, self.tps) # must be reinstanciated at each forwarad, can't be stored as dmember cuz it gets "consumed"
+        _layers = zip(self.latents, self.env_embed_mlps, self.env_linears, self.linears, self.tps) # must be reinstanciated at each frwd, can't be stored as dmember cuz it gets "consumed"
         for latent, env_embed_mlp, env_linear, linear, tp in _layers: # iters through layer0, layer1, ..., layer_max-1
 
-            new_latents = latent(latent_inputs_to_cat) # process latents/scalars (blue track); latent: nn.ModuleList of normal MLPs (ok since it acts only on scalars)
+            # * step 1 : mlp -> scalings -> residual
+            new_latents = latent(latent_inputs_to_cat) # process latents/scalars (blue track); latent: nn.ModuleList of normal MLPs (ok since it acts only on scalars) # at layer0: torch.Size([num_edges, 256])
 
-            # Apply layer-wise cutoff
+            # Apply layer-wise cutoff scaling and normalization wrt num_neighbours scaling : feature are scaled wrt distance, and scaled wrt sqrt(avg(num_neighbours))
             cutoff_coeffs = cutoff_coeffs_all[layer_index] # proximity inductive bias
             norm_const = self.env_sum_normalizations[layer_index] # hyperparam: usually sqrt(avg(num_neighbours))
-            new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents * norm_const # apply scaling: feature are: reduced wrt distance, reduced if nodes have many neighbours
-            # new_latents -> edge matrix di pyg ongi riga  ij con corrispo ji
+            new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents * norm_const
 
             if layer_index == 0:
-                # compute the sigmoids vectorized instead of each loop, weights used of the lc of resnet update
-                self.layer_update_coefficients = self._latent_resnet_update_params.sigmoid() # shape: ([num_layers]), learnable, initialized as 0s -> w1-1/2, w2=1/2
                 latents = new_latents
             else:
-                latents = self.apply_residual_connection(layer_index, new_latents, latents)
+                latents = self.apply_residual_connection(layer_index, new_latents, latents) # does not change shape of latents
 
-            # From the latents, compute the weights for active edges: (weights for tp)
-            # weights is doubled lenght vector: 1/2 x layer ; 1/2 x embedding di sh
+            # * step 2 -> get tp weigths
+            # weights is doubled lenght vector: 1/2 x tp weights ; 1/2 x embedding for SH
             # for each SH take a weight and weighted lc across them, computed using out of two body mlp that actually outs a doubled lenght vector
-            weights = env_embed_mlp(latents)
+            weights = env_embed_mlp(latents) # torch.Size([num_edges, 448]): at l 0: 192 for encoding and 256 for tp
 
             w_index: int = 0
             if layer_index == 0:
-                # embed initial edge, splits vector, part1 for weight tp, rest for sh weight lin comb embedding
-                env_w_part1 = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # on last dim selects from w_index=0 self._env_weighter.weight_numel elements
-                w_index += self._env_weighter.weight_numel # use to get the second part of the tensor
-                features = self._env_weighter(features, env_w_part1) # ? used to weight the SH; features is edge_attr
+                # split weights
+                # part 1 = weights for tp
+                env_w_part1 = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # on last dim, selects from:w_index=0 to self._env_weighter.weight_numel elements (l0:192 els for embedding and )
+                w_index += self._env_weighter.weight_numel # use later to get the part2 of weights
+                features = self._env_weighter(features, env_w_part1) # used to weight the features=edge_attr=SH encodings, eq.9 of paper -> V^{ijL=0}_{nlp}; first angular input
 
-            # Extract weights for the environment builder
-            env_w_part2 = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # select the second part of env_w
-            emb_latent = self._env_weighter(edge_attr, env_w_part2)  # emb of sh; edge_attr is the y in tp, env_w w in tp fig 1
+            # part 2 = weights for the environment builder
+            env_w_part2 = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
+            emb_latent = self._env_weighter(edge_attr, env_w_part2)  # emb of sh; edge_attr is the Y in tp, env_w_part2 is the w in tp eq.13
 
             # Pool over all weighted edge features to build node *local environment embedding*
-            local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
+            local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes) # sum for k in N(i) of w_ik * SH(ik; shape: torch.Size([num_nodes, Ms, Lmax]); act as equivariant node feature vectors
 
-            active_node_centers = edge_center.unique()
-            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
+            active_node_centers = edge_center.unique() #! get source nodes new feature vectors, how come that this is much less then num_nodes?
+            local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers]) # equivariant lin layer to update node features
 
-            expanded_features_per_node = torch.zeros_like(local_env_per_node)
-            expanded_features_per_node[active_node_centers] = local_env_per_active_atom
+            expanded_features_per_node = torch.zeros_like(local_env_per_node) # recreate initial tensor with torch.Size([num_nodes, Ms, Lmax]);
+            expanded_features_per_node[active_node_centers] = local_env_per_active_atom # set into above the values of updated node features at correct (active) idxs
 
-            # Copy to get per-edge, Large allocation, but no better way to do this:
-            local_env_per_active_edge = expanded_features_per_node[edge_center]
+            # Copy to get per-edge, Large allocation, but no better way to do this
+            local_env_per_active_edge = expanded_features_per_node[edge_center] # expanded_features_per_node.shape: torch.Size([2385, 64, 9]), edge_center: torch.Size([65657]) of idxs
+            # copy of each equiv. node feature onto its outgoing edges. Used to: (features, local_env_per_active_edge)
 
             # * ---- TP ---- #
             # recursively tp current features with the environment embeddings
-            features = tp(features, local_env_per_active_edge)
+            features = tp(features, local_env_per_active_edge) #  mixes info across different Ls
+
+            # * ---- GEOM TENSORs to SCALARS ---- #
+            # Get invariants, features has shape [z][mul][k], scalars are first
+            scalars = features[..., :self._n_scalar_outs[layer_index]].reshape(features.shape[0], -1) # this must be done BEFORE linear!
 
             # * ---- LINEAR ON GEOM_TENSR ---- #
-            # Get invariants, features has shape [z][mul][k], scalars are first
-            scalars = features[..., :self._n_scalar_outs[layer_index]].reshape(features.shape[0], -1)
-            features = linear(features)
+            features = linear(features) # linear: Equivariant linear layer, mixes info between Ls of same freq
 
             # * ---- NEXT LAYER INPT ---- #
             # For layer2+, use the previous latents and scalars, This makes it deep
@@ -465,10 +488,3 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         return data
-
-    def normalize_weights(self) -> None:
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                normalized_param = F.normalize(param, p=2, dim=0)
-                # Assign normalized parameter back to the model
-                param.data.copy_(normalized_param)#
