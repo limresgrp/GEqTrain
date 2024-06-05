@@ -116,7 +116,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.node_invariant_field, self.edge_invariant_field = node_invariant_field, edge_invariant_field
         self.edge_equivariant_field, self.out_field, self.head_dim = edge_equivariant_field, out_field, head_dim
         self.env_embed_mul = env_embed_multiplicity
-        self.isqrtd = math.isqrt(head_dim)
         self.polynomial_cutoff_p = float(PolynomialCutoff_p)
 
         # precondition on input shapes, set up irreps, defines what are our input irreps and thus what are the info that this module needs from the irreps_dict
