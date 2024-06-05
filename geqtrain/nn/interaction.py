@@ -91,7 +91,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         head_dim: int = 32,
         product_correlation: int = 3,
 
-        # MLP parameters:
+        # * MLP parameters:
+        # the {$NAME}_kwargs are taken from the yaml:
+        # in the instanciate() all the keys listed in the yaml are read and compared with the names of the kwargs of self.__init__()
+        # if some key of the yaml begins with {$NAME}_param_name, then param_name is loaded in one of the dict below (eg: env_embed_kwargs, latent_kwargs)
+        # they are then used to call the ctor of the associated classes (eg env_embed kwdict and latent kwd are used to create their own instance of ScalarMLPFunction)
         env_embed=ScalarMLPFunction,
         env_embed_kwargs={},
         two_body_latent=ScalarMLPFunction,
@@ -142,9 +146,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         self.latents        = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant, acts on scalar in step 1 updates invariant edge_feature
         self.env_embed_mlps = ModuleList([]) # list of traditional MLPs that act on scalars, thus no need for them to be equivariant, acts on scalar in step 2 embeds invariant edge_feature to tp weights
+        self.env_linears    = ModuleList([]) # list of equivariant linear layers to embed current scalars in, used to update node feature in local env descriptor
         self.tps            = ModuleList([]) # list of tensor products modules, the actual tensor product module
         self.linears        = ModuleList([]) # list of equivariant linear layers to embed current geom tensors, acts on geom tens that are output of tp
-        self.env_linears    = ModuleList([]) # list of equivariant linear layers to embed current scalars in
 
         # Embed to the spharm * it as mul
         input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
@@ -225,7 +229,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # - Build Products and TPs -
         for layer_idx, (arg_irreps, out_irreps) in enumerate(zip(tps_irreps_in, tps_irreps_out)):
-            # Make the environment embed linear (red linear in fig 1)
+            # Make the environment embed linear (not present in paper's fig 1)
             self.env_linears.append(
                 Linear(
                     [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps],
@@ -274,7 +278,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if layer_idx == 0:
                 generate_n_weights += self._env_weighter.weight_numel # need weights to embed the edge itself, this is because the 2 body latent is mixed in with the first layer in terms of code
 
-            # the linear acts after the extractor
+            # the linear acts after the extractor (red Linear in paper's fig1)
             self.linears.append(
                 Linear(
                     full_out_irreps,
@@ -287,10 +291,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             if layer_idx == 0: # at layer0 no invariants from previous TPs
                 self.latents.append(
-                    two_body_latent(
+                    two_body_latent( #* the call to the ctor of ScalarMLPFunction that define this module
                         mlp_input_dimension=((
-                            2 * self.irreps_in[self.node_invariant_field].num_irreps  # Node invariants for center and neighbor (chemistry)
-                            + self.irreps_in[self.edge_invariant_field].num_irreps    # Plus edge invariants for the edge (radius)
+                            2 * self.irreps_in[self.node_invariant_field].num_irreps  # Node invariants for center and neighbor (chemistry): Zi,Zi
+                            + self.irreps_in[self.edge_invariant_field].num_irreps    # Plus edge invariants for the edge (radius): bessel(r_ij)
                             )
                         ),
                         mlp_output_dimension=None,
@@ -303,7 +307,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 self.latents.append(
                     latent(
                         mlp_input_dimension=(
-                            self.latents[-1].out_features                                   # the embedded latent invariants from the previous layer(s)
+                            self.latents[-1].out_features                                   # the embedded latent invariants from the previous layer 448
                             + env_embed_multiplicity * self._n_scalar_outs[layer_idx - 1]), # and the invariants extracted from the last layer's TP:
                         mlp_output_dimension=None,
                         # weight_norm=True,
@@ -315,7 +319,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.env_embed_mlps.append(
                 env_embed(
                     mlp_input_dimension=self.latents[-1].out_features,
-                    mlp_output_dimension=generate_n_weights,  # weight_norm=True, # dim=0,
+                    mlp_output_dimension=generate_n_weights,
+                    # weight_norm=True,
+                    # dim=0,
                 ))
 
         # -- end loop ---
@@ -437,7 +443,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 # part 1 = weights for tp
                 env_w_part1 = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # on last dim, selects from:w_index=0 to self._env_weighter.weight_numel elements (l0:192 els for embedding and )
                 w_index += self._env_weighter.weight_numel # use later to get the part2 of weights
-                features = self._env_weighter(features, env_w_part1) # used to weight the features=edge_attr=SH encodings, eq.9 of paper -> V^{ijL=0}_{nlp}; first angular input
+                features = self._env_weighter(features, env_w_part1) # used to weight the features=edge_attr=SH encodings, eq.9 of paper -> V^{ijL=0}_{nlp}; initially just angular info of input
 
             # part 2 = weights for the environment builder
             env_w_part2 = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
@@ -458,14 +464,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # * ---- TP ---- #
             # recursively tp current features with the environment embeddings
-            features = tp(features, local_env_per_active_edge) #  mixes info across different Ls
+            features = tp(features, local_env_per_active_edge) # mixes info across different Ls between the V/equivariant updated descriptors of the sys and local env descriptors
 
             # * ---- GEOM TENSORs to SCALARS ---- #
             # Get invariants, features has shape [z][mul][k], scalars are first
             scalars = features[..., :self._n_scalar_outs[layer_index]].reshape(features.shape[0], -1) # this must be done BEFORE linear!
 
             # * ---- LINEAR ON GEOM_TENSR ---- #
-            features = linear(features) # linear: Equivariant linear layer, mixes info between Ls of same freq
+            features = linear(features) # linear: Equivariant linear layer, mixes info between Ls of same freq, input features have been updated/agumented via local env descriptors
 
             # * ---- NEXT LAYER INPT ---- #
             # For layer2+, use the previous latents and scalars, This makes it deep

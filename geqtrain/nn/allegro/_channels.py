@@ -10,6 +10,9 @@ from e3nn.util.jit import compile_mode
 
 @compile_mode("script")
 class MakeWeightedChannels(torch.nn.Module):
+    '''
+    outputs a LC of input SH given some set of weights
+    '''
     weight_numel: int
     multiplicity_out: int
     _num_irreps: int
@@ -40,8 +43,8 @@ class MakeWeightedChannels(torch.nn.Module):
         self.weight_numel = len(irreps_in) * multiplicity_out
 
     def forward(self, edge_attr, weights):
-        # weights are [z, u, i]
-        # edge_attr are [z, i]
+        # weights are [z, u, i], tensor of scalars
+        # edge_attr are [z, i], geometric tensor
         # i runs over all irreps, which is why the weights need
         # to be indexed in order to go from [num_i] to [i]
         return torch.einsum(
