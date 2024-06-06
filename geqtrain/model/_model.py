@@ -53,6 +53,7 @@ def Model(
                     edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+                    out_irreps=None,
                 ),
             ),
             "pre_pooling_readout": (

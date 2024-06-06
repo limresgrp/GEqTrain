@@ -73,6 +73,7 @@ def parse_command_line(args=None):
     parser.add_argument(
         '--cartesian-fields',
         nargs='+',
+        default=[],
         help='List of fields resembling Cartesian coordinates, necessitating equivariant responses to translations and rotations.')
     args = parser.parse_args(args=args)
 

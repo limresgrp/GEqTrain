@@ -9,7 +9,7 @@ def _poly_cutoff(x: torch.Tensor, p: float = 6.0) -> torch.Tensor:
     out = out + (p * (p + 2.0) * torch.pow(x, p + 1.0))
     out = out - ((p * (p + 1.0) / 2) * torch.pow(x, p + 2.0))
 
-    return torch.round(out * (x < 1.0), decimals=6)
+    return out * (x < 1.0)
 
 @torch.jit.script
 def polynomial_cutoff(

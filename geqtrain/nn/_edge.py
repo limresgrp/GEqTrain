@@ -7,7 +7,7 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
-from .radial_basis import BesselBasis
+from .radial_basis import BesselBasis, BesselBasisVec
 from .cutoffs import PolynomialCutoff
 
 
