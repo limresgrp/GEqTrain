@@ -54,6 +54,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         num_layers: int,
         r_max: float,
         out_irreps: Optional[Union[o3.Irreps, str]] = None,
+        output_hidden_irreps: bool = False,
         avg_num_neighbors: Optional[float] = None,
         # cutoffs
         PolynomialCutoff_p: float = 6,
@@ -150,6 +151,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_irreps = env_embed_irreps
         else:
             out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+        if output_hidden_irreps:
+            out_irreps = o3.Irreps(
+                [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps if ir.l in [0] + out_irreps.ls]
+            )
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges
         # (possibly embedded)
