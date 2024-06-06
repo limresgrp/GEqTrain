@@ -452,10 +452,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         latent_inputs_to_cat = [
             node_invariants[edge_center],
             node_invariants[edge_neighbor],
-            edge_invariants * 10,
+            edge_invariants,
         ]
         # The nonscalar features. Initially, the edge data.
-        features = edge_attr * 10
+        features = edge_attr
 
         layer_index: int = 0
         # compute the sigmoids vectorized instead of each loop
