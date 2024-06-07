@@ -39,8 +39,8 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
 }
-_DEFAULT_GRAPH_FIELDS: Set[str] = {
-    
+_DEFAULT_GRAPH_FIELDS: Set[str] = { # register here target
+    'mu',
 }
 
 _NODE_FIELDS: Set[str] = set(_DEFAULT_NODE_FIELDS)
@@ -56,7 +56,13 @@ def register_fields(
     long_fields: Sequence[str] = [],
 ) -> None:
     r"""Register fields as being per-node, per-edge, or per-graph.
-
+    with this function we can register custom keys in the AtomicDataDict that can be
+    per-node, per-edge, or per-graph.
+    It register as key in the AtomicDataDict the values of the following yaml keys:
+        - node_fields
+        - edge_fields
+        - graph_fields
+        - long_fields
     """
     node_fields: set = set(node_fields)
     edge_fields: set = set(edge_fields)
@@ -294,7 +300,7 @@ def neighbor_list(
     Args:
         pos (shape [N, 3]): Positional coordinate; Tensor or numpy array. If Tensor, must be on CPU.
         r_max (float): Radial cutoff distance for neighbor finding.
-    
+
     Returns:
         edge_index (torch.tensor shape [2, num_edges]): List of edges.
     """

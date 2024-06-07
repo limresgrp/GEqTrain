@@ -38,7 +38,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         type_numbers = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         node_attrs = self.embeddings[type_numbers]
-        
+
         data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
         return data
 

@@ -228,7 +228,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             for key in self.force_fixed_keys:
                 if key in fields:
                     fixed_fields[key] = fields.pop(key)[0]
-            
+
             index_fields = {}
             for key in self.force_index_keys:
                 if key in fields:

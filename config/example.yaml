@@ -52,408 +52,37 @@ readout_mlp_nonlinearity: null
 out_irreps: '1x0e'
 
 # -- data --
+n_train: [1,1,1,1,1,1,1,1,0,0]
+
 directed_graph: true
 dataset_list:
   - dataset: npz
-    dataset_input: /storage_common/angiod/NMR/SHIFTX2/npz/train/
+    dataset_input: /storage_common/nobilm/qm_npz/small_sample/ # /storage_common/nobilm/qm_npz/train/
     key_mapping:
-      coords: pos
+      coords: pos # the blue keywords are the kwords present in the npz
       atom_types: node_types
-      chemical_shifts: node_output
+      graph_labels: mu # mu kword used in code
     npz_fixed_field_keys:
     - node_types
 
-validation_dataset_list:
-  - validation_dataset: npz
-    validation_dataset_input: /storage_common/angiod/NMR/SHIFTX2/npz/valid/
-    key_mapping:
-      coords: pos
-      atom_types: node_types
-      chemical_shifts: node_output
-    npz_fixed_field_keys:
-    - node_types
+# validation_dataset_list:
+#   - validation_dataset: npz
+#     validation_dataset_input: /storage_common/angiod/NMR/SHIFTX2/npz/valid/
+#     key_mapping:
+#       coords: pos
+#       atom_types: node_types
+#       chemical_shifts: node_output
+#     npz_fixed_field_keys:
+#     - node_types
 
-node_fields:
-  - node_output
+# node_fields:
+  # - node_output # da registrare in atom dict la lista dei label_name
+# edge_fields:
+graph_fields:
+  - mu
+# long_fields:
 
-num_types: 375
-
-per_species_bias:
-  - 0.0                  # ACE.c-carbonilico
-  - 0.0                  # ACE.c-metil-cap
-  - 0.0                  # ACE.h-metil-cap
-  - 0.0                  # ACE.o-carbonilico
-  - 53.11027526855469    # ALA.c-alpha
-  - 19.43563461303711    # ALA.c-beta-ter
-  - 177.7893524169922    # ALA.c-carbonilico
-  - 4.297379016876221    # ALA.h-alpha
-  - 8.285293579101562    # ALA.h-ammide
-  - 1.3245269060134888   # ALA.h-beta-metil
-  - 0.0                  # ALA.h-zeta-ammina
-  - 123.31277465820312   # ALA.n-ammide
-  - 0.0                  # ALA.o-carbonilico
-  - 0.0                  # ALA.o-delta-carbossile
-  - 56.41722869873047    # ARG.c-alpha
-  - 31.403934478759766   # ARG.c-beta
-  - 175.83250427246094   # ARG.c-carbonilico
-  - 43.21548080444336    # ARG.c-delta
-  - 27.264545440673828   # ARG.c-gamma
-  - 159.56800842285156   # ARG.c-zeta-guanidinio
-  - 4.34326696395874     # ARG.h-alpha
-  - 8.375524520874023    # ARG.h-ammide
-  - 1.710397481918335    # ARG.h-beta-alifatico
-  - 3.0636110305786133   # ARG.h-delta-alifatico
-  - 0.0                  # ARG.h-delta-carbossile
-  - 7.291372299194336    # ARG.h-epsilon-guanidinio
-  - 6.930000305175781    # ARG.h-eta-guanidinio
-  - 1.4634931087493896   # ARG.h-gamma-alifatico
-  - 0.0                  # ARG.h-zeta-ammina
-  - 120.83250427246094   # ARG.n-ammide
-  - 83.2767333984375     # ARG.n-epsilon-guanidinio
-  - 72.80000305175781    # ARG.n-eta-guanidinio
-  - 0.0                  # ARG.o-carbonilico
-  - 0.0                  # ARG.o-delta-carbossile
-  - 53.569969177246094   # ASN.c-alpha
-  - 38.89548873901367    # ASN.c-beta
-  - 175.38400268554688   # ASN.c-carbonilico
-  - 176.84608459472656   # ASN.c-gamma-ammide
-  - 4.6691670417785645   # ASN.h-alpha
-  - 8.38943862915039     # ASN.h-ammide
-  - 2.7435848712921143   # ASN.h-beta-alifatico
-  - 7.266150951385498    # ASN.h-delta-ammide
-  - 0.0                  # ASN.h-zeta-ammina
-  - 119.0635986328125    # ASN.n-ammide
-  - 112.65550994873047   # ASN.n-delta-ammide
-  - 0.0                  # ASN.o-carbonilico
-  - 0.0                  # ASN.o-delta-ammide
-  - 0.0                  # ASN.o-delta-carbossile
-  - 54.7941780090332     # ASP.c-alpha
-  - 41.21986770629883    # ASP.c-beta
-  - 176.57350158691406   # ASP.c-carbonilico
-  - 178.80181884765625   # ASP.c-gamma-carbossile
-  - 4.60697078704834     # ASP.h-alpha
-  - 8.267633438110352    # ASP.h-ammide
-  - 2.7178008556365967   # ASP.h-beta-alifatico
-  - 0.0                  # ASP.h-delta-carbossile
-  - 0.0                  # ASP.h-zeta-ammina
-  - 120.30787658691406   # ASP.n-ammide
-  - 0.0                  # ASP.o-carbonilico
-  - 0.0                  # ASP.o-delta-carbossile
-  - 58.26380920410156    # CYS.c-alpha
-  - 33.19011306762695    # CYS.c-beta
-  - 174.78500366210938   # CYS.c-carbonilico
-  - 4.512428283691406    # CYS.h-alpha
-  - 8.164510726928711    # CYS.h-ammide
-  - 2.8836734294891357   # CYS.h-beta-alifatico
-  - 0.0                  # CYS.h-delta-carbossile
-  - 2.2200000286102295   # CYS.h-gamma-solfuro
-  - 0.0                  # CYS.h-zeta-ammina
-  - 119.31439971923828   # CYS.n-ammide
-  - 0.0                  # CYS.o-carbonilico
-  - 0.0                  # CYS.o-delta-carbossile
-  - 0.0                  # CYS.s-gamma
-  - 0.0                  # CYX.c-alpha
-  - 0.0                  # CYX.c-beta
-  - 0.0                  # CYX.c-carbonilico
-  - 0.0                  # CYX.h-alpha
-  - 0.0                  # CYX.h-ammide
-  - 0.0                  # CYX.h-beta-alifatico
-  - 0.0                  # CYX.h-zeta-ammina
-  - 0.0                  # CYX.n-ammide
-  - 0.0                  # CYX.o-carbonilico
-  - 0.0                  # CYX.o-delta-carbossile
-  - 0.0                  # CYX.s-gamma-ponte
-  - 56.47858810424805    # GLN.c-alpha
-  - 29.36905860900879    # GLN.c-beta
-  - 176.45938110351562   # GLN.c-carbonilico
-  - 180.00677490234375   # GLN.c-delta-ammide
-  - 33.884178161621094   # GLN.c-gamma
-  - 4.26846170425415     # GLN.h-alpha
-  - 8.261277198791504    # GLN.h-ammide
-  - 2.00053071975708     # GLN.h-beta-alifatico
-  - 7.10780143737793     # GLN.h-epsilon-ammide
-  - 2.2671072483062744   # GLN.h-gamma-alifatico
-  - 0.0                  # GLN.h-zeta-ammina
-  - 119.28165435791016   # GLN.n-ammide
-  - 111.71244049072266   # GLN.n-epsilon-ammide
-  - 0.0                  # GLN.o-carbonilico
-  - 0.0                  # GLN.o-delta-carbossile
-  - 0.0                  # GLN.o-epsilon-ammide
-  - 57.376007080078125   # GLU.c-alpha
-  - 30.46649742126465    # GLU.c-beta
-  - 176.97486877441406   # GLU.c-carbonilico
-  - 183.0900115966797    # GLU.c-delta-carbossile
-  - 36.22421646118164    # GLU.c-gamma
-  - 4.23184061050415     # GLU.h-alpha
-  - 8.383648872375488    # GLU.h-ammide
-  - 1.9927663803100586   # GLU.h-beta-alifatico
-  - 0.0                  # GLU.h-epsilon-carbossile
-  - 2.2547709941864014   # GLU.h-gamma-alifatico
-  - 0.0                  # GLU.h-zeta-ammina
-  - 120.37889862060547   # GLU.n-ammide
-  - 0.0                  # GLU.o-carbonilico
-  - 0.0                  # GLU.o-delta-carbossile
-  - 0.0                  # GLU.o-epsilon-carbossile
-  - 45.57783508300781    # GLY.c-alpha
-  - 173.80470275878906   # GLY.c-carbonilico
-  - 3.9049830436706543   # GLY.h-alpha
-  - 8.265727996826172    # GLY.h-ammide
-  - 0.0                  # GLY.h-zeta-ammina
-  - 108.81089782714844   # GLY.n-ammide
-  - 0.0                  # GLY.o-carbonilico
-  - 0.0                  # GLY.o-delta-carbossile
-  - 0.0                  # HID.c-alpha
-  - 0.0                  # HID.c-beta
-  - 0.0                  # HID.c-carbonilico
-  - 0.0                  # HID.c-delta-aromatico
-  - 0.0                  # HID.c-epsilon-aromatico
-  - 0.0                  # HID.c-gamma-aromatico
-  - 0.0                  # HID.h-alpha
-  - 0.0                  # HID.h-ammide
-  - 0.0                  # HID.h-beta-alifatico
-  - 0.0                  # HID.h-delta-aromatico
-  - 0.0                  # HID.h-delta-aromatico-n-imidazolo
-  - 0.0                  # HID.h-epsilon-aromatico
-  - 0.0                  # HID.h-zeta-ammina
-  - 0.0                  # HID.n-ammide
-  - 0.0                  # HID.n-delta-aromatico
-  - 0.0                  # HID.n-epsilon-aromatico
-  - 0.0                  # HID.o-carbonilico
-  - 0.0                  # HID.o-delta-carbossile
-  - 0.0                  # HIE.c-alpha
-  - 0.0                  # HIE.c-beta
-  - 0.0                  # HIE.c-carbonilico
-  - 0.0                  # HIE.c-delta-aromatico
-  - 0.0                  # HIE.c-epsilon-aromatico
-  - 0.0                  # HIE.c-gamma-aromatico
-  - 0.0                  # HIE.h-alpha
-  - 0.0                  # HIE.h-ammide
-  - 0.0                  # HIE.h-beta-alifatico
-  - 0.0                  # HIE.h-delta-aromatico
-  - 0.0                  # HIE.h-epsilon-aromatico
-  - 0.0                  # HIE.h-epsilon-aromatico-n-imidazolo
-  - 0.0                  # HIE.h-zeta-ammina
-  - 0.0                  # HIE.n-ammide
-  - 0.0                  # HIE.n-delta-aromatico
-  - 0.0                  # HIE.n-epsilon-aromatico
-  - 0.0                  # HIE.o-carbonilico
-  - 0.0                  # HIE.o-delta-carbossile
-  - 56.30609893798828    # HIS.c-alpha
-  - 30.489404678344727   # HIS.c-beta
-  - 175.10643005371094   # HIS.c-carbonilico
-  - 120.59025573730469   # HIS.c-delta-aromatico
-  - 137.11514282226562   # HIS.c-epsilon-aromatico
-  - 132.2133331298828    # HIS.c-gamma-aromatico
-  - 4.628161430358887    # HIS.h-alpha
-  - 8.4335298538208      # HIS.h-ammide
-  - 3.0169782638549805   # HIS.h-beta-alifatico
-  - 6.835714340209961    # HIS.h-delta-aromatico
-  - 0.0                  # HIS.h-delta-aromatico-n-imidazolo
-  - 0.0                  # HIS.h-epsilon-aromatico
-  - 7.9195122718811035   # HIS.h-epsilon-aromatico-n-imidazolo
-  - 0.0                  # HIS.h-zeta-ammina
-  - 119.5801773071289    # HIS.n-ammide
-  - 220.81333923339844   # HIS.n-delta-aromatico
-  - 174.16712951660156   # HIS.n-epsilon-aromatico
-  - 0.0                  # HIS.o-carbonilico
-  - 0.0                  # HIS.o-delta-carbossile
-  - 61.300331115722656   # ILE.c-alpha
-  - 39.056549072265625   # ILE.c-beta
-  - 175.69851684570312   # ILE.c-carbonilico
-  - 13.712523460388184   # ILE.c-delta-ter
-  - 27.821266174316406   # ILE.c-gamma
-  - 17.577009201049805   # ILE.c-gamma-ter
-  - 4.25633430480957     # ILE.h-alpha
-  - 8.360087394714355    # ILE.h-ammide
-  - 1.702136754989624    # ILE.h-beta-alifatico
-  - 0.6170270442962646   # ILE.h-delta-metil
-  - 1.2060273885726929   # ILE.h-gamma-alifatico
-  - 0.735608696937561    # ILE.h-gamma-metil
-  - 0.0                  # ILE.h-zeta-ammina
-  - 121.46759796142578   # ILE.n-ammide
-  - 0.0                  # ILE.o-carbonilico
-  - 0.0                  # ILE.o-delta-carbossile
-  - 55.45677185058594    # LEU.c-alpha
-  - 42.62330627441406    # LEU.c-beta
-  - 176.9883270263672    # LEU.c-carbonilico
-  - 24.57936668395996    # LEU.c-delta-ter
-  - 26.977636337280273   # LEU.c-gamma
-  - 4.359945774078369    # LEU.h-alpha
-  - 8.277850151062012    # LEU.h-ammide
-  - 1.5167839527130127   # LEU.h-beta-alifatico
-  - 0.6648622751235962   # LEU.h-delta-metil
-  - 1.4890635013580322   # LEU.h-gamma-alifatico
-  - 0.0                  # LEU.h-zeta-ammina
-  - 122.03800201416016   # LEU.n-ammide
-  - 0.0                  # LEU.o-carbonilico
-  - 0.0                  # LEU.o-delta-carbossile
-  - 57.474769592285156   # LYS.c-alpha
-  - 32.927040100097656   # LYS.c-beta
-  - 177.0913543701172    # LYS.c-carbonilico
-  - 29.029441833496094   # LYS.c-delta
-  - 41.95163345336914    # LYS.c-epsilon
-  - 24.964998245239258   # LYS.c-gamma
-  - 4.241350173950195    # LYS.h-alpha
-  - 8.186821937561035    # LYS.h-ammide
-  - 1.7782396078109741   # LYS.h-beta-alifatico
-  - 1.6049398183822632   # LYS.h-delta-alifatico
-  - 2.9182229042053223   # LYS.h-epsilon-alifatico
-  - 1.3493633270263672   # LYS.h-gamma-alifatico
-  - 0.0                  # LYS.h-zeta-ammina
-  - 120.5531234741211    # LYS.n-ammide
-  - 34.099998474121094   # LYS.n-zeta-ammina
-  - 0.0                  # LYS.o-carbonilico
-  - 0.0                  # LYS.o-delta-carbossile
-  - 56.13690185546875    # MET.c-alpha
-  - 33.626407623291016   # MET.c-beta
-  - 175.93699645996094   # MET.c-carbonilico
-  - 17.162778854370117   # MET.c-epsilon-ter
-  - 32.382972717285156   # MET.c-gamma
-  - 4.522765636444092    # MET.h-alpha
-  - 8.397170066833496    # MET.h-ammide
-  - 2.0519859790802      # MET.h-beta-alifatico
-  - 1.8707143068313599   # MET.h-epsilon-metil
-  - 2.4543282985687256   # MET.h-gamma-alifatico
-  - 0.0                  # MET.h-zeta-ammina
-  - 120.00619506835938   # MET.n-ammide
-  - 0.0                  # MET.o-carbonilico
-  - 0.0                  # MET.o-delta-carbossile
-  - 0.0                  # MET.s-delta
-  - 0.0                  # NME.c-metil-cap
-  - 0.0                  # NME.h-ammide
-  - 0.0                  # NME.h-metil-cap
-  - 0.0                  # NME.n-ammide
-  - 58.231266021728516   # PHE.c-alpha
-  - 40.26386260986328    # PHE.c-beta
-  - 175.54335021972656   # PHE.c-carbonilico
-  - 131.8517303466797    # PHE.c-delta-aromatico
-  - 130.96221923828125   # PHE.c-epsilon-aromatico
-  - 139.2133331298828    # PHE.c-gamma-aromatico
-  - 129.62518310546875   # PHE.c-zeta-aromatico
-  - 4.685323238372803    # PHE.h-alpha
-  - 8.437987327575684    # PHE.h-ammide
-  - 2.9449687004089355   # PHE.h-beta-alifatico
-  - 7.013406276702881    # PHE.h-delta-aromatico
-  - 7.031961441040039    # PHE.h-epsilon-aromatico
-  - 0.0                  # PHE.h-zeta-ammina
-  - 6.926458835601807    # PHE.h-zeta-aromatico
-  - 119.97794342041016   # PHE.n-ammide
-  - 0.0                  # PHE.o-carbonilico
-  - 0.0                  # PHE.o-delta-carbossile
-  - 63.59611892700195    # PRO.c-alpha
-  - 31.966495513916016   # PRO.c-beta
-  - 176.95045471191406   # PRO.c-carbonilico
-  - 50.58147430419922    # PRO.c-delta-pro
-  - 27.33606719970703    # PRO.c-gamma
-  - 4.3648810386657715   # PRO.h-alpha
-  - 1.983132004737854    # PRO.h-beta-alifatico
-  - 3.672480583190918    # PRO.h-delta-alifatico-pro
-  - 1.9532556533813477   # PRO.h-gamma-alifatico
-  - 0.0                  # PRO.h-zeta-ammina
-  - 132.43714904785156   # PRO.n-ammide
-  - 0.0                  # PRO.o-carbonilico
-  - 0.0                  # PRO.o-delta-carbossile
-  - 58.95942687988281    # SER.c-alpha
-  - 64.45237731933594    # SER.c-beta
-  - 174.57720947265625   # SER.c-carbonilico
-  - 4.4855427742004395   # SER.h-alpha
-  - 8.243566513061523    # SER.h-ammide
-  - 3.851257085800171    # SER.h-beta-alifatico
-  - 0.0                  # SER.h-delta-carbossile
-  - 5.484999656677246    # SER.h-gamma-alcol
-  - 0.0                  # SER.h-zeta-ammina
-  - 115.72163391113281   # SER.n-ammide
-  - 0.0                  # SER.o-carbonilico
-  - 0.0                  # SER.o-delta-carbossile
-  - 0.0                  # SER.o-gamma-alcol
-  - 62.50880813598633    # THR.c-alpha
-  - 69.80438232421875    # THR.c-beta
-  - 174.73580932617188   # THR.c-carbonilico
-  - 21.848756790161133   # THR.c-gamma-ter
-  - 4.537220001220703    # THR.h-alpha
-  - 8.277265548706055    # THR.h-ammide
-  - 4.182021141052246    # THR.h-beta-alifatico
-  - 1.5429999828338623   # THR.h-gamma-alcol
-  - 1.1305495500564575   # THR.h-gamma-metil
-  - 0.0                  # THR.h-zeta-ammina
-  - 115.122314453125     # THR.n-ammide
-  - 0.0                  # THR.o-carbonilico
-  - 0.0                  # THR.o-delta-carbossile
-  - 0.0                  # THR.o-gamma-alcol
-  - 57.79586410522461    # TRP.c-alpha
-  - 30.16444206237793    # TRP.c-beta
-  - 175.7820587158203    # TRP.c-carbonilico
-  - 124.5775375366211    # TRP.c-delta-aromatico
-  - 129.27499389648438   # TRP.c-epsilon-aromatico
-  - 124.3196792602539    # TRP.c-eta-aromatico
-  - 111.18000030517578   # TRP.c-gamma-aromatico
-  - 117.9473648071289    # TRP.c-zeta-aromatico
-  - 4.747399806976318    # TRP.h-alpha
-  - 8.106471061706543    # TRP.h-ammide
-  - 3.1447367668151855   # TRP.h-beta-alifatico
-  - 6.977179050445557    # TRP.h-delta-aromatico
-  - 7.379705905914307    # TRP.h-epsilon-aromatico
-  - 10.010749816894531   # TRP.h-epsilon-aromatico-n-indolo
-  - 6.968571186065674    # TRP.h-eta-aromatico
-  - 0.0                  # TRP.h-zeta-ammina
-  - 7.089412212371826    # TRP.h-zeta-aromatico
-  - 120.2934799194336    # TRP.n-ammide
-  - 129.14651489257812   # TRP.n-epsilon-aromatico
-  - 0.0                  # TRP.o-carbonilico
-  - 0.0                  # TRP.o-delta-carbossile
-  - 57.79328918457031    # TYR.c-alpha
-  - 39.805267333984375   # TYR.c-beta
-  - 175.29176330566406   # TYR.c-carbonilico
-  - 132.90249633789062   # TYR.c-delta-aromatico
-  - 118.29051208496094   # TYR.c-epsilon-aromatico
-  - 130.84666442871094   # TYR.c-gamma-aromatico
-  - 157.5299835205078    # TYR.c-zeta-aromatico
-  - 4.631856918334961    # TYR.h-alpha
-  - 8.275218963623047    # TYR.h-ammide
-  - 2.8196887969970703   # TYR.h-beta-alifatico
-  - 6.870691299438477    # TYR.h-delta-aromatico
-  - 6.702582359313965    # TYR.h-epsilon-aromatico
-  - 0.0                  # TYR.h-eta-alcol-tyr
-  - 0.0                  # TYR.h-zeta-ammina
-  - 120.01107025146484   # TYR.n-ammide
-  - 0.0                  # TYR.o-carbonilico
-  - 0.0                  # TYR.o-delta-carbossile
-  - 0.0                  # TYR.o-eta-tyr
-  - 62.278663635253906   # VAL.c-alpha
-  - 33.09351348876953    # VAL.c-beta
-  - 175.71261596679688   # VAL.c-carbonilico
-  - 21.587343215942383   # VAL.c-gamma-ter
-  - 4.210818290710449    # VAL.h-alpha
-  - 8.357925415039062    # VAL.h-ammide
-  - 1.9758914709091187   # VAL.h-beta-alifatico
-  - 0.7795427441596985   # VAL.h-gamma-metil
-  - 0.0                  # VAL.h-zeta-ammina
-  - 120.81330108642578   # VAL.n-ammide
-  - 0.0                  # VAL.o-carbonilico
-  - 0.0                  # VAL.o-delta-carbossile
-  - 0.0                  # as
-  - 0.0                  # be
-  - 0.0                  # br
-  - 0.0                  # c
-  - 0.0                  # ca
-  - 0.0                  # cd
-  - 0.0                  # cl
-  - 0.0                  # cu
-  - 0.0                  # d
-  - 0.0                  # f
-  - 0.0                  # fe
-  - 0.0                  # ga
-  - 0.0                  # h
-  - 0.0                  # hg
-  - 0.0                  # n
-  - 0.0                  # o
-  - 0.0                  # p
-  - 0.0                  # s
-  - 0.0                  # se
-  - 0.0                  # si
-  - 0.0                  # v
-  - 0.0                  # x
-  - 0.0                  # zn
+num_types: 5
 
 # logging
 wandb: false
@@ -484,10 +113,10 @@ ema_use_num_updates: true
 
 # loss function
 loss_coeffs:
-  - node_output:
-    - 1.
+  - mu:
+    - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
     - MSELoss
-    - ignore_nan: true
+    - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
       ignore_zeroes: true
 
 # optimizer
@@ -501,7 +130,7 @@ optimizer_params:
   weight_decay: 0.
 
 metrics_components:
-  - - node_output
+  - - mu
     - mae
     - PerSpecies: True
       ignore_nan: True
@@ -517,3 +146,7 @@ early_stopping_lower_bounds:
 
 early_stopping_patiences:
   validation_loss: 10
+
+
+### i think this is wrong
+report_init_validation: false

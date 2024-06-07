@@ -111,7 +111,7 @@ def fresh_start(config):
     config.update(trainer.params)
 
     # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
+    dataset = dataset_from_config(config, prefix="dataset") # ConcatDataset of many NpzDatasets
     logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
         validation_dataset = dataset_from_config(config, prefix="validation_dataset")
@@ -174,7 +174,7 @@ def fine_tune(config):
             dictionary["n_val"] = None
         elif config[k] != dictionary.get(k, ""):
             if k in [
-                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs", "loss_coeffs",
+                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs", 
                 "wandb", "wandb_project", "log_batch_freq", "verbose", "append", "keep_type_names",
                 "n_train", "n_val", "batch_size", "validation_batch_size",
                 "max_epochs", "learning_rate", "loss_coeffs", "device",
@@ -190,7 +190,7 @@ def fine_tune(config):
                 raise ValueError(
                     f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
                 )
-    
+
     # Remove keys from dictionary that must be recomputed
     for k in ["train_idcs", "val_idcs"]:
         dictionary.pop(k)
@@ -205,7 +205,7 @@ def fine_tune(config):
         # download parameters from wandb in case of sweeping
         from geqtrain.utils.wandb import init_n_update
         from geqtrain.train import TrainerWandB
-        config = init_n_update(config)    
+        config = init_n_update(config)
         trainer = TrainerWandB.from_dict(dictionary)
     else:
         from geqtrain.train import Trainer
@@ -222,7 +222,7 @@ def fine_tune(config):
     except KeyError:
         # It couldn't be found
         validation_dataset = None
-    
+
     trainer.set_dataset(dataset, validation_dataset)
 
     # reset scheduler
@@ -285,7 +285,7 @@ def restart(config):
     except KeyError:
         # It couldn't be found
         validation_dataset = None
-    
+
     trainer.set_dataset(dataset, validation_dataset)
 
     return trainer

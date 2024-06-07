@@ -350,12 +350,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         self.irreps_out.update(  # set self output shape
             {
-                self.out_field: self.out_irreps
+                self.out_field: self.out_irreps # 64x0e
             }
         )
 
 
-    def apply_residual_connection(self, layer_index, new_latents, latents):
+    def apply_residual_connection(self, layer_index, new_latents, latents, layer_update_coefficients):
         '''applies residual path
         At init, we assume new and old to be approximately uncorrelated
         Thus their variances add
@@ -371,7 +371,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         The residual update at layer L is computed as a weighted sum above
         Note that it only runs when there are latents to resnet with, so not at the first layer'''
 
-        this_layer_update_coeff = self.layer_update_coefficients[layer_index - 1]
+        this_layer_update_coeff = layer_update_coefficients[layer_index - 1]
         self._coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
         self._coefficient_new = this_layer_update_coeff * self._coefficient_old
         return (self._coefficient_old * latents) + (self._coefficient_new * new_latents)
@@ -404,7 +404,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # in this case the cutoff is the same for every layer -> all the num_layers are equal
 
         # compute the sigmoids vectorized instead of each loop, weights used of the lc of resnet update
-        self.layer_update_coefficients = self._latent_resnet_update_params.sigmoid() # shape: ([num_layers]), learnable, initialized as 0s -> w1-1/2, w2=1/2
+        layer_update_coefficients = self._latent_resnet_update_params.sigmoid() # shape: ([num_layers]), learnable, initialized as 0s -> w1-1/2, w2=1/2
 
         # Initialize state/container for output
         out_features = torch.zeros((num_edges, self.env_embed_mul, sum([irr.ir.dim for irr in self.out_irreps])), dtype=torch.get_default_dtype(), device=edge_attr.device) # self.env_embed_mul=64; out: 64x1o
@@ -429,7 +429,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if layer_index == 0:
                 latents = new_latents
             else:
-                latents = self.apply_residual_connection(layer_index, new_latents, latents) # does not change shape of latents
+                latents = self.apply_residual_connection(layer_index, new_latents, latents, layer_update_coefficients) # does not change shape of latents
 
             # * step 2 -> get tp weigths
             # weights is doubled lenght vector: 1/2 x tp weights ; 1/2 x embedding for SH
@@ -451,7 +451,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             # Pool over all weighted edge features to build node *local environment embedding*
             local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes) # sum for k in N(i) of w_ik * SH(ik; shape: torch.Size([num_nodes, Ms, Lmax]); act as equivariant node feature vectors
 
-            active_node_centers = edge_center.unique() #! get source nodes new feature vectors, how come that this is much less then num_nodes?
+            active_node_centers = edge_center.unique() # out of all the atoms in selected local env, only few are considered as source, cuz many nodes on the boundary of cutoff are not considered as source nodes
             local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers]) # equivariant lin layer to update node features
 
             expanded_features_per_node = torch.zeros_like(local_env_per_node) # recreate initial tensor with torch.Size([num_nodes, Ms, Lmax]);

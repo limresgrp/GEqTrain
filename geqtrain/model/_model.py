@@ -56,16 +56,17 @@ def Model(
                     output_hidden_irreps=True,
                 ),
             ),
-            "pre_pooling_readout": (
-                ReadoutModule,
-                dict(
-                    field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_irreps=None,
-                    eq_has_internal_weights=True,
-                ),
-            ),
-            "pooling": (
+            # "pre_pooling_readout": (
+            #     ReadoutModule,
+            #     dict(
+            #         field=AtomicDataDict.EDGE_FEATURES_KEY,
+            #         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            #         out_irreps=None,
+            #         eq_has_internal_weights=True,
+            #         has_bias=False,
+            #     ),
+            # ),
+            "per_node_features": (
                 EdgewiseReduce,
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -77,7 +78,7 @@ def Model(
                 ReadoutModule,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
-                    out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    out_field='mu', #AtomicDataDict.NODE_OUTPUT_KEY,
                     has_bias=True,
                 ),
             ),

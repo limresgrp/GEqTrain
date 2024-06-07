@@ -43,7 +43,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
-        
+
         if inspect.isclass(config_dataset_type):
             class_name = config_dataset_type
         else:
@@ -75,7 +75,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             dataset_file_names = [join(f_name, f) for f in listdir(f_name) if isfile(join(f_name, f))]
         else:
             dataset_file_names = [f_name]
-        
+
         _config: dict = config.as_dict() if isinstance(config, Config) else config
         _config.update(_config_dataset)
 
@@ -101,12 +101,12 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             instantiate(register_fields, all_args=_config)
 
             instance, _ = instantiate(
-                class_name,
-                prefix=prefix,
+                class_name, # dataset selected to be instanciated
+                prefix=prefix, # look for this prefix word in yaml to select get the params for the ctor
                 positional_args={},
                 optional_args=_config,
             )
 
             instances.append(instance)
-    
+
     return ConcatDataset(instances)

@@ -247,9 +247,14 @@ class Trainer:
         # what do we train on?
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
+<<<<<<< HEAD
             if set(train_on_keys) != set(self.train_on_keys):
                 logging.info("Different training keys found.")
-        
+
+=======
+            assert set(train_on_keys) == set(self.train_on_keys)
+
+>>>>>>> a91e61e (WIP single target training, not working)
         # initialize n_train and n_val
         self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
         self.n_val = n_val if isinstance(n_val, list) or n_val is None else [n_val]
@@ -702,7 +707,7 @@ class Trainer:
         chunk = already_computed_nodes is not None
         batch_chunk = deepcopy(batch)
         batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
-        
+
         if chunk:
             batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
         batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
@@ -714,10 +719,10 @@ class Trainer:
 
         offset = 0
         while len(batch_chunk_index.unique()) > batch_max_atoms:
-            
+
             def get_node_center_idcs(batch_chunk_index: torch.Tensor, batch_max_atoms: int, offset: int):
                 unique_set = set()
-                
+
                 for i, num in enumerate(batch_chunk_index[1]):
                     unique_set.add(num.item())
 
@@ -729,13 +734,13 @@ class Trainer:
                 node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
                 edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
                 return edge_filter
-            
+
             chunk = True
             offset += 1
             batch_chunk_index = batch_chunk_index[:, get_edge_filter(batch_chunk_index, offset)]
-            
+
         # = ----------------------------------------- = #
-        
+
         if chunk:
             batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
             batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
@@ -745,18 +750,18 @@ class Trainer:
                 mask[batch_chunk_index[0].unique()] = False
                 chunk_per_node_outputs_value[mask] = torch.nan
                 batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
-        
+
         # === ---------------------------------------------------- === #
         # === ---------------------------------------------------- === #
-        
+
         if hasattr(data, "__slices__"):
             for slices_key, slices in data.__slices__.items():
                 batch_chunk[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
         batch_chunk["ptr"] = torch.nn.functional.pad(torch.bincount(batch_chunk.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
-        
+
         edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
         node_index = edge_index.unique(sorted=True)
-        
+
         for key in batch_chunk.keys():
             if key in [
                 AtomicDataDict.BATCH_KEY,
@@ -804,99 +809,147 @@ class Trainer:
         else:
             self.model.train()
             cm = contextlib.nullcontext()
-            
 
-        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device))
-        # # # keep_bead_types = self.keep_bead_types
+        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
-        # Remove edges of atoms whose result is NaN
-        per_node_outputs_keys = []
-        for key in self.loss.coeffs:
-            if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
-                key_clean = self.loss.remove_suffix(key)
-                batch[key_clean] = batch[key_clean].squeeze()
-                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
-                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
-                    # # # if keep_bead_types is not None:
-                    # # #     # Remove edges of atoms that do not appear in keep_bead_types
-                    # # #     keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
-                    # # #     batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
+        with cm:
+            out = self.model(batch) # forward of the model
+        del input_data
 
-                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-                    per_node_outputs_keys.append(key_clean)
+        ref = batch['mu']
+        if not validation:
+            loss, loss_contrib = self.loss(pred=out, ref=ref) # compute loss
 
-        per_node_outputs_values = []
-        for per_node_output_key in per_node_outputs_keys:
-            if per_node_output_key in batch:
-                per_node_outputs_values.append(batch.get(per_node_output_key))
-        
-        batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-        num_batch_center_nodes = len(batch_index[0].unique())
-        already_computed_nodes = None
+            self.optim.zero_grad(set_to_none=True) # 0 grad
 
-        while True:
-        
-            input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
-                already_computed_nodes=already_computed_nodes,
-                batch=batch,
-                data=data,
-                per_node_outputs_keys=per_node_outputs_keys,
-                per_node_outputs_values=per_node_outputs_values,
-                batch_max_atoms=self.batch_max_atoms,
-                ignore_chunk_keys=self.ignore_chunk_keys,
-                device=self.torch_device,
-            )
+            loss.backward() # compue grads
 
-            if self.noise is not None:
-                input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
-            
-            with cm:
-                out = self.model(input_data)
-            del input_data
+            if self.max_gradient_norm < float("inf"): # grad clipping
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.max_gradient_norm
+                )
 
-            if already_computed_nodes is None:
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
+            for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+                if param.grad is not None and torch.isnan(param.grad).any():
+                    param.grad[torch.isnan(param.grad)] = 0
 
-            if not validation:
-                loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
-                
-                self.optim.zero_grad(set_to_none=True)
-                loss.backward()
+            self.optim.step()
+            # self.model.normalize_weights() #? scales parms by their norm (Not weight_norm)
 
-                if self.max_gradient_norm < float("inf"):
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.max_gradient_norm
-                    )
-                
-                for param in self.model.parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        param.grad[torch.isnan(param.grad)] = 0
+            if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
+                self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
 
-                self.optim.step()
-                # self.model.normalize_weights()
+        with torch.no_grad(): # val step if required and comp metrics for log
+            if validation:
+                loss, loss_contrib = self.loss(pred=out, ref=ref)
 
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            self.batch_losses = self.loss_stat(loss, loss_contrib)
+            self.batch_metrics = self.metrics(pred=out, ref=ref)
 
-            with torch.no_grad():
-                if validation:
-                    loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
 
-                self.batch_losses = self.loss_stat(loss, loss_contrib)
-                self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
-            
-            del batch_chunk
+    # def batch_step(self, data, validation=False):
+    #     # no need to have gradients from old steps taking up memory
+    #     self.optim.zero_grad(set_to_none=True)
 
-            if already_computed_nodes is None:
-                return
+    #     if validation:
+    #         self.model.eval()
+    #         cm = torch.no_grad()
+    #     else:
+    #         self.model.train()
+    #         cm = contextlib.nullcontext()
+
+    #     batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
+    #     # # # keep_bead_types = self.keep_bead_types
+
+    #     # # Remove edges of atoms whose result is NaN
+    #     per_node_outputs_keys = []
+    #     # for key in self.loss.coeffs:
+    #     #     if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
+    #     #         key_clean = self.loss.remove_suffix(key)
+    #     #         batch[key_clean] = batch[key_clean].squeeze()
+    #     #         if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
+    #     #             val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+    #     #             # # # if keep_bead_types is not None:
+    #     #             # # #     # Remove edges of atoms that do not appear in keep_bead_types
+    #     #             # # #     keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
+    #     #             # # #     batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
+
+    #     #             not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+    #     #             batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+    #     #             batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+    #     #             per_node_outputs_keys.append(key_clean)
+
+    #     per_node_outputs_values = []
+    #     for per_node_output_key in per_node_outputs_keys:
+    #         if per_node_output_key in batch:
+    #             per_node_outputs_values.append(batch.get(per_node_output_key))
+
+    #     batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
+    #     num_batch_center_nodes = len(batch_index[0].unique())
+    #     already_computed_nodes = None
+
+    #     while True:
+
+    #         input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
+    #             already_computed_nodes=already_computed_nodes,
+    #             batch=batch,
+    #             data=data,
+    #             per_node_outputs_keys=per_node_outputs_keys,
+    #             per_node_outputs_values=per_node_outputs_values,
+    #             batch_max_atoms=self.batch_max_atoms,
+    #             ignore_chunk_keys=self.ignore_chunk_keys,
+    #             device=self.torch_device,
+    #         )
+
+    #         if self.noise is not None: #!?
+    #             input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+
+    #         with cm:
+    #             out = self.model(input_data) # forward of the model
+    #         del input_data
+
+    #         if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+    #             if len(batch_chunk_center_nodes) < num_batch_center_nodes:
+    #                 already_computed_nodes = batch_chunk_center_nodes
+    #         elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
+    #             already_computed_nodes = None
+    #         else:
+    #             assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
+    #             already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
+
+    #         if not validation:
+    #             loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
+
+    #             self.optim.zero_grad(set_to_none=True) # 0 grad
+
+    #             loss.backward() # compue grads
+
+    #             if self.max_gradient_norm < float("inf"): # grad clipping
+    #                 torch.nn.utils.clip_grad_norm_(
+    #                     self.model.parameters(), self.max_gradient_norm
+    #                 )
+
+    #             for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+    #                 if param.grad is not None and torch.isnan(param.grad).any():
+    #                     param.grad[torch.isnan(param.grad)] = 0
+
+    #             self.optim.step()
+    #             self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
+
+    #             if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
+    #                 self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+
+    #         with torch.no_grad(): # val step if required and comp metrics for log
+    #             if validation:
+    #                 loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
+
+    #             self.batch_losses = self.loss_stat(loss, loss_contrib)
+    #             self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
+
+    #         del batch_chunk
+
+    #         if already_computed_nodes is None:
+    #             return
 
     @property
     def stop_cond(self):
@@ -1226,7 +1279,7 @@ class Trainer:
                     self.val_idcs.append(idcs[n_train : n_train + n_val])
         if validation_dataset is None:
             validation_dataset = dataset
-        
+
         # assert len(self.n_train) == len(dataset.datasets)
         assert len(self.n_val) == len(validation_dataset.datasets)
 
@@ -1235,7 +1288,7 @@ class Trainer:
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
             indexed_datasets_train.append(_dataset.index_select(train_idcs))
         self.dataset_train = ConcatDataset(indexed_datasets_train)
-        
+
         indexed_datasets_val = []
         for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
             indexed_datasets_val.append(_dataset.index_select(val_idcs))
