@@ -82,7 +82,7 @@ graph_fields:
   - mu
 # long_fields:
 
-num_types: 5
+num_types: 9
 
 # logging
 wandb: false

@@ -238,9 +238,10 @@ class Trainer:
 
         self.loss, _ = instantiate(
             builder=Loss,
-            prefix="loss",
-            positional_args=dict(coeffs=self.loss_coeffs),
-            all_args=self.kwargs,
+            prefix="loss", # look in yaml for all things that begin with "loss_*"
+            positional_args=dict(coeffs=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
+            # and from these it creates loss funcs
+            all_args=self.kwargs, # self.kwargs are all the things in yaml... why...
         )
         self.loss_stat = LossStat(self.loss)
 
@@ -798,7 +799,7 @@ class Trainer:
 
         return input_data, batch_chunk, batch_chunk_center_nodes
 
-    def batch_step(self, data, validation=False):
+    def batch_step(self, data, validation=False): # data is a pyg batch obj
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -812,11 +813,11 @@ class Trainer:
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
+        ref = {'mu': batch['mu']} # ref is a dict, not a tensor
         with cm:
             out = self.model(batch) # forward of the model
-        del input_data
+        del batch
 
-        ref = batch['mu']
         if not validation:
             loss, loss_contrib = self.loss(pred=out, ref=ref) # compute loss
 
