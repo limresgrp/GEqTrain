@@ -869,7 +869,6 @@ class Trainer:
                 loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
                 
                 self.optim.zero_grad(set_to_none=True)
-                    
                 loss.backward()
 
                 if self.max_gradient_norm < float("inf"):

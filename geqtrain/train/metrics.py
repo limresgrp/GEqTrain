@@ -63,12 +63,12 @@ class Metrics:
         self.funcs = {}
         self.kwargs = {}
         for component in components:
-
             if isinstance(component, dict):
                 for key, _, func, func_params in parse_dict(component):
 
                     func_params["PerSpecies"] = func_params.get("PerSpecies", False)
                     func_params["PerNode"] = func_params.get("PerNode", False)
+                    func_params["functional"] = func_params.get("functional", "L1Loss")
 
                     param_hash = Metrics.hash_component(component)
 
@@ -83,9 +83,10 @@ class Metrics:
                     kwargs = deepcopy(func_params)
                     kwargs.pop("PerSpecies")
                     kwargs.pop("PerNode")
+                    kwargs.pop("functional")
 
                     # by default, report a scalar that is mae and rmse over all component
-                    loss_func = find_loss_function(func, func_params)
+                    loss_func = find_loss_function(func_params["functional"], func_params)
                     self.funcs[key][param_hash] = loss_func
                     reduction = getattr(loss_func, "reduction", Reduction.MEAN)
                     self.kwargs[key][param_hash] = dict(reduction=reduction)
