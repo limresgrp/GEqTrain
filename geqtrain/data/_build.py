@@ -22,7 +22,15 @@ from geqtrain.utils import (
 
 
 def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
-    """initialize dataset based on a config instance
+    """
+    1) get dset type
+    2) get data_path or data_file
+    3) registers fields to read/expose-in-code data at 2) in the correct form
+    4) instanciate dataset(s)
+        4.1) if many dsets -> cat them
+    5) return
+
+    initialize dataset based on a config instance
 
     It needs dataset type name (case insensitive),
     and all the parameters needed in the constructor.
@@ -44,6 +52,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
 
+        # looks for dset type specified in yaml if present (dataset_list/dataset: {$class_name} )
         if inspect.isclass(config_dataset_type):
             class_name = config_dataset_type
         else:
@@ -68,13 +77,13 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         if class_name is None:
             raise NameError(f"dataset type {dataset_name} does not exists")
 
-        inpup_key = f"{prefix}_input"
+        inpup_key = f"{prefix}_input" # get input path
         assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
         f_name = _config_dataset.get(inpup_key)
-        if isdir(f_name):
+        if isdir(f_name): # can be dir
             dataset_file_names = [join(f_name, f) for f in listdir(f_name) if isfile(join(f_name, f))]
         else:
-            dataset_file_names = [f_name]
+            dataset_file_names = [f_name] # can be 1 file
 
         _config: dict = config.as_dict() if isinstance(config, Config) else config
         _config.update(_config_dataset)
@@ -82,9 +91,13 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         # if dataset r_max is not found, use the universal r_max
         eff_key = "extra_fixed_fields"
         prefixed_eff_key = f"{prefix}_{eff_key}"
+
         _config[prefixed_eff_key] = get_w_prefix(
-            eff_key, {}, prefix=prefix, arg_dicts=_config
+            eff_key, {},
+            prefix=prefix,
+            arg_dicts=_config
         )
+
         _config[prefixed_eff_key]["r_max"] = get_w_prefix(
             "r_max",
             prefix=prefix,
@@ -92,7 +105,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         )
 
         for dataset_file_name in dataset_file_names:
-            _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset
+            _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset # dataset id
             dataset_id_offset += 1
             _config[f"{prefix}_file_name"] = dataset_file_name
 

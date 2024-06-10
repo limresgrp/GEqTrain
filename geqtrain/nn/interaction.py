@@ -75,7 +75,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # required params
         num_layers: int,
         r_max: float,
-        out_irreps: Optional[Union[o3.Irreps, str]] = None,
+        out_irreps: Optional[Union[o3.Irreps, str]] = None, # this defines the output irreps
         avg_num_neighbors: Optional[float] = None,
 
         # cutoffs

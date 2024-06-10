@@ -28,9 +28,13 @@ class SimpleLoss:
     if mean is True, return a scalar; else return the error matrix of each entry
     """
 
-    def __init__(self, func_name: str, params: dict = {}):
+    def __init__(self,
+                 func_name: str,
+                 params: dict = {}):
+
         for key, value in params.items():
             setattr(self, key, value)
+
         func, _ = instantiate_from_cls_name(
             torch.nn,
             class_name=func_name,
@@ -38,7 +42,9 @@ class SimpleLoss:
             positional_args=dict(reduction="none"),
             optional_args=params,
             all_args={},
+
         )
+
         self.func_name = func_name
         self.func = func
 
@@ -50,7 +56,7 @@ class SimpleLoss:
         mean: bool = True,
     ):
         ref_key, pred_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
-        
+
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
             loss = self.func(torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
@@ -72,12 +78,12 @@ class SimpleLoss:
         pred_key = pred.get(key, None)
         assert isinstance(pred_key, torch.Tensor)
         pred_key = pred_key.view_as(ref_key)
-            
+
         has_nan = torch.isnan(ref_key.sum()) or torch.isnan(pred_key.sum())
         if has_nan and not (hasattr(self, "ignore_nan") and self.ignore_nan):
             raise Exception(f"Either the predicted or true property '{key}' has nan values. "
                              "If this is intended, set 'ignore_nan' to true in config file for this loss.")
-        
+
         if hasattr(self, "ignore_zeroes") and self.ignore_zeroes:
             not_zeroes = (~torch.all(ref_key == 0., dim=-1)).int() if len(ref_key.shape) > 1 else (ref_key != 0)
         else:

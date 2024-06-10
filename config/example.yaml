@@ -52,16 +52,16 @@ readout_mlp_nonlinearity: null
 out_irreps: '1x0e'
 
 # -- data --
-n_train: [1,1,1,1,1,1,1,1,0,0]
+n_train: [1,1,1,1,1,1,1,1,0,0] # out of train data, which idxs to use to train and which to use to val
 
 directed_graph: true
 dataset_list:
   - dataset: npz
     dataset_input: /storage_common/nobilm/qm_npz/small_sample/ # /storage_common/nobilm/qm_npz/train/
     key_mapping:
-      coords: pos # the blue keywords are the kwords present in the npz
+      coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
       atom_types: node_types
-      graph_labels: mu # mu kword used in code
+      graph_labels: mu # mu kword used in code, since custom it has to be registered; for custom values it must be defined below if it is a node_fields, edge_fields, graph_fields, long_fields
     npz_fixed_field_keys:
     - node_types
 
@@ -83,6 +83,28 @@ graph_fields:
 # long_fields:
 
 num_types: 9
+
+#############################################################################################################################
+
+# loss function
+loss_coeffs:
+  - mu:
+    - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
+    - MSELoss
+    - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
+      ignore_zeroes: true
+
+metrics_components:
+  - - mu
+    - mae
+    - PerSpecies: True
+      ignore_nan: True
+      functional: L1Loss
+
+### I think this is wrong
+report_init_validation: false
+
+#############################################################################################################################
 
 # logging
 wandb: false
@@ -111,14 +133,6 @@ use_ema: true
 ema_decay: 0.99
 ema_use_num_updates: true
 
-# loss function
-loss_coeffs:
-  - mu:
-    - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
-    - MSELoss
-    - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
-      ignore_zeroes: true
-
 # optimizer
 optimizer_name: Adam
 optimizer_params:
@@ -128,13 +142,6 @@ optimizer_params:
   - 0.999
   eps: 1.0e-08
   weight_decay: 0.
-
-metrics_components:
-  - - mu
-    - mae
-    - PerSpecies: True
-      ignore_nan: True
-      functional: L1Loss
 
 # lr scheduler, drop lr if no improvement for tot epochs
 lr_scheduler_name: ReduceLROnPlateau
@@ -146,7 +153,3 @@ early_stopping_lower_bounds:
 
 early_stopping_patiences:
   validation_loss: 10
-
-
-### i think this is wrong
-report_init_validation: false

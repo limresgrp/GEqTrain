@@ -90,6 +90,7 @@ def parse_command_line(args=None):
 
     return config
 
+
 def fresh_start(config):
     # we use add_to_config cause it's a fresh start and need to record it
     _set_global_options(config)
@@ -106,8 +107,7 @@ def fresh_start(config):
         from geqtrain.train import Trainer
         trainer = Trainer(model=None, **dict(config))
 
-    # what is this
-    # to update wandb data?
+    # what is this? to update wandb data?
     config.update(trainer.params)
 
     # = Load the dataset =
@@ -115,9 +115,7 @@ def fresh_start(config):
     logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
         validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-        logging.info(
-            f"Successfully loaded the validation data set of type {validation_dataset}..."
-        )
+        logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
     except KeyError:
         # It couldn't be found
         validation_dataset = None
@@ -126,9 +124,7 @@ def fresh_start(config):
     trainer.set_dataset(dataset, validation_dataset)
 
     # = Build model =
-    final_model = model_from_config(
-        config=config, initialize=True, dataset=trainer.dataset_train
-    )
+    final_model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
     logging.info("Successfully built the network...")
 
     # by doing this here we check also any keys custom builders may have added
@@ -155,6 +151,7 @@ def fresh_start(config):
 
     return trainer
 
+
 def fine_tune(config):
 
     # load the dictionary
@@ -174,7 +171,7 @@ def fine_tune(config):
             dictionary["n_val"] = None
         elif config[k] != dictionary.get(k, ""):
             if k in [
-                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs", 
+                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs",
                 "wandb", "wandb_project", "log_batch_freq", "verbose", "append", "keep_type_names",
                 "n_train", "n_val", "batch_size", "validation_batch_size",
                 "max_epochs", "learning_rate", "loss_coeffs", "device",
@@ -229,6 +226,7 @@ def fine_tune(config):
     trainer.lr_sched._reset()
 
     return trainer
+
 
 def restart(config):
     # load the dictionary
@@ -289,6 +287,7 @@ def restart(config):
     trainer.set_dataset(dataset, validation_dataset)
 
     return trainer
+
 
 def _check_old_keys(config) -> None:
     """check ``config`` for old/depricated keys and emit corresponding errors/warnings"""

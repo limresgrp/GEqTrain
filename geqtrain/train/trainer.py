@@ -172,41 +172,40 @@ class Trainer:
         verbose="INFO",
         **kwargs,
     ):
+        # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
+
         self.cumulative_wall = 0
         logging.debug("* Initialize Trainer")
 
-        # store all init arguments
+        # set model (default None)
         self.model = model
 
+        # --- write all self.init_keys in self AND in _local_kwargs
         _local_kwargs = {}
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
 
+        # --- get I/O handler
         output = Output.get_output(dict(**_local_kwargs, **kwargs))
         self.output = output
 
         self.logfile = output.open_logfile("log", propagate=True)
         self.epoch_log = output.open_logfile("metrics_epoch.csv", propagate=False)
-        self.init_epoch_log = output.open_logfile(
-            "metrics_initialization.csv", propagate=False
-        )
+        self.init_epoch_log = output.open_logfile("metrics_initialization.csv", propagate=False)
         self.batch_log = {
-            TRAIN: output.open_logfile(
-                f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False
-            ),
-            VALIDATION: output.open_logfile(
-                f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False
-            ),
+            TRAIN: output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+            VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
 
         # add filenames if not defined
-        self.best_model_path = output.generate_file("best_model.pth")
-        self.last_model_path = output.generate_file("last_model.pth")
+        self.best_model_path   = output.generate_file("best_model.pth")
+        self.last_model_path   = output.generate_file("last_model.pth")
         self.trainer_save_path = output.generate_file("trainer.pth")
-        self.config_path = self.output.generate_file("config.yaml")
+        self.config_path       = self.output.generate_file("config.yaml")
 
+        # --- handle randomness
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
@@ -223,7 +222,7 @@ class Trainer:
         self.logger.info(f"Torch device: {self.device}")
         self.torch_device = torch.device(self.device)
 
-        # sort out all the other parameters
+        # --- sort out all the other parameters
         # for samplers, optimizer and scheduler
         self.kwargs = deepcopy(kwargs)
         self.optimizer_kwargs = deepcopy(optimizer_kwargs)
@@ -231,11 +230,12 @@ class Trainer:
         self.early_stopping_kwargs = deepcopy(early_stopping_kwargs)
         self.early_stopping_conds = None
 
-        # initialize training states
+        # --- initialize training states
         self.best_metrics = float("inf")
         self.best_epoch = 0
         self.iepoch = -1 if self.report_init_validation else 0
 
+        # --- setup losses
         self.loss, _ = instantiate(
             builder=Loss,
             prefix="loss", # look in yaml for all things that begin with "loss_*"
@@ -245,37 +245,25 @@ class Trainer:
         )
         self.loss_stat = LossStat(self.loss)
 
-        # what do we train on?
+        #! what do we train on?
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
-<<<<<<< HEAD
             if set(train_on_keys) != set(self.train_on_keys):
                 logging.info("Different training keys found.")
 
-=======
-            assert set(train_on_keys) == set(self.train_on_keys)
+        # --- initialize n_train and n_val
 
->>>>>>> a91e61e (WIP single target training, not working)
-        # initialize n_train and n_val
         self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
-        self.n_val = n_val if isinstance(n_val, list) or n_val is None else [n_val]
+        self.n_val   = n_val   if isinstance(n_val,   list) or n_val   is None else [n_val]
 
-        # load all callbacks
-        self._init_callbacks = [load_callable(callback) for callback in init_callbacks]
-        self._end_of_epoch_callbacks = [
-            load_callable(callback) for callback in end_of_epoch_callbacks
-        ]
-        self._end_of_batch_callbacks = [
-            load_callable(callback) for callback in end_of_batch_callbacks
-        ]
-        self._end_of_train_callbacks = [
-            load_callable(callback) for callback in end_of_train_callbacks
-        ]
-        self._final_callbacks = [
-            load_callable(callback) for callback in final_callbacks
-        ]
+        # --- load all callbacks
+        self._init_callbacks         = [load_callable(callback) for callback in init_callbacks]
+        self._end_of_epoch_callbacks = [load_callable(callback) for callback in end_of_epoch_callbacks]
+        self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
+        self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
+        self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
 
-        self.init()
+        self.init() # initializes model, optimizer, scheduler, early stopping
 
     def init_objects(self):
         # initialize optimizer
@@ -348,6 +336,9 @@ class Trainer:
 
     @property
     def init_keys(self):
+        '''
+        return init_keys (list): list of parameters needed to reconstruct this instance
+        '''
         return [
             key
             for key in list(inspect.signature(Trainer.__init__).parameters.keys())
@@ -356,6 +347,9 @@ class Trainer:
 
     @property
     def params(self):
+        '''
+        returns self.as_dict
+        '''
         return self.as_dict(state_dict=False, training_progress=False, kwargs=False)
 
     def update_kwargs(self, config):
@@ -612,15 +606,10 @@ class Trainer:
             return
 
         self.model.to(self.torch_device)
-
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
-        self.logger.info(
-            f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
-        )
-
+        self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
         self.init_objects()
-
         self._initialized = True
         self.cumulative_wall = 0
 
@@ -676,6 +665,7 @@ class Trainer:
 
         self.init_metrics()
 
+        # actual train loop
         while not self.stop_cond:
 
             self.epoch_step()
@@ -799,7 +789,7 @@ class Trainer:
 
         return input_data, batch_chunk, batch_chunk_center_nodes
 
-    def batch_step(self, data, validation=False): # data is a pyg batch obj
+    def batch_step(self, data, validation=False): # data is a: <class 'geqtrain.utils.torch_geometric.batch.Batch'> a custom pyg batch object!
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -811,9 +801,9 @@ class Trainer:
             self.model.train()
             cm = contextlib.nullcontext()
 
-        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
+        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward, nb data is custom pyg Batch
 
-        ref = {'mu': batch['mu']} # ref is a dict, not a tensor
+        ref = {'mu': batch['mu']} #! TODO integrate this in batch obj? ref is a dict, not a tensor
         with cm:
             out = self.model(batch) # forward of the model
         del batch
@@ -826,9 +816,7 @@ class Trainer:
             loss.backward() # compue grads
 
             if self.max_gradient_norm < float("inf"): # grad clipping
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_gradient_norm
-                )
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
 
             for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
                 if param.grad is not None and torch.isnan(param.grad).any():
@@ -846,111 +834,6 @@ class Trainer:
 
             self.batch_losses = self.loss_stat(loss, loss_contrib)
             self.batch_metrics = self.metrics(pred=out, ref=ref)
-
-
-    # def batch_step(self, data, validation=False):
-    #     # no need to have gradients from old steps taking up memory
-    #     self.optim.zero_grad(set_to_none=True)
-
-    #     if validation:
-    #         self.model.eval()
-    #         cm = torch.no_grad()
-    #     else:
-    #         self.model.train()
-    #         cm = contextlib.nullcontext()
-
-    #     batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
-    #     # # # keep_bead_types = self.keep_bead_types
-
-    #     # # Remove edges of atoms whose result is NaN
-    #     per_node_outputs_keys = []
-    #     # for key in self.loss.coeffs:
-    #     #     if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
-    #     #         key_clean = self.loss.remove_suffix(key)
-    #     #         batch[key_clean] = batch[key_clean].squeeze()
-    #     #         if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
-    #     #             val = batch[key_clean].reshape(len(batch[key_clean]), -1)
-    #     #             # # # if keep_bead_types is not None:
-    #     #             # # #     # Remove edges of atoms that do not appear in keep_bead_types
-    #     #             # # #     keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
-    #     #             # # #     batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
-
-    #     #             not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-    #     #             batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-    #     #             batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-    #     #             per_node_outputs_keys.append(key_clean)
-
-    #     per_node_outputs_values = []
-    #     for per_node_output_key in per_node_outputs_keys:
-    #         if per_node_output_key in batch:
-    #             per_node_outputs_values.append(batch.get(per_node_output_key))
-
-    #     batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-    #     num_batch_center_nodes = len(batch_index[0].unique())
-    #     already_computed_nodes = None
-
-    #     while True:
-
-    #         input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
-    #             already_computed_nodes=already_computed_nodes,
-    #             batch=batch,
-    #             data=data,
-    #             per_node_outputs_keys=per_node_outputs_keys,
-    #             per_node_outputs_values=per_node_outputs_values,
-    #             batch_max_atoms=self.batch_max_atoms,
-    #             ignore_chunk_keys=self.ignore_chunk_keys,
-    #             device=self.torch_device,
-    #         )
-
-    #         if self.noise is not None: #!?
-    #             input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
-
-    #         with cm:
-    #             out = self.model(input_data) # forward of the model
-    #         del input_data
-
-    #         if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
-    #             if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-    #                 already_computed_nodes = batch_chunk_center_nodes
-    #         elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-    #             already_computed_nodes = None
-    #         else:
-    #             assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-    #             already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-    #         if not validation:
-    #             loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
-
-    #             self.optim.zero_grad(set_to_none=True) # 0 grad
-
-    #             loss.backward() # compue grads
-
-    #             if self.max_gradient_norm < float("inf"): # grad clipping
-    #                 torch.nn.utils.clip_grad_norm_(
-    #                     self.model.parameters(), self.max_gradient_norm
-    #                 )
-
-    #             for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
-    #                 if param.grad is not None and torch.isnan(param.grad).any():
-    #                     param.grad[torch.isnan(param.grad)] = 0
-
-    #             self.optim.step()
-    #             self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
-
-    #             if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
-    #                 self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
-    #         with torch.no_grad(): # val step if required and comp metrics for log
-    #             if validation:
-    #                 loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
-
-    #             self.batch_losses = self.loss_stat(loss, loss_contrib)
-    #             self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
-
-    #         del batch_chunk
-
-    #         if already_computed_nodes is None:
-    #             return
 
     @property
     def stop_cond(self):
@@ -983,9 +866,7 @@ class Trainer:
 
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
-        dataloaders = [
-            dataloaders[c] for c in categories
-        ]  # get the right dataloaders for the catagories we actually run
+        dataloaders = [dataloaders[c] for c in categories]  # get the right dataloaders for the catagories we actually run
         self.metrics_dict = {}
         self.loss_dict = {}
 
@@ -1217,6 +1098,7 @@ class Trainer:
 
         if validation_dataset is None:
             logging.warn("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+
         if self.train_idcs is None or self.val_idcs is None:
             if self.n_train is None:
                 if validation_dataset is None:
@@ -1232,58 +1114,55 @@ class Trainer:
                     self.n_val = [len(ds) for ds in validation_dataset.datasets]
                 else:
                     self.n_val = [len(ds) - n_train for ds, n_train in zip(dataset.datasets, self.n_train)]
+
             self.train_idcs, self.val_idcs = [], []
             # Sample both from `dataset`:
             if validation_dataset is not None:
                 for _validation_dataset, n_val in zip(validation_dataset.datasets, self.n_val):
+
                     total_n = len(_validation_dataset)
+
                     if n_val > total_n:
-                        raise ValueError(
-                            "too little data for validation. please reduce n_val"
-                        )
+                        raise ValueError("too little data for validation. please reduce n_val")
                     if self.train_val_split == "random":
                         idcs = torch.randperm(total_n, generator=self.dataset_rng)
                     elif self.train_val_split == "sequential":
                         idcs = torch.arange(total_n)
                     else:
-                        raise NotImplementedError(
-                            f"splitting mode {self.train_val_split} not implemented"
-                        )
+                        raise NotImplementedError(f"splitting mode {self.train_val_split} not implemented")
+
                     self.val_idcs.append(idcs[:n_val])
 
             # If validation_dataset is None, Sample both from `dataset`
             for _index, (_dataset, n_train) in enumerate(zip(dataset.datasets, self.n_train)):
+
                 total_n = len(_dataset)
 
                 if n_train > total_n:
-                    raise ValueError(
-                        f"too little data for training. please reduce n_train. n_train: {n_train} total: {total_n}"
-                    )
+                    raise ValueError(f"too little data for training. please reduce n_train. n_train: {n_train} total: {total_n}")
 
                 if self.train_val_split == "random":
                     idcs = torch.randperm(total_n, generator=self.dataset_rng)
                 elif self.train_val_split == "sequential":
                     idcs = torch.arange(total_n)
                 else:
-                    raise NotImplementedError(
-                        f"splitting mode {self.train_val_split} not implemented"
-                    )
+                    raise NotImplementedError(f"splitting mode {self.train_val_split} not implemented")
 
                 self.train_idcs.append(idcs[: n_train])
                 if validation_dataset is None:
                     assert len(self.n_train) == len(self.n_val)
                     n_val = self.n_val[_index]
                     if (n_train + n_val) > total_n:
-                        raise ValueError(
-                            f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {total_n}"
-                        )
+                        raise ValueError(f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {total_n}")
                     self.val_idcs.append(idcs[n_train : n_train + n_val])
+
         if validation_dataset is None:
             validation_dataset = dataset
 
         # assert len(self.n_train) == len(dataset.datasets)
         assert len(self.n_val) == len(validation_dataset.datasets)
 
+        # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
         indexed_datasets_train = []
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
@@ -1301,9 +1180,7 @@ class Trainer:
             exclude_keys=self.exclude_keys,
             num_workers=self.dataloader_num_workers,
             # keep stuff around in memory
-            persistent_workers=(
-                self.dataloader_num_workers > 0 and self.max_epochs > 1
-            ),
+            persistent_workers=(self.dataloader_num_workers > 0 and self.max_epochs > 1),
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
@@ -1311,12 +1188,14 @@ class Trainer:
             # use the right randomness
             generator=self.dataset_rng,
         )
+
         self.dl_train = DataLoader(
             dataset=self.dataset_train,
             shuffle=self.shuffle,  # training should shuffle
             batch_size=self.batch_size,
             **dl_kwargs,
         )
+
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
         self.dl_val = DataLoader(
@@ -1345,3 +1224,112 @@ class TrainerWandB(Trainer):
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
             wandb.watch(self.model, **wandb_watch_kwargs)
+
+
+
+
+
+######################################################################################################################
+# def batch_step(self, data, validation=False):
+    #     # no need to have gradients from old steps taking up memory
+    #     self.optim.zero_grad(set_to_none=True)
+
+    #     if validation:
+    #         self.model.eval()
+    #         cm = torch.no_grad()
+    #     else:
+    #         self.model.train()
+    #         cm = contextlib.nullcontext()
+
+    #     batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
+    #     # # # keep_bead_types = self.keep_bead_types
+
+    #     # # Remove edges of atoms whose result is NaN
+    #     per_node_outputs_keys = []
+    #     # for key in self.loss.coeffs:
+    #     #     if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
+    #     #         key_clean = self.loss.remove_suffix(key)
+    #     #         batch[key_clean] = batch[key_clean].squeeze()
+    #     #         if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
+    #     #             val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+    #     #             # # # if keep_bead_types is not None:
+    #     #             # # #     # Remove edges of atoms that do not appear in keep_bead_types
+    #     #             # # #     keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
+    #     #             # # #     batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
+
+    #     #             not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+    #     #             batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+    #     #             batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+    #     #             per_node_outputs_keys.append(key_clean)
+
+    #     per_node_outputs_values = []
+    #     for per_node_output_key in per_node_outputs_keys:
+    #         if per_node_output_key in batch:
+    #             per_node_outputs_values.append(batch.get(per_node_output_key))
+
+    #     batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
+    #     num_batch_center_nodes = len(batch_index[0].unique())
+    #     already_computed_nodes = None
+
+    #     while True:
+
+    #         input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
+    #             already_computed_nodes=already_computed_nodes,
+    #             batch=batch,
+    #             data=data,
+    #             per_node_outputs_keys=per_node_outputs_keys,
+    #             per_node_outputs_values=per_node_outputs_values,
+    #             batch_max_atoms=self.batch_max_atoms,
+    #             ignore_chunk_keys=self.ignore_chunk_keys,
+    #             device=self.torch_device,
+    #         )
+
+    #         if self.noise is not None: #!?
+    #             input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+
+    #         with cm:
+    #             out = self.model(input_data) # forward of the model
+    #         del input_data
+
+    #         if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+    #             if len(batch_chunk_center_nodes) < num_batch_center_nodes:
+    #                 already_computed_nodes = batch_chunk_center_nodes
+    #         elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
+    #             already_computed_nodes = None
+    #         else:
+    #             assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
+    #             already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
+
+    #         if not validation:
+    #             loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
+
+    #             self.optim.zero_grad(set_to_none=True) # 0 grad
+
+    #             loss.backward() # compue grads
+
+    #             if self.max_gradient_norm < float("inf"): # grad clipping
+    #                 torch.nn.utils.clip_grad_norm_(
+    #                     self.model.parameters(), self.max_gradient_norm
+    #                 )
+
+    #             for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+    #                 if param.grad is not None and torch.isnan(param.grad).any():
+    #                     param.grad[torch.isnan(param.grad)] = 0
+
+    #             self.optim.step()
+    #             self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
+
+    #             if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
+    #                 self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+
+    #         with torch.no_grad(): # val step if required and comp metrics for log
+    #             if validation:
+    #                 loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
+
+    #             self.batch_losses = self.loss_stat(loss, loss_contrib)
+    #             self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
+
+    #         del batch_chunk
+
+    #         if already_computed_nodes is None:
+    #             return
