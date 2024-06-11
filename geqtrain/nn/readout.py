@@ -7,6 +7,7 @@ from geqtrain.nn import GraphModuleMixin
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.allegro._fc import ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
+from torch_scatter import scatter
 
 
 @compile_mode("script")
@@ -87,7 +88,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     internal_weights=self.eq_has_internal_weights,
                     pad_to_alignment=1,
                 )
-            
+
             if not self.eq_has_internal_weights:
                 self.weights_emb = readout_latent(
                     mlp_input_dimension=self.n_scalars_in,
@@ -127,8 +128,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 weights = self.weights_emb(features[:, :self.n_scalars_in])
                 eq_features = self.eq_readout(eq_features, weights)
             out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)
-        
-        data[self.out_field] = out_features
+
+        # data[self.out_field] = torch.sum(out_features)
+        data[self.out_field] = scatter(out_features, data[AtomicDataDict.BATCH_KEY], dim=0)
         return data
 
 
@@ -173,13 +175,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             in_irreps_muls.append(mul)
             n_l_in[ir.l] = n_l_in.get(ir.l, 0)  + 1
         assert all([in_irreps_mul == in_irreps_muls[0] for in_irreps_mul in in_irreps_muls])
-        
+
         self.in_irreps_mul = in_irreps_muls[0]
         self.n_l_in = n_l_in
-        
+
         assert self.n_l_in.get(0, 0) > 0
         assert self.in_irreps_mul * self.n_l_in.get(0, 0) == in_irreps.ls.count(0)
-        
+
         out_irreps = (
             out_irreps if isinstance(out_irreps, o3.Irreps)
             else (
@@ -195,11 +197,11 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             n_l_out[ir.l] = n_l_out.get(ir.l, 0) + 1
             n_out += ir.dim
         assert all([out_irreps_mul == out_irreps_muls[0] for out_irreps_mul in out_irreps_muls])
-        
+
         self.out_irreps_mul = out_irreps_muls[0]
         self.n_l_out = n_l_out
         self.n_out = n_out
-        
+
         assert self.out_irreps_mul * self.n_l_out.get(0, 0) == out_irreps.ls.count(0)
 
         # check and init irreps
@@ -242,7 +244,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     internal_weights=False,
                     pad_to_alignment=1,
                 )
-            
+
             self.weights_emb = readout_latent(
                 mlp_input_dimension=self.in_irreps_mul * self.n_l_in[0],
                 mlp_output_dimension=self.eq_readout.weight_numel,
@@ -281,7 +283,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             # eq_features = self.reshape_back_features(eq_features)
             # out_features[:, self.n_scalars_out:] += eq_features
             out_features[:, :, self.n_l_out.get(0, 0):] += eq_features
-        
+
         data[self.out_field] = out_features
         return data
 '''

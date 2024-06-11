@@ -13,6 +13,7 @@ from geqtrain.nn import (
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
+    Head
 )
 
 
@@ -49,28 +50,18 @@ def Model(
             "interaction": (
             InteractionModule,
                 dict(
-                    node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-                    edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-                    edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
-                    out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+                    node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY, # 1-hot atom types; shape ([N, n_atom_types])
+                    edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY, # radial embedding of displacement vectors: BESSEL(8) enc; shape: ([num_edges, 8]) 8= number of bessel for encoding
+                    edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY, # angular embedding of displacement vectors: SH enc Lmax=2; shape: ([num_edges, 9]) (eg 9 if Lmax=2)
+                    out_field=AtomicDataDict.EDGE_FEATURES_KEY, # "edge_features", these are only scalars!
                     output_hidden_irreps=True,
                 ),
             ),
-            # "pre_pooling_readout": (
-            #     ReadoutModule,
-            #     dict(
-            #         field=AtomicDataDict.EDGE_FEATURES_KEY,
-            #         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            #         out_irreps=None,
-            #         eq_has_internal_weights=True,
-            #         has_bias=False,
-            #     ),
-            # ),
             "per_node_features": (
-                EdgewiseReduce,
+                EdgewiseReduce, # takes all edges outgoing for node i and sum their features to get 1 feat vect of the node i itself
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_field=AtomicDataDict.NODE_FEATURES_KEY,
+                    out_field=AtomicDataDict.NODE_FEATURES_KEY, # so this creates a feat vect for each node
                     reduce=config.get("edge_reduce", "sum"),
                 ),
             ),

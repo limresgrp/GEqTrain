@@ -419,6 +419,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         for latent, env_embed_mlp, env_linear, linear, tp in _layers: # iters through layer0, layer1, ..., layer_max-1
 
             # * step 1 : mlp -> scalings -> residual
+            # latent updating (scalar part of) edge representations
             new_latents = latent(latent_inputs_to_cat) # process latents/scalars (blue track); latent: nn.ModuleList of normal MLPs (ok since it acts only on scalars) # at layer0: torch.Size([num_edges, 256])
 
             # Apply layer-wise cutoff scaling and normalization wrt num_neighbours scaling : feature are scaled wrt distance, and scaled wrt sqrt(avg(num_neighbours))

@@ -1,6 +1,6 @@
 # general
-root: results/example
-run_name: run1
+root: results/debug_runs
+run_name: run
 
 seed: 0
 dataset_seed: 0
@@ -52,12 +52,11 @@ readout_mlp_nonlinearity: null
 out_irreps: '1x0e'
 
 # -- data --
-n_train: [1,1,1,1,1,1,1,1,0,0] # out of train data, which idxs to use to train and which to use to val
+# n_train: [1,1,1,1,1,1,1,1,0,0] # out of train data, which idxs to use to train and which to use to val
 
-directed_graph: true
 dataset_list:
   - dataset: npz
-    dataset_input: /storage_common/nobilm/qm_npz/small_sample/ # /storage_common/nobilm/qm_npz/train/
+    dataset_input: /storage_common/nobilm/qm_npz/small_sample_train/
     key_mapping:
       coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
       atom_types: node_types
@@ -65,15 +64,15 @@ dataset_list:
     npz_fixed_field_keys:
     - node_types
 
-# validation_dataset_list:
-#   - validation_dataset: npz
-#     validation_dataset_input: /storage_common/angiod/NMR/SHIFTX2/npz/valid/
-#     key_mapping:
-#       coords: pos
-#       atom_types: node_types
-#       chemical_shifts: node_output
-#     npz_fixed_field_keys:
-#     - node_types
+validation_dataset_list:
+  - validation_dataset: npz
+    validation_dataset_input: /storage_common/nobilm/qm_npz/small_sample_test/
+    key_mapping:
+      coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
+      atom_types: node_types
+      graph_labels: mu # mu kword used in code, since custom it has to be registered; for custom values it must be defined below if it is a node_fields, edge_fields, graph_fields, long_fields
+    npz_fixed_field_keys:
+    - node_types
 
 # node_fields:
   # - node_output # da registrare in atom dict la lista dei label_name
@@ -88,7 +87,7 @@ num_types: 9
 
 # loss function
 loss_coeffs:
-  - mu:
+  - mu: # target -? key taken from dat dict of batch
     - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
     - MSELoss
     - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
@@ -113,8 +112,8 @@ verbose: info
 log_batch_freq: 20
 
 # training
-batch_size: 1
-validation_batch_size: 1
+batch_size: 32
+validation_batch_size: 32
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
 
@@ -152,4 +151,4 @@ early_stopping_lower_bounds:
   LR: 1.0e-5
 
 early_stopping_patiences:
-  validation_loss: 10
+  validation_loss: 100

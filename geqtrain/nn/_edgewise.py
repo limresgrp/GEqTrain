@@ -53,7 +53,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                 n_l[ir.l] = n_l.get(ir.l, 0) + 1
                 n_dim += ir.dim
             assert all([irreps_mul == irreps_muls[0] for irreps_mul in irreps_muls])
-            
+
             self.irreps_mul = irreps_muls[0]
             self.n_l = n_l
             self.n_dim = n_dim
@@ -96,7 +96,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
-        
+
         if self.use_attention:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
             Q = Q.reshape(-1, self.K_out_dim, self.head_dim)[edge_center]
