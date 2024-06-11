@@ -38,22 +38,29 @@ def pick_mpl_function(func):
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
-    # when the ctor of this class is called, it takes as input all the stuff that is listed in the yaml
-    # all the keys that are both in the arg list here and in the yaml are taken as input in the ctor of this class
-    # posititon is irrelevant in ctor args
+    '''when the ctor of this class is called, it takes as input all the stuff that is listed in the yaml
+    all the keys that are both in the arg list here and in the yaml are taken as input in the ctor of this class
+    posititon is irrelevant in ctor arg
+    concept from paper: this layer works on edge features: it splits edge info in 1) invariant descriptors 2) equivariant descriptors
+    it processes 1 and 2 separately but
+    conditions the operations in 2 using processed info coming from 1
+    and conditions the operations in 1 using invariant info coming from
+    idea: 2 tracks 1 handle invariants properties of sys, the other handles equivariant properties of sys
+    these 2 tracks talk to each other
+    the cutoff acts a weight that scales edgefeature wrt source/dist
+    the angular comonent is based on displacement vectr -> it thus implices a center/cental node
+    with this we have the ik weights selection for the angular track/tp
+    scatter on nodes nb ij != ji
+    readout
 
-    # concept from paper: this layer works on edge features: it splits edge info in 1) invariant descriptors 2) equivariant descriptors
-    # it processes 1 and 2 separately but
-    # conditions the operations in 2 using processed info coming from 1
-    # and conditions the operations in 1 using invariant info coming from 2
+    Nomenclature and dims:
 
-    # idea: 2 tracks 1 handle invariants properties of sys, the other handles equivariant properties of sys
-    # these 2 tracks talk to each other
-    # the cutoff acts a weight that scales edgefeature wrt source/dist
-    # the angular comonent is based on displacement vectr -> it thus implices a center/cental node
-    # with this we have the ik weights selection for the angular track/tp
-    # scatter on nodes nb ij != ji
-    # readout
+    "node_attrs"            [n_nodes, dim]      node_invariant_field            atom types (embedded?)
+    "edge_radial_attrs"     [n_edge, dim]       edge_invariant_field            radial embedding of displacement vectors BESSEL
+    "edge_angular_attrs"    [n_edge, dim]       edge_equivariant_field          angular embedding of displacement vectors SH
+    "edge_features"         [n_edge, dim]       out_field                       edge_features are the output of interaction block
+    '''
+
 
     # saved params
     num_layers: int

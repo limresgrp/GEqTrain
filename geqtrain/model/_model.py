@@ -65,8 +65,8 @@ def Model(
                     reduce=config.get("edge_reduce", "sum"),
                 ),
             ),
-            "readout": (
-                ReadoutModule,
+            "output_head": (
+                Head,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
                     out_field='mu', #AtomicDataDict.NODE_OUTPUT_KEY,
