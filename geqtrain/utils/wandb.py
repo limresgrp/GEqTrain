@@ -36,14 +36,13 @@ def init_n_update(config):
         name=config.run_name,
         resume="allow",
         id=config.run_id,
-        save_code=True,
     )
 
     source = str(Path().resolve() / "geqtrain")
     dest = "./source_code.zip"
     make_archive(source, dest)
-    wandb.save(dest)
-    os.remove(dest)
+    wandb.save(dest, policy = "now")
+    # os.remove(dest) # can't remove since wandb.save call is async
 
     # # download from wandb set up
     updated_parameters = dict(wandb.config)
