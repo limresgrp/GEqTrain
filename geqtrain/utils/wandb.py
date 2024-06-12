@@ -2,6 +2,22 @@ import wandb
 import logging
 from wandb.util import json_friendly_val
 
+from pathlib import Path
+
+import os, shutil
+def make_archive(source, destination):
+    '''
+    example usage:
+    make_archive('/path/to/folder', '/path/to/folder.zip')
+    '''
+    base = os.path.basename(destination)
+    name = base.split('.')[0]
+    format = base.split('.')[1]
+    archive_from = os.path.dirname(source)
+    archive_to = os.path.basename(source.strip(os.sep))
+    shutil.make_archive(name, format, archive_from, archive_to)
+    shutil.move('%s.%s'%(name,format), destination)
+
 
 def init_n_update(config):
     conf_dict = dict(config)
@@ -20,7 +36,15 @@ def init_n_update(config):
         name=config.run_name,
         resume="allow",
         id=config.run_id,
+        save_code=True,
     )
+
+    source = str(Path().resolve() / "geqtrain")
+    dest = "./source_code.zip"
+    make_archive(source, dest)
+    wandb.save(dest)
+    os.remove(dest)
+
     # # download from wandb set up
     updated_parameters = dict(wandb.config)
     for k, v_new in updated_parameters.items():
