@@ -52,7 +52,7 @@ class SimpleLoss:
         self,
         pred: dict,
         ref: dict,
-        key: str,
+        key: str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
     ):
         ref_key, pred_key, has_nan, not_zeroes = self.prepare(pred, ref, key)

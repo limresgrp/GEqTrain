@@ -21,7 +21,7 @@ from geqtrain.nn.cutoffs import polynomial_cutoff
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
-from torch.nn import ModuleList
+from torch.nn import ModuleList, LayerNorm
 
 SCALAR = o3.Irrep("0e")  # define for convinience
 
@@ -136,7 +136,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         )
 
         # for normalization of features: one per layer, eg: torch.as_tensor([5.] * 2) = tensor([5., 5.,)]
-        self.register_buffer("env_sum_normalizations", torch.as_tensor([5.] * num_layers)) #! IMPO: SHOULD BE SQRT(AVG NUM OF ATOMS IN NEIGH)
+        self.register_buffer("env_sum_normalizations", torch.as_tensor([avg_num_neighbors] * num_layers)) #! IMPO: SHOULD BE SQRT(AVG NUM OF ATOMS IN NEIGH)
         self.register_buffer("per_layer_cutoffs",      torch.full((num_layers + 1,), r_max))
 
         self.register_buffer("_zero",                  torch.as_tensor(0.0))
@@ -361,6 +361,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             }
         )
 
+        self.norm_layer = LayerNorm(self.latents[-1].out_features + env_embed_multiplicity * self._n_scalar_outs[layer_idx])
+
 
     def apply_residual_connection(self, layer_index, new_latents, latents, layer_update_coefficients):
         '''applies residual path
@@ -496,7 +498,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         out_features = self.reshape_back_features(out_features)
 
         # - output scalar values
-        scalars = self.final_latent(latent_inputs_to_cat)
+        scalars = self.norm_layer(latent_inputs_to_cat)
+        scalars = self.final_latent(scalars)
+
         out_features[:, :n_scalars * self.env_embed_mul] = scalars
 
         data[self.out_field] = out_features

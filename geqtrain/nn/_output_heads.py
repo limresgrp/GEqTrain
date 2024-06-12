@@ -51,10 +51,22 @@ class Head(GraphModuleMixin, torch.nn.Module):
             my_irreps_in={field: irreps},
             irreps_out={out_field: out_irreps},
         )
+        
+        irreps_muls = []
+        n_l = {}
+        n_dim = 0
+        for mul, ir in irreps:
+            irreps_muls.append(mul)
+            n_l[ir.l] = n_l.get(ir.l, 0) + 1
+            n_dim += ir.dim
+        assert all([irreps_mul == irreps_muls[0] for irreps_mul in irreps_muls])
+
+        self.irreps_mul = irreps_muls[0]
+        self.n_l = n_l
 
         self.head = head_function(
-                mlp_input_dimension=192, #[AtomicDataDict.NODE_FEATURES_KEY].shape[-1],
-                mlp_latent_dimensions= [128],
+                mlp_input_dimension=self.irreps_mul * self.n_l[0],
+                mlp_latent_dimensions= [], #
                 mlp_output_dimension=1,
                 **head_function_kwargs,
             )
