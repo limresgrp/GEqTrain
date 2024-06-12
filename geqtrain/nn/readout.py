@@ -20,8 +20,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         out_field: Optional[str] = None,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
-        per_species_bias=None,
-        has_bias=True,
+        per_type_bias=None,
+        has_bias=False,
         eq_has_internal_weights=False,
         irreps_in=None,
     ):
@@ -67,14 +67,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 **readout_latent_kwargs,
             )
 
-            if per_species_bias is not None:
-                self.has_bias = True
-                assert len(per_species_bias) == num_types
-                per_species_bias = torch.tensor(per_species_bias, dtype=torch.get_default_dtype())
-            elif self.has_bias:
-                per_species_bias = torch.zeros(num_types, dtype=torch.get_default_dtype())
             if self.has_bias:
-                self.per_species_bias = torch.nn.Parameter(per_species_bias.reshape(num_types, -1))
+                if per_type_bias is not None:
+                    assert len(per_type_bias) == num_types
+                    per_type_bias = torch.tensor(per_type_bias, dtype=torch.get_default_dtype())
+                else:
+                    per_type_bias = torch.zeros(num_types, dtype=torch.get_default_dtype())
+                self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
 
         if out_irreps.dim > self.n_scalars_out:
             self.has_eq_out = True
@@ -117,7 +116,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             if self.has_bias:
                 edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
                 center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
-                inv_features[edge_center] += self.per_species_bias[center_species]
+                inv_features[edge_center] += self.per_type_bias[center_species]
             out_features[:, :self.n_scalars_out] += inv_features
 
         if self.has_eq_out:
@@ -156,7 +155,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         out_field: Optional[str] = None,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
-        per_species_bias=None,
+        per_type_bias=None,
         has_bias=True,
         irreps_in=None,
     ):
@@ -222,14 +221,14 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 **readout_latent_kwargs,
             )
 
-            if per_species_bias is not None:
+            if per_type_bias is not None:
                 self.has_bias = True
-                assert len(per_species_bias) == num_types
-                per_species_bias = torch.tensor(per_species_bias, dtype=torch.get_default_dtype())
+                assert len(per_type_bias) == num_types
+                per_type_bias = torch.tensor(per_type_bias, dtype=torch.get_default_dtype())
             elif self.has_bias:
-                per_species_bias = torch.zeros(num_types, dtype=torch.get_default_dtype())
+                per_type_bias = torch.zeros(num_types, dtype=torch.get_default_dtype())
             if self.has_bias:
-                self.per_species_bias = torch.nn.Parameter(per_species_bias.reshape(num_types, -1))
+                self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
 
         if out_irreps.dim > self.out_irreps_mul * self.n_l_out.get(0, 0):
             self.has_eq_out = True
@@ -271,7 +270,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             if self.has_bias:
                 edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
                 center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
-                inv_features[edge_center] += self.per_species_bias[center_species]
+                inv_features[edge_center] += self.per_type_bias[center_species]
             out_features[:, :, :self.n_l_out[0]] += inv_features.reshape(-1, self.out_irreps_mul, self.n_l_out[0])
 
         if self.has_eq_out:

@@ -322,8 +322,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                             )
                         ),
                         mlp_output_dimension=None,
-                        # weight_norm=True,
-                        # dim=0,
+                        weight_norm=False,
                     )
                 )
                 self._latent_dim = self.latents[-1].out_features
@@ -337,8 +336,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                             + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
                         ),
                         mlp_output_dimension=None,
-                        # weight_norm=True,
-                        # dim=0,
+                        weight_norm=False,
                     )
                 )
 
@@ -348,8 +346,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 env_embed(
                     mlp_input_dimension=self.latents[-1].out_features,
                     mlp_output_dimension=generate_n_weights,
-                    # weight_norm=True,
-                    # dim=0,
+                    weight_norm=False,
                 )
             )
 
@@ -369,6 +366,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 )
             )
 
+        self.out_multiplicity = out_irreps[0].mul
         self.final_latent = latent(
             mlp_input_dimension=(
                 # the embedded latent invariants from the previous layer(s)
@@ -376,9 +374,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 # and the invariants extracted from the last layer's TP:
                 + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx]
             ),
-            mlp_output_dimension=self._features_n_scalar_outs[layer_idx],
-            # weight_norm=True,
-            # dim=0,
+            mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_idx],
+            weight_norm=False,
         )
 
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
@@ -433,7 +430,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Initialize state
         out_features = torch.zeros(
-            (num_edges, self.out_irreps[0].mul, sum([irr.ir.dim for irr in self.out_irreps])),
+            (num_edges, self.out_multiplicity, sum([irr.ir.dim for irr in self.out_irreps])),
             dtype=torch.get_default_dtype(),
             device=edge_attr.device
         )
@@ -620,7 +617,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
         scalars = self.final_latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
         
-        out_features[active_edges, :features_n_scalars] = scalars
+        out_features[active_edges, :self.out_multiplicity * features_n_scalars] = scalars
 
         data[self.out_field] = out_features
         return data

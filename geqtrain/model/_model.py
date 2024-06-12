@@ -63,10 +63,9 @@ def Model(
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_irreps=None,
                     eq_has_internal_weights=True,
-                    has_bias=False,
                 ),
             ),
-            "per_node_features": (
+            "pooling": (
                 EdgewiseReduce,
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -79,6 +78,7 @@ def Model(
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
                     out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    has_bias=True,
                 ),
             ),
         }
