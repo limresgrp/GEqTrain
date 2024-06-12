@@ -171,16 +171,15 @@ class Trainer:
         report_init_validation: bool = True,
         verbose="INFO",
         chunking: bool = False,
+        sanitize_gradients: bool = False,
         **kwargs,
     ):
-
-        self.debug_idx = 0
 
 
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.chunking = chunking
-
+        self.sanitize_gradients = sanitize_gradients
         self.cumulative_wall = 0
         logging.debug("* Initialize Trainer")
 
@@ -913,8 +912,8 @@ class Trainer:
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward, nb data is custom pyg Batch
 
-        ref = {'mu': batch['mu']} #! TODO integrate this in batch obj ref is a dict, not a tensor
-
+        # ref = {'mu': batch['mu'][:, 0]} #! TODO integrate this in batch obj ref is a dict, not a tensor
+        ref = {'mu': batch['mu']}
         with cm:
             out = self.model(batch) # forward of the model
         del batch
@@ -929,9 +928,10 @@ class Trainer:
             if self.max_gradient_norm < float("inf"): # grad clipping
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
 
-            for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    param.grad[torch.isnan(param.grad)] = 0
+            if self.sanitize_gradients:
+                for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        param.grad[torch.isnan(param.grad)] = 0
 
             self.optim.step()
             # self.model.normalize_weights() #? scales parms by their norm (Not weight_norm)
@@ -995,7 +995,6 @@ class Trainer:
                         data=batch,
                         validation=(category == VALIDATION),
                     )
-                    self.debug_idx +=1
 
                 self.end_of_batch_log(batch_type=category)
                 for callback in self._end_of_batch_callbacks:
@@ -1331,11 +1330,13 @@ class TrainerWandB(Trainer):
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
 
-    def init(self):
+    def init(self, experiment_description: str = ""):
         super().init()
 
         if not self._initialized:
             return
+
+        wandb.log({"Experiment Description": experiment_description})
 
         # upload some new fields to wandb
         wandb.config.update({"num_weights": self.num_weights})
