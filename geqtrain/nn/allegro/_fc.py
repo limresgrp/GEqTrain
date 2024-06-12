@@ -27,6 +27,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_nonlinearity: Optional[str] = "silu",
         weight_norm: bool = True,
         dim: int = 0,
+        has_bias: bool = False
     ):
         super().__init__()
         nonlinearity = {
@@ -74,6 +75,13 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 norm_from_last / sqrt(float(h_in))
             )
 
+            # make biases if requested
+            if has_bias:
+                b = torch.empty(h_out)
+                b.normal_()
+                params[f"_bias_{layer}"] = b
+                b = Proxy(graph.get_attr(f"_bias_{layer}"))
+
             if self.weight_norm:
                 w_g = norm_except_dim(w_v, 2, self.dim).data
                 params[f"_weight_{layer}_g"] = w_g
@@ -85,8 +93,11 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
             if self.weight_norm:
                 features = torch.matmul(features, _weight_norm(w_v, w_g, self.dim))
+                features = features + b if has_bias else features
+
             else:
                 features = torch.matmul(features, w_v)
+                features = features + b if has_bias else features
 
             # generate nonlinearity code
             if nonlinearity is not None and layer < num_layers - 1:
