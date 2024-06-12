@@ -27,7 +27,7 @@ class Head(GraphModuleMixin, torch.nn.Module):
 
         field: str,
 
-        out_irreps: Union[o3.Irreps, str], # only if ur output is a geometric tensor
+        out_irreps: Union[o3.Irreps, str],
 
         irreps_in={}, # due to super ctor call
         out_field: Optional[str] = None, # on which key of the AtomicDataDict to place output
@@ -39,19 +39,16 @@ class Head(GraphModuleMixin, torch.nn.Module):
         self.field = field
         irreps = irreps_in[field]
 
-        # self.out_irreps = out_irreps
-        # self.irreps_in = irreps_in
         self.out_field = out_field
         self.head_function = head_function
 
         # here take irreps_in of the data that u want to use i.e. field
-        # irreps = irreps_in[field]
         self._init_irreps(
             irreps_in=irreps_in,
             my_irreps_in={field: irreps},
             irreps_out={out_field: out_irreps},
         )
-        
+
         irreps_muls = []
         n_l = {}
         n_dim = 0
@@ -64,15 +61,19 @@ class Head(GraphModuleMixin, torch.nn.Module):
         self.irreps_mul = irreps_muls[0]
         self.n_l = n_l
 
+        out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+        assert all([l == 0 for l in out_irreps.ls])
         self.head = head_function(
                 mlp_input_dimension=self.irreps_mul * self.n_l[0],
-                mlp_latent_dimensions= [], #
-                mlp_output_dimension=1,
+                mlp_output_dimension=out_irreps.dim, # .dim takes number of entries in vect
                 **head_function_kwargs,
+                # TODO see how add bias
             )
 
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+
+        data = AtomicDataDict.with_batch(data)
 
         # get a single feature vector by summing node features
         features = data[self.field]

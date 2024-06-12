@@ -1,18 +1,18 @@
 # general
-root: results/debug_runs
-run_name: run
-experiment_description: hello boy
+root: results/qm9_mu
+run_name: testing
+experiment_description: hello boy yoyo
+
 
 seed: 0
 dataset_seed: 0
 append: true
 default_dtype: float32
-device: cuda:0
+device: cuda:3
 
 # -- network --
 model_builders:
   - geqtrain.model.Model
-  # - geqtrain.model.Allegro
 
 # cutoffs
 r_max: 50.0
@@ -28,7 +28,7 @@ parity: o3_full
 
 # layers:
 num_layers: 1
-env_embed_multiplicity: 64
+env_embed_multiplicity: 341 #64
 
 env_embed_mlp_latent_dimensions: [64, 64]
 env_embed_mlp_nonlinearity: ssp
@@ -44,6 +44,7 @@ product_correlation: 2   # Maximum correlation order of tensor product expansion
 # head
 head_function_mlp_latent_dimensions: [128]
 head_function_mlp_nonlinearity: null
+head_function_mlp_has_bias: true
 
 # - end layers -
 
@@ -58,12 +59,12 @@ readout_mlp_nonlinearity: null
 
 out_irreps: '12x0e'
 
-# -- data --
-# n_train: [1,1,1,1,1,1,1,1,0,0] # out of train data, which idxs to use to train and which to use to val
-
+# dataset creation source data:
+# https://www.tensorflow.org/datasets/catalog/qm9
+# used the one with lowest ammout of train data
 dataset_list:
   - dataset: npz
-    dataset_input: /storage_common/nobilm/qm_npz/TEST_FULL_LABELS/ # /storage_common/nobilm/qm_npz/small_sample_train/
+    dataset_input:  /storage_common/nobilm/qm_npz/TEST_FULL_LABELS/
     key_mapping:
       coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
       atom_types: node_types
@@ -73,20 +74,16 @@ dataset_list:
 
 validation_dataset_list:
   - validation_dataset: npz
-    validation_dataset_input: /storage_common/nobilm/qm_npz/TEST_FULL_LABELS/ #/storage_common/nobilm/qm_npz/small_sample_test/
+    validation_dataset_input:  /storage_common/nobilm/qm_npz/TEST_FULL_LABELS/
     key_mapping:
-      coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
+      coords: pos
       atom_types: node_types
-      graph_labels: mu # mu kword used in code, since custom it has to be registered; for custom values it must be defined below if it is a node_fields, edge_fields, graph_fields, long_fields
+      graph_labels: mu
     npz_fixed_field_keys:
     - node_types
 
-# node_fields:
-  # - node_output # da registrare in atom dict la lista dei label_name
-# edge_fields:
 graph_fields:
   - mu
-# long_fields:
 
 num_types: 5
 
@@ -99,6 +96,11 @@ loss_coeffs:
     - MSELoss
     - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
       ignore_zeroes: true
+  # - mu: # target -? key taken from dat dict of batch
+  #   - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
+  #   - MSELoss
+  #   - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
+  #     ignore_zeroes: true
 
 metrics_components:
   - - mu
@@ -113,14 +115,14 @@ report_init_validation: false
 #############################################################################################################################
 
 # logging
-wandb: false
-wandb_project: example
+wandb: true
+wandb_project: qm9_mu_10k_good_val
 verbose: info
 log_batch_freq: 20
 
 # training
-batch_size: 32
-validation_batch_size: 32
+batch_size: 64
+validation_batch_size: 128
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
 
@@ -158,6 +160,6 @@ early_stopping_lower_bounds:
   LR: 1.0e-5
 
 early_stopping_patiences:
-  validation_loss: 100
+  validation_loss: 10
 
 sanitize_gradients: false
