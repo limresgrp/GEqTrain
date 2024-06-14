@@ -62,9 +62,9 @@ class Metrics:
         self.params = {}
         self.funcs = {}
         self.kwargs = {}
-        for component in components:
+        for component in components: # components is a list
             if isinstance(component, dict):
-                for key, _, func, func_params in parse_dict(component):
+                for key, _, func, func_params in parse_dict(component): # func is a ctor
 
                     func_params["PerSpecies"] = func_params.get("PerSpecies", False)
                     func_params["PerNode"] = func_params.get("PerNode", False)
@@ -84,15 +84,16 @@ class Metrics:
                     kwargs.pop("PerSpecies")
                     kwargs.pop("PerNode")
                     kwargs.pop("functional")
+                    kwargs.pop("PerLabel")
 
                     # by default, report a scalar that is mae and rmse over all component
-                    loss_func = find_loss_function(func_params["functional"], func_params)
+                    loss_func = find_loss_function(func, func_params)
                     self.funcs[key][param_hash] = loss_func
                     reduction = getattr(loss_func, "reduction", Reduction.MEAN)
                     self.kwargs[key][param_hash] = dict(reduction=reduction)
                     self.kwargs[key][param_hash].update(kwargs)
                     self.params[key][param_hash] = (reduction, func_params)
-                    
+
 
     def init_runstat(self, params, error: torch.Tensor):
         """
@@ -138,6 +139,7 @@ class Metrics:
                 _, params = self.params[key][param_hash]
                 per_species = params["PerSpecies"]
                 per_node = params["PerNode"]
+                per_label = params["PerLabel"]
 
                 # initialize the internal run_stat base on the error shape
                 if param_hash not in self.running_stats[key]:
@@ -152,10 +154,15 @@ class Metrics:
                     params = {
                         "accumulate_by": pred[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
                     }
+                elif per_label:
+                    params = {
+                        "accumulate_by": torch.arange(12, device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
+                    }
                 if per_node:
                     if N is None:
                         N = torch.bincount(ref[AtomicDataDict.BATCH_KEY]).unsqueeze(-1)
                     error_N = error / N
+
                 else:
                     error_N = error
 
@@ -208,6 +215,7 @@ class Metrics:
 
             stat = self.running_stats[key][param_hash]
             per_species = params["PerSpecies"]
+            per_label = params["PerLabel"]
 
             if per_species:
                 if stat.output_dim == tuple():
@@ -227,6 +235,26 @@ class Metrics:
                             name = f"{ele}_{item_name}_{idx}"
                             flat_dict[name] = v.item()
                             skip_keys.append(name)
+
+            elif per_label:
+                if stat.output_dim == tuple():
+                    if type_names is None:
+                        type_names = [i for i in range(len(value))]
+                    for id_ele, v in enumerate(value):
+                        # if type_names is not None:
+                        #     flat_dict[f"{type_names[id_ele]}_{item_name}"] = v.item()
+                        # else:
+                            flat_dict[f"{id_ele}_{item_name}"] = v.item()
+
+                    flat_dict[f"psavg_{item_name}"] = value.mean().item()
+                else:
+                    for id_ele, vec in enumerate(value):
+                        ele = type_names[id_ele]
+                        for idx, v in enumerate(vec):
+                            name = f"{ele}_{item_name}_{idx}"
+                            flat_dict[name] = v.item()
+                            skip_keys.append(name)
+
 
             else:
                 if stat.output_dim == tuple():
