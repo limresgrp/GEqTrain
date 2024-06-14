@@ -69,7 +69,7 @@ def Model(
                 Head,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
-                    out_field='mu', #AtomicDataDict.NODE_OUTPUT_KEY,
+                    out_field='graph_labels', #AtomicDataDict.NODE_OUTPUT_KEY,
                     has_bias=True,
                 ),
             ),

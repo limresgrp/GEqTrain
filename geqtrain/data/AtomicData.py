@@ -40,7 +40,7 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_TYPE_KEY,
 }
 _DEFAULT_GRAPH_FIELDS: Set[str] = { # register here target, this kword defd here is what is going to be used in the this code to reference at this part of the data
-    'mu',
+    'graph_labels',
 }
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)

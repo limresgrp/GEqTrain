@@ -1,8 +1,7 @@
 # general
 root: results/qm9_mu
 run_name: testing
-experiment_description: hello boy yoyo
-
+experiment_description: test
 
 seed: 0
 dataset_seed: 0
@@ -28,7 +27,7 @@ parity: o3_full
 
 # layers:
 num_layers: 1
-env_embed_multiplicity: 341 #64
+env_embed_multiplicity: 341
 
 env_embed_mlp_latent_dimensions: [64, 64]
 env_embed_mlp_nonlinearity: ssp
@@ -68,7 +67,7 @@ dataset_list:
     key_mapping:
       coords: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
       atom_types: node_types
-      graph_labels: mu # mu kword used in code, since custom it has to be registered; for custom values it must be defined below if it is a node_fields, edge_fields, graph_fields, long_fields
+      graph_labels: graph_labels # mu kword used in code, since custom it has to be registered; for custom values it must be defined below if it is a node_fields, edge_fields, graph_fields, long_fields
     npz_fixed_field_keys:
     - node_types
 
@@ -78,12 +77,12 @@ validation_dataset_list:
     key_mapping:
       coords: pos
       atom_types: node_types
-      graph_labels: mu
+      graph_labels: graph_labels
     npz_fixed_field_keys:
     - node_types
 
 graph_fields:
-  - mu
+  - graph_labels
 
 num_types: 5
 
@@ -91,23 +90,19 @@ num_types: 5
 
 # loss function
 loss_coeffs:
-  - mu: # target -? key taken from dat dict of batch
+  - graph_labels: # target -? key taken from dat dict of batch
     - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
-    - MSELoss
+    - MSELoss # func initializzato
     - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
       ignore_zeroes: true
-  # - mu: # target -? key taken from dat dict of batch
-  #   - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
-  #   - MSELoss
-  #   - ignore_nan: true # wheter or not to ignore gradients if they are nan wrt this loss
-  #     ignore_zeroes: true
 
+# metrics report
 metrics_components:
-  - - mu
-    - mae
-    - PerSpecies: True
-      ignore_nan: True
-      functional: L1Loss
+  - graph_labels: # key
+    - geqtrain.train._loss.PerLabelLoss # func
+    - PerLabel: True
+      # functional: L1Loss # which already is def val
+
 
 ### I think this is wrong
 report_init_validation: false
@@ -115,13 +110,13 @@ report_init_validation: false
 #############################################################################################################################
 
 # logging
-wandb: true
+wandb: false
 wandb_project: qm9_mu_10k_good_val
 verbose: info
 log_batch_freq: 20
 
 # training
-batch_size: 64
+batch_size: 128
 validation_batch_size: 128
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #

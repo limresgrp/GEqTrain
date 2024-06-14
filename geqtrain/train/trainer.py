@@ -271,6 +271,13 @@ class Trainer:
         self.init() # initializes model, optimizer, scheduler, early stopping
 
     def init_objects(self):
+        '''
+        Initializes:
+        - optimizer
+        - scheduler
+        - early stopping conditions
+
+        '''
         # initialize optimizer
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -912,8 +919,7 @@ class Trainer:
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward, nb data is custom pyg Batch
 
-        # ref = {'mu': batch['mu'][:, 0]} #! TODO integrate this in batch obj ref is a dict, not a tensor
-        ref = {'mu': batch['mu']}
+        ref = {'graph_labels': batch['graph_labels']}
         with cm:
             out = self.model(batch) # forward of the model
         del batch
@@ -997,8 +1003,10 @@ class Trainer:
                     )
 
                 self.end_of_batch_log(batch_type=category)
+
                 for callback in self._end_of_batch_callbacks:
                     callback(self)
+
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
 
@@ -1031,7 +1039,7 @@ class Trainer:
         header = "epoch, batch"
         log_header = "# Epoch batch"
 
-        # print and store loss value
+        # print and store loss value in batch_logger
         for name, value in self.batch_losses.items():
             mat_str += f", {value:16.5g}"
             header += f", {name}"
@@ -1040,11 +1048,11 @@ class Trainer:
 
         # append details from metrics
         metrics, skip_keys = self.metrics.flatten_metrics(
-            metrics=self.batch_metrics,
+            metrics=self.batch_metrics, #
             type_names=self.type_names,
         )
-        for key, value in metrics.items():
 
+        for key, value in metrics.items(): # log metrics
             mat_str += f", {value:16.5g}"
             header += f", {key}"
             if key not in skip_keys:
