@@ -917,7 +917,7 @@ class Trainer:
                         param.grad[torch.isnan(param.grad)] = 0
 
                 self.optim.step()
-                self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
+                # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
 
                 if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
                     self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
@@ -940,8 +940,7 @@ class Trainer:
 
         if validation:
             self.model.eval()
-            # cm = torch.no_grad()
-            cm = contextlib.nullcontext()
+            cm = torch.no_grad()
         else:
             self.model.train()
             cm = contextlib.nullcontext()
