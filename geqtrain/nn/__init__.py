@@ -8,6 +8,7 @@ from ._edgewise import (  # noqa: F401
 from .interaction import InteractionModule
 from .readout import ReadoutModule
 from ._output_heads import Head
+from ._output_scaler import OutputScaler
 
 __all__ = [
     GraphModuleMixin,
@@ -20,4 +21,5 @@ __all__ = [
     InteractionModule,
     ReadoutModule,
     Head,
+    OutputScaler,
     ]

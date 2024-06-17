@@ -13,7 +13,8 @@ from geqtrain.nn import (
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
-    Head
+    Head,
+    OutputScaler
 )
 
 
@@ -69,8 +70,13 @@ def Model(
                 Head,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
-                    out_field='graph_labels', #AtomicDataDict.NODE_OUTPUT_KEY,
-                    has_bias=True,
+                    out_field='graph_labels',
+                ),
+            ),
+            "output_scaler": (
+                OutputScaler,
+                dict(
+                    out_field='graph_labels',
                 ),
             ),
         }

@@ -172,14 +172,12 @@ class Trainer:
         verbose="INFO",
         chunking: bool = False,
         sanitize_gradients: bool = False,
+        target_names: list = None,
         **kwargs,
     ):
 
-
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
-        self.chunking = chunking
-        self.sanitize_gradients = sanitize_gradients
         self.cumulative_wall = 0
         logging.debug("* Initialize Trainer")
 
@@ -191,6 +189,37 @@ class Trainer:
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
+
+        # --- loss/logger printing info
+        #! I DONT LIKE THIS HARD CODED, options:
+        # - the func below could be used but still improvable
+        ''' def get_name(self, x):
+            for name, value in self._attr_map.items():
+                if value is x:
+                    return name
+            return ""
+        '''
+        # - in yaml:
+        '''
+        metrics_metadata:
+            type_names: [a,b]
+            target_names: [a,b]
+
+        which is:
+        {
+            "metrics_metadata": {
+                "target_names": ["a","b"],
+                "type_names": ["a","b"]
+            }
+        }
+        '''
+        # such to have the dstruct for .flatten_metrics( directly from yaml, but idk if this works for dani
+        # nb also .flatten_metrics( had to be changed to match the dict interface
+
+        self.metrics_metadata = {
+            'type_names'   : self.type_names,
+            'target_names' : self.target_names,
+        }
 
         # --- get I/O handler
         output = Output.get_output(dict(**_local_kwargs, **kwargs))
@@ -1048,8 +1077,8 @@ class Trainer:
 
         # append details from metrics
         metrics, skip_keys = self.metrics.flatten_metrics(
-            metrics=self.batch_metrics, #
-            type_names=self.type_names,
+            metrics=self.batch_metrics,
+            metrics_metadata=self.metrics_metadata,
         )
 
         for key, value in metrics.items(): # log metrics
@@ -1153,7 +1182,7 @@ class Trainer:
 
             met, skip_keys = self.metrics.flatten_metrics(
                 metrics=self.metrics_dict[category],
-                type_names=self.type_names,
+                metrics_metadata=self.metrics_metadata,
             )
 
             # append details from loss

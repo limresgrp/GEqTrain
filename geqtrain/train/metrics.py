@@ -196,7 +196,10 @@ class Metrics:
                 metrics[(key, reduction)] = stat.current_result()
         return metrics
 
-    def flatten_metrics(self, metrics, type_names=None):
+    def flatten_metrics(self, metrics, metrics_metadata: dict[str,list[str]]=None):
+
+        type_names = metrics_metadata.get('type_names', [])
+        target_names = metrics_metadata.get('target_names', [])
 
         flat_dict = {}
         skip_keys = []
@@ -235,15 +238,14 @@ class Metrics:
                             name = f"{ele}_{item_name}_{idx}"
                             flat_dict[name] = v.item()
                             skip_keys.append(name)
-
             elif per_label:
                 if stat.output_dim == tuple():
-                    if type_names is None:
-                        type_names = [i for i in range(len(value))]
+                    if target_names is None:
+                        target_names = [i for i in range(len(value))]
                     for id_ele, v in enumerate(value):
-                        # if type_names is not None:
-                        #     flat_dict[f"{type_names[id_ele]}_{item_name}"] = v.item()
-                        # else:
+                        if target_names is not None:
+                            flat_dict[f"{target_names[id_ele]}"] = v.item()
+                        else:
                             flat_dict[f"{id_ele}_{item_name}"] = v.item()
 
                     flat_dict[f"psavg_{item_name}"] = value.mean().item()

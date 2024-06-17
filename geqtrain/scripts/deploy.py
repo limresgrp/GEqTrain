@@ -14,7 +14,7 @@ import logging
 import yaml
 import itertools
 import torch
-import ase.data
+# import ase.data
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
@@ -238,10 +238,10 @@ def main(args=None):
         if "allowed_species" in config:
             # This is from before the atomic number updates
             n_species = len(config["allowed_species"])
-            type_names = {
-                type: ase.data.chemical_symbols[atomic_num]
-                for type, atomic_num in enumerate(config["allowed_species"])
-            }
+            # type_names = {
+            #     type: ase.data.chemical_symbols[atomic_num]
+            #     for type, atomic_num in enumerate(config["allowed_species"])
+            # }
         else:
             # The new atomic number setup
             n_species = str(config["num_types"])
