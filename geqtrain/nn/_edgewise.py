@@ -89,6 +89,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                     self.out_field: out_irreps
                 }
             )
+        else:
+            self.node_attr_to_query = None
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -96,8 +98,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
-
-        if self.use_attention:
+        
+        if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
             Q = Q.reshape(-1, self.K_out_dim, self.head_dim)[edge_center]
 

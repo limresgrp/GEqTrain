@@ -83,6 +83,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         SCALAR = o3.Irrep("0e")  # define for convinience
+        self.DTYPE = torch.get_default_dtype()
 
         # save parameters
         assert (
@@ -381,6 +382,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
 
         # - end build modules -
+        out_feat_elems = []
+        for irr in out_irreps:
+            out_feat_elems.append(irr.ir.dim)
+        self.out_feat_elems = sum(out_feat_elems)
         self.out_irreps = out_irreps
 
         # - layer resnet update weights -
@@ -389,7 +394,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # note that the sigmoid of these are the factor _between_ layers
         # so the first entry is the ratio for the latent resnet of the first and second layers, etc.
         # e.g. if there are 3 layers, there are 2 ratios: l1:l2, l2:l3
-        self._latent_resnet_update_params  = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=torch.get_default_dtype()))
+        self._latent_resnet_update_params  = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=self.DTYPE))
 
         self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
         self.register_buffer("_zero", torch.as_tensor(0.0))
@@ -430,8 +435,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Initialize state
         out_features = torch.zeros(
-            (num_edges, self.out_multiplicity, sum([irr.ir.dim for irr in self.out_irreps])),
-            dtype=torch.get_default_dtype(),
+            (num_edges, self.out_multiplicity, self.out_feat_elems),
+            dtype=self.DTYPE,
             device=edge_attr.device
         )
         latents = torch.zeros(
@@ -563,8 +568,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 dim=0,
                 dim_size=num_nodes,
             )
-
-            active_node_centers = edge_center[active_edges].unique()
+            
+            active_node_centers = torch.unique(edge_center[active_edges])
             local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
 
             expanded_features_per_active_atom: torch.Tensor = prod(
