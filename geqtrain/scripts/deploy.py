@@ -14,7 +14,6 @@ import logging
 import yaml
 import itertools
 import torch
-import ase.data
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
@@ -138,30 +137,17 @@ def main(args=None):
         required = {}
     parser.add_argument("--verbose", help="log level", default="INFO", type=str)
     subparsers = parser.add_subparsers(dest="command", title="commands", **required)
-    info_parser = subparsers.add_parser(
-        "info", help="Get information from a deployed model file"
-    )
-    info_parser.add_argument(
-        "model_path",
-        help="Path to a deployed model file.",
-        type=pathlib.Path,
-    )
-    info_parser.add_argument(
-        "--print-config",
-        help="Print the full config of the model.",
-        action="store_true",
-    )
 
     build_parser = subparsers.add_parser("build", help="Build a deployment model")
-    build_parser.add_argument(
-        "--model",
-        help="Path to a YAML file defining a model to deploy. Unless you know why you need to, do not use this option.",
-        type=pathlib.Path,
-    )
     build_parser.add_argument(
         "--train-dir",
         help="Path to a working directory from a training session to deploy.",
         type=pathlib.Path,
+    )
+    build_parser.add_argument(
+        "--model-name",
+        help="Name of the .pth file inside the train directory. Default is 'best_model.pth'",
+        default="best_model.pth"
     )
     build_parser.add_argument(
         "out_file",
@@ -172,96 +158,39 @@ def main(args=None):
     args = parser.parse_args(args=args)
 
     logging.basicConfig(level=getattr(logging, args.verbose.upper()))
+    
+    
+    logging.info(f"Loading {args.model_name} from training session...")
+    config = Config.from_file(str(args.train_dir / "config.yaml"))
 
-    if args.command == "info":
-        model, metadata = load_deployed_model(
-            args.model_path, set_global_options=False, freeze=False
+    _set_global_options(config)
+
+    # -- load model --
+    model, _ = Trainer.load_model_from_training_session(
+        args.train_dir, model_name=args.model_name, device="cpu"
+    )
+
+    # -- compile --
+    model.prod()
+    model = _compile_for_deploy(model)
+    logging.info("Compiled & optimized model.")
+
+    # Deploy
+    metadata: dict = {}
+
+    metadata[R_MAX_KEY] = str(float(config["r_max"]))
+    metadata[JIT_BAILOUT_KEY] = str(config[JIT_BAILOUT_KEY])
+    
+    if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
+        metadata[JIT_FUSION_STRATEGY] = ";".join(
+            "%s,%i" % e for e in config[JIT_FUSION_STRATEGY]
         )
-        config = metadata.pop(CONFIG_KEY)
-        if args.print_config:
-            print(config)
-        else:
-            metadata_str = "\n".join("  %s: %s" % e for e in metadata.items())
-            logging.info(f"Loaded TorchScript model with metadata:\n{metadata_str}\n")
-            logging.info(
-                f"Model has {sum(p.numel() for p in model.parameters())} weights"
-            )
-            logging.info(
-                f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable weights"
-            )
-            logging.info(
-                f"Model weights and buffers take {sum(p.numel() * p.element_size() for p in itertools.chain(model.parameters(), model.buffers())) / (1024 * 1024):.2f} MB"
-            )
-            logging.debug(f"Model had config:\n{config}")
+    metadata[TF32_KEY] = str(int(config["allow_tf32"]))
+    metadata[CONFIG_KEY] = yaml.dump(dict(config))
 
-    elif args.command == "build":
-        if args.model and args.train_dir:
-            raise ValueError("--model and --train-dir cannot both be specified.")
-        if args.train_dir is not None:
-            logging.info("Loading best_model from training session...")
-            config = Config.from_file(str(args.train_dir / "config.yaml"))
-        elif args.model is not None:
-            logging.info("Building model from config...")
-            config = Config.from_file(str(args.model), defaults=default_config)
-        else:
-            raise ValueError("one of --train-dir or --model must be given")
-
-        _set_global_options(config)
-        check_code_version(config)
-
-        # -- load model --
-        if args.train_dir is not None:
-            model, _ = Trainer.load_model_from_training_session(
-                args.train_dir, model_name="best_model.pth", device="cpu"
-            )
-        elif args.model is not None:
-            model = model_from_config(config, deploy=True)
-        else:
-            raise AssertionError
-
-        # -- compile --
-        model.prod()
-        model = _compile_for_deploy(model)
-        logging.info("Compiled & optimized model.")
-
-        # Deploy
-        metadata: dict = {}
-        code_versions, code_commits = get_config_code_versions(config)
-        for code, version in code_versions.items():
-            metadata[code + "_version"] = version
-        if len(code_commits) > 0:
-            metadata[CODE_COMMITS_KEY] = ";".join(
-                f"{k}={v}" for k, v in code_commits.items()
-            )
-
-        metadata[R_MAX_KEY] = str(float(config["r_max"]))
-        if "allowed_species" in config:
-            # This is from before the atomic number updates
-            n_species = len(config["allowed_species"])
-            type_names = {
-                type: ase.data.chemical_symbols[atomic_num]
-                for type, atomic_num in enumerate(config["allowed_species"])
-            }
-        else:
-            # The new atomic number setup
-            n_species = str(config["num_types"])
-            type_names = config["type_names"]
-        metadata[N_SPECIES_KEY] = str(n_species)
-        metadata[TYPE_NAMES_KEY] = " ".join(type_names)
-
-        metadata[JIT_BAILOUT_KEY] = str(config[JIT_BAILOUT_KEY])
-        if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
-            metadata[JIT_FUSION_STRATEGY] = ";".join(
-                "%s,%i" % e for e in config[JIT_FUSION_STRATEGY]
-            )
-        metadata[TF32_KEY] = str(int(config["allow_tf32"]))
-        metadata[CONFIG_KEY] = yaml.dump(dict(config))
-
-        metadata = {k: v.encode("ascii") for k, v in metadata.items()}
-        os.makedirs(dirname(args.out_file), exist_ok=True)
-        torch.jit.save(model, args.out_file, _extra_files=metadata)
-    else:
-        raise ValueError
+    metadata = {k: v.encode("ascii") for k, v in metadata.items()}
+    os.makedirs(dirname(args.out_file), exist_ok=True)
+    torch.jit.save(model, args.out_file, _extra_files=metadata)
 
     return
 

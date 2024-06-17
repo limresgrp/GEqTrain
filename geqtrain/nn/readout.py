@@ -26,6 +26,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         irreps_in=None,
     ):
         super().__init__()
+
+        self.DTYPE = torch.get_default_dtype()
+
         self.field = field
         self.out_field = out_field or field
         self.has_inv_out = False
@@ -74,6 +77,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 else:
                     per_type_bias = torch.zeros(num_types, dtype=torch.get_default_dtype())
                 self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
+            else:
+                self.per_type_bias = None
 
         if out_irreps.dim > self.n_scalars_out:
             self.has_eq_out = True
@@ -101,25 +106,28 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
                  "Please remove non-scalar features from the input, which otherwise would remain unused."
             )
+            self.reshape_in = None
+        
+        self.out_irreps_dim = self.out_irreps.dim
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
         out_features = torch.zeros(
-            (len(features), self.out_irreps.dim),
-            dtype=torch.get_default_dtype(),
+            (len(features), self.out_irreps_dim),
+            dtype=self.DTYPE,
             device=features.device
         )
 
         if self.has_inv_out:
             inv_features = self.inv_readout(features[:, :self.n_scalars_in])
 
-            if self.has_bias:
-                edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+            if self.has_bias and self.per_type_bias is not None:
+                edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
                 center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
                 inv_features[edge_center] += self.per_type_bias[center_species]
             out_features[:, :self.n_scalars_out] += inv_features
 
-        if self.has_eq_out:
+        if self.has_eq_out and self.reshape_in is not None:
             eq_features = self.reshape_in(features[:, self.n_scalars_in:])
             if self.eq_has_internal_weights:
                 eq_features = self.eq_readout(eq_features)
