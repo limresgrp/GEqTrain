@@ -23,6 +23,12 @@ from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
 
 
+def fix_batch_dim(arr):
+    if len(arr.shape) == 0:
+        return arr.reshape(1)
+    return arr
+
+
 class AtomicDataset(Dataset):
     """The base class for all datasets."""
 
@@ -228,7 +234,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             for key in self.force_fixed_keys:
                 if key in fields:
                     fixed_fields[key] = fields.pop(key)[0]
-            
+
             index_fields = {}
             for key in self.force_index_keys:
                 if key in fields:
@@ -406,8 +412,3 @@ class NpzDataset(AtomicInMemoryDataset):
                 fixed_fields[key] = fixed_fields[key].astype(np.int64)
 
         return fields, fixed_fields
-
-def fix_batch_dim(arr):
-    if len(arr.shape) == 0:
-        return arr.reshape(1)
-    return arr

@@ -60,6 +60,9 @@ EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
 # [n_edges, dim] (possibly equivariant) features of the edges
 EDGE_FEATURES_KEY: Final[str] = "edge_features"
 
+GRAPH_LABELS: Final[str] = "graph_labels" # theorically [N_graphs, (n_of_labels)]
+
+
 NOISE: Final[str] = "noise"
 
 # Make a list of allowed keys

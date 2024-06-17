@@ -222,7 +222,7 @@ def main(args=None, running_as_script: bool = True):
             dataset_is_validation = True
         except KeyError:
             pass
-    
+
     if not (dataset_is_test or dataset_is_validation):
         # Get shared train + validation dataset
         # prefix `dataset`
@@ -386,7 +386,7 @@ def main(args=None, running_as_script: bool = True):
                     original_nodes = out[AtomicDataDict.ORIG_EDGE_INDEX_KEY][0].unique()
                     nodes = out[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
                     complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY][original_nodes] = out[AtomicDataDict.PER_ATOM_ENERGY_KEY][nodes].detach()
-                
+
                 if AtomicDataDict.FORCE_KEY in complete_out:
                     complete_out[AtomicDataDict.FORCE_KEY][original_nodes] = out[AtomicDataDict.FORCE_KEY][nodes].detach()
 
@@ -472,7 +472,7 @@ def main(args=None, running_as_script: bool = True):
                 )[0].items()
             )
         )
-"""     
+"""
 
 def load_model(model: Path, device="cpu"):
     logger = logging.getLogger("geqtrain-evaluate")
@@ -494,7 +494,7 @@ def load_model(model: Path, device="cpu"):
         return model, model_config
     except ValueError:  # its not a deployed model
         pass
-    
+
     global_config = model.parent / "config.yaml"
     global_config = Config.from_file(str(global_config))
     _set_global_options(global_config)
@@ -539,7 +539,7 @@ def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[s
                     device=chunk_node_out.device
                 )
             results[node_out_key][batch_chunk_center_nodes] = chunk_node_out[out[AtomicDataDict.EDGE_INDEX_KEY][0].unique()]
-        
+
         for extra_out_key in extra_out_keys:
             chunk_extra_out = out[extra_out_key]
             if extra_out_key not in results:
@@ -547,7 +547,7 @@ def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[s
             else:
                 fltr = torch.argwhere(~torch.isnan(chunk_extra_out[:, 0])).flatten()
                 results[extra_out_key][fltr] = chunk_extra_out[fltr]
-        
+
         # from e3nn import o3
         # R = o3.Irreps('1o').D_from_angles(*[torch.tensor(x) for x in [0, 90, 0]]).to(batch_['pos'].device)
         # batch_['pos'] = torch.einsum("ij,zj->zi", R, batch_['pos'])

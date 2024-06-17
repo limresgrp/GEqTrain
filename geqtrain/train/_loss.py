@@ -28,9 +28,13 @@ class SimpleLoss:
     if mean is True, return a scalar; else return the error matrix of each entry
     """
 
-    def __init__(self, func_name: str, params: dict = {}):
+    def __init__(self,
+                 func_name: str,
+                 params: dict = {}):
+
         for key, value in params.items():
             setattr(self, key, value)
+
         func, _ = instantiate_from_cls_name(
             torch.nn,
             class_name=func_name,
@@ -38,7 +42,9 @@ class SimpleLoss:
             positional_args=dict(reduction="none"),
             optional_args=params,
             all_args={},
+
         )
+
         self.func_name = func_name
         self.func = func
 
@@ -46,11 +52,11 @@ class SimpleLoss:
         self,
         pred: dict,
         ref: dict,
-        key: str,
+        key: str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
     ):
         ref_key, pred_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
-        
+
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
             loss = self.func(torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
@@ -72,18 +78,41 @@ class SimpleLoss:
         pred_key = pred.get(key, None)
         assert isinstance(pred_key, torch.Tensor)
         pred_key = pred_key.view_as(ref_key)
-            
+
         has_nan = torch.isnan(ref_key.sum()) or torch.isnan(pred_key.sum())
         if has_nan and not (hasattr(self, "ignore_nan") and self.ignore_nan):
             raise Exception(f"Either the predicted or true property '{key}' has nan values. "
                              "If this is intended, set 'ignore_nan' to true in config file for this loss.")
-        
+
         if hasattr(self, "ignore_zeroes") and self.ignore_zeroes:
             not_zeroes = (~torch.all(ref_key == 0., dim=-1)).int() if len(ref_key.shape) > 1 else (ref_key != 0)
         else:
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
         return ref_key,pred_key,has_nan,not_zeroes
+
+class PerLabelLoss(SimpleLoss):
+
+    def __init__(self, func_name: str, params: dict = ...):
+        self.instanciated = True
+        super().__init__(func_name, params)
+
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str, # first row of each element listed under loss_coeffs:
+        mean: bool = True,
+    ):
+        loss = self.func(pred[key], ref[key])
+
+        if mean:
+            return loss.mean()
+        else:
+            return loss.mean(dim=0)
+
+
 
 
 class PerSpeciesLoss(SimpleLoss):
@@ -103,8 +132,8 @@ class PerSpeciesLoss(SimpleLoss):
         if not mean:
             raise NotImplementedError("Cannot handle this yet")
 
-        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device))
-        has_nan = self.ignore_nan and torch.isnan(ref_key.sum())
+        ref_key = ref.get(key, torch.zeros_like(pred[key], device=pred[key].device)) # get tensor assiciated to the key in predictions else return zeros
+        has_nan = self.ignore_nan and torch.isnan(ref_key.sum()) # bool that defines wheter predictions have nans
 
         if has_nan:
             not_nan = (ref_key == ref_key).int()
@@ -112,7 +141,7 @@ class PerSpeciesLoss(SimpleLoss):
                 self.func(pred[key], torch.nan_to_num(ref_key, nan=0.0)) * not_nan
             )
         else:
-            per_node_loss = self.func(pred[key], ref_key)
+            per_node_loss = self.func(pred[key], ref_key) # call to loss func
 
         reduce_dims = tuple(i + 1 for i in range(len(per_node_loss.shape) - 1))
 
@@ -153,16 +182,16 @@ class PerSpeciesLoss(SimpleLoss):
 
 def find_loss_function(name: str, params):
     """
-    Search for loss functions in this module
+    Search for loss functions in this module     instanciates the loss obj
 
-    If the name starts with PerSpecies, return the PerSpeciesLoss instance
+    If the name starts with PerSpecies, rMSELosseturn the PerSpeciesLoss instance
     """
 
     wrapper_list = dict(
         perspecies=PerSpeciesLoss,
     )
 
-    if isinstance(name, str):
+    if isinstance(name, str): #  name is funct
         for key in wrapper_list:
             if name.lower().startswith(key):
                 logging.debug(f"create loss instance {wrapper_list[key]}")
@@ -170,7 +199,8 @@ def find_loss_function(name: str, params):
         try:
             module_name = ".".join(name.split(".")[:-1])
             class_name  = ".".join(name.split(".")[-1:])
-            return getattr(import_module(module_name), class_name)("MSELoss", params)
+            functional = params.get("functional", "MSELoss")
+            return getattr(import_module(module_name), class_name)(functional, params) # func_name, params of SimpleLoss ctor
         except Exception:
             return SimpleLoss(name, params)
     elif inspect.isclass(name):

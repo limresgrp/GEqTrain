@@ -78,23 +78,23 @@ class Loss:
 
         loss = 0.0
         contrib = {}
-        for key in self.keys:
-            _loss = self.funcs[key](
+        for key in self.keys: # for k in losses keys that have to be evaluated
+            _loss = self.funcs[key]( # call its associated func
                 pred=pred,
                 ref=ref,
                 key= self.remove_suffix(key),
                 mean=True,
             )
             contrib[key] = _loss
-            loss = loss + self.coeffs[key] * _loss
+            loss = loss + self.coeffs[key] * _loss # total_loss += weight_i * loss_i
 
         return loss, contrib
-    
+
     def register_coeffs(self, key: str, coeff: float, func: str, func_params: dict = {}):
         key = self.suffix_key(key)
         self.coeffs[key] = coeff
         self.funcs[key] = find_loss_function(func, func_params)
-    
+
     def suffix_key(self, key):
         suffix_id = 0
         key = self.add_suffix(key, suffix_id)
@@ -103,7 +103,7 @@ class Loss:
             key = self.add_suffix(key, suffix_id)
             suffix_id += 1
         return key
-    
+
     def remove_suffix(self, key):
         return re.sub('_suffix_\d+', '', key)
 

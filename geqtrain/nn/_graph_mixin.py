@@ -121,7 +121,7 @@ class GraphModuleMixin:
                 }
             )
         return out
-    
+
     def prod(self: T, mode: bool = True) -> T:
         r"""Sets the module in training mode.
 
@@ -146,7 +146,7 @@ class GraphModuleMixin:
             except:
                 pass
         return self
-    
+
     def normalize_weights(self: T) -> None:
         for module in self.children():
             try:
@@ -247,7 +247,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                     f"Builder `{builder}` for layer with name `{name}` did not return a GraphModuleMixin, instead got a {type(instance).__name__}"
                 )
 
-            built_modules.append(instance)
+            built_modules.append(instance) # calls ctor of each layer in layers that has been passed as input, returns the SequentialGraphNetwork indexable as OrderedDict
 
         return cls(
             OrderedDict(zip(layers.keys(), built_modules)),
@@ -391,7 +391,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         for module in self:
             input = module(input)
         return input
-    
+
     def normalize_weights(self) -> None:
         for module in self:
             module.normalize_weights()

@@ -33,14 +33,14 @@ def model_from_config(
 
     # Build
     builders = [
-        load_callable(b, prefix="geqtrain.model")
+        load_callable(b, prefix="geqtrain.model") # gets list of factory methods to be instanciated, model is a sequentially-wrapped-forward method object
         for b in config.get("model_builders", [])
     ]
 
     model = None
 
     for builder in builders:
-        pnames = inspect.signature(builder).parameters
+        pnames = inspect.signature(builder).parameters # gets kword of params requested in the Model func in geqtrain.model.Model (_model.py)
         params = {}
         if "initialize" in pnames:
             params["initialize"] = initialize
@@ -56,22 +56,20 @@ def model_from_config(
                 and pnames["dataset"].default == inspect.Parameter.empty
                 and dataset is None
             ):
-                raise RuntimeError(
-                    f"Builder {builder.__name__} requires the dataset, initialize is true, but no dataset was provided to `model_from_config`."
-                )
+                raise RuntimeError(f"Builder {builder.__name__} requires the dataset, initialize is true, but no dataset was provided to `model_from_config`.")
+
             params["dataset"] = dataset
+
         if "model" in pnames:
             if model is None:
-                raise RuntimeError(
-                    f"Builder {builder.__name__} asked for the model as an input, but no previous builder has returned a model"
-                )
+                raise RuntimeError(f"Builder {builder.__name__} asked for the model as an input, but no previous builder has returned a model")
             params["model"] = model
         else:
             if model is not None:
-                raise RuntimeError(
-                    f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't"
-                )
-        model = builder(**params)
+                raise RuntimeError(f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't")
+
+        model = builder(**params) # gather params via logic above and then calls Model constructor function which returns a SequentialGraphNetwork.from_parameters()
+            #  <- which again is a factory method that return the instance of a SequentialGraphModule obj
         # if model is not None and not isinstance(model, GraphModuleMixin):
         #     raise TypeError(
         #         f"Builder {builder.__name__} didn't return a GraphModuleMixin, got {type(model)} instead"

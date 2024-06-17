@@ -164,9 +164,7 @@ def instantiate(
             continue
 
         if not (callable(sub_builder) or inspect.isclass(sub_builder)):
-            raise ValueError(
-                f"Builder for submodule `{key}` must be a callable or a class, got `{sub_builder!r}` instead."
-            )
+            raise ValueError(f"Builder for submodule `{key}` must be a callable or a class, got `{sub_builder!r}` instead.")
 
         # add double check to avoid cycle
         # only overwrite the optional argument, not the positional ones
@@ -200,15 +198,11 @@ def instantiate(
                     {key + "_kwargs." + k: v for k, v in nested_km[t].items()}
                 )
         elif sub_builder in parent_builders:
-            raise RuntimeError(
-                f"cyclic recursion in builder {parent_builders} {sub_builder}"
-            )
+            raise RuntimeError(f"cyclic recursion in builder {parent_builders} {sub_builder}")
         elif not callable(sub_builder) and not inspect.isclass(sub_builder):
             logging.warning(f"subbuilder is not callable {sub_builder}")
         elif key + "_kwargs" in positional_args:
-            logging.warning(
-                f"skip searching for nested argument because {key}_kwargs are defined in positional arguments"
-            )
+            logging.warning(f"skip searching for nested argument because {key}_kwargs are defined in positional arguments")
 
     # remove duplicates
     for key in positional_args:
@@ -234,9 +228,7 @@ def instantiate(
     try:
         instance = builder(**positional_args, **final_optional_args)
     except Exception as e:
-        raise RuntimeError(
-            f"Failed to build object with prefix `{prefix}` using builder `{builder.__name__}`"
-        ) from e
+        raise RuntimeError(f"Failed to build object with prefix `{prefix}` using builder `{builder.__name__}`") from e
 
     return instance, final_optional_args
 

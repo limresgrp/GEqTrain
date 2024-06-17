@@ -39,40 +39,53 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
 }
-_DEFAULT_GRAPH_FIELDS: Set[str] = {
-    
+_DEFAULT_GRAPH_FIELDS: Set[str] = { # register here target, this kword defd here is what is going to be used in the this code to reference at this part of the data
+    'graph_labels',
 }
 
-_NODE_FIELDS: Set[str] = set(_DEFAULT_NODE_FIELDS)
-_EDGE_FIELDS: Set[str] = set(_DEFAULT_EDGE_FIELDS)
+_NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
+_EDGE_FIELDS:  Set[str] = set(_DEFAULT_EDGE_FIELDS)
 _GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
-_LONG_FIELDS: Set[str] = set(_DEFAULT_LONG_FIELDS)
+_LONG_FIELDS:  Set[str] = set(_DEFAULT_LONG_FIELDS)
 
 
 def register_fields(
-    node_fields: Sequence[str] = [],
-    edge_fields: Sequence[str] = [],
+    node_fields:  Sequence[str] = [],
+    edge_fields:  Sequence[str] = [],
     graph_fields: Sequence[str] = [],
-    long_fields: Sequence[str] = [],
+    long_fields:  Sequence[str] = [],
 ) -> None:
-    r"""Register fields as being per-node, per-edge, or per-graph.
+    r"""
 
+    Called during instantiation of the dataset using the cfg,
+    updates global dicts:
+    - _NODE_FIELDS
+    - _EDGE_FIELDS
+    - _GRAPH_FIELDS
+    - _LONG_FIELDS
+    that are used to parse the yaml and thus the data from source.
+
+
+    Register fields as being per-node, per-edge, or per-graph.
+    with this function we can register custom keys in the AtomicData/AtomicDataDict
+    register as key in the AtomicDataDict the values of the following yaml keys:
+        - node_fields
+        - edge_fields
+        - graph_fields
+        - long_fields
     """
-    node_fields: set = set(node_fields)
-    edge_fields: set = set(edge_fields)
+    node_fields:  set = set(node_fields)
+    edge_fields:  set = set(edge_fields)
     graph_fields: set = set(graph_fields)
     allfields = node_fields.union(edge_fields, graph_fields)
     assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields)
+
     _NODE_FIELDS.update(node_fields)
     _EDGE_FIELDS.update(edge_fields)
     _GRAPH_FIELDS.update(graph_fields)
     _LONG_FIELDS.update(long_fields)
-    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS)) < (
-        len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS)
-    ):
-        raise ValueError(
-            "At least one key was registered as more than one of node, edge, or graph!"
-        )
+    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS)):
+        raise ValueError("At least one key was registered as more than one of node, edge, or graph!")
 
 
 def _process_dict(kwargs, ignore_fields=[]):
@@ -294,7 +307,7 @@ def neighbor_list(
     Args:
         pos (shape [N, 3]): Positional coordinate; Tensor or numpy array. If Tensor, must be on CPU.
         r_max (float): Radial cutoff distance for neighbor finding.
-    
+
     Returns:
         edge_index (torch.tensor shape [2, num_edges]): List of edges.
     """

@@ -11,6 +11,8 @@ from geqtrain.utils.torch_geometric import Batch, Data
 class Collater(object):
     """Collate a list of ``AtomicData``.
 
+    callable
+
     Args:
         fixed_fields: which fields are fixed fields
         exclude_keys: keys to ignore in the input, not copying to the output
@@ -51,14 +53,14 @@ class Collater(object):
         for f in self.fixed_fields:
             if batch[0].__cat_dim__(f, None) is None:
                 new_dim_fixed.add(f)
+
         # TODO: cache ^ and the batched versions of fixed fields for various batch sizes if necessary for performance
-        out = Batch.from_data_list(
-            batch, exclude_keys=self._exclude_keys.union(new_dim_fixed)
-        )
+        out = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(new_dim_fixed))
         for f in new_dim_fixed:
             if f in self._exclude_keys:
                 continue
             out[f] = batch[0][f]
+
         return out
 
     def __call__(self, batch: List[Data]) -> Batch:
