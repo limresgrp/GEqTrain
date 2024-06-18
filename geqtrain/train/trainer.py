@@ -158,7 +158,7 @@ class Trainer:
         train_idcs: Optional[Union[list, list[list]]] = None,
         val_idcs: Optional[Union[list, list[list]]] = None,
         train_val_split: str = "random",
-        batch_max_atoms: int = 3000,
+        batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
         init_callbacks: list = [],
         end_of_epoch_callbacks: list = [],
@@ -170,7 +170,6 @@ class Trainer:
         save_checkpoint_freq: int = -1,
         report_init_validation: bool = True,
         verbose="INFO",
-        chunking: bool = False,
         sanitize_gradients: bool = False,
         target_names: list = None,
         **kwargs,
@@ -808,7 +807,7 @@ class Trainer:
 
         return input_data, batch_chunk, batch_chunk_center_nodes
 
-    def batch_step_chucked(self, data, validation=False):
+    def batch_step(self, data, validation=False):
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -820,25 +819,19 @@ class Trainer:
             cm = contextlib.nullcontext()
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
-        # # # keep_bead_types = self.keep_bead_types
 
-        # # Remove edges of atoms whose result is NaN
+        # - Remove edges of atoms whose result is NaN - #
         per_node_outputs_keys = []
-        # for key in self.loss.coeffs:
-        #     if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
-        #         key_clean = self.loss.remove_suffix(key)
-        #         batch[key_clean] = batch[key_clean].squeeze()
-        #         if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
-        #             val = batch[key_clean].reshape(len(batch[key_clean]), -1)
-        #             # # # if keep_bead_types is not None:
-        #             # # #     # Remove edges of atoms that do not appear in keep_bead_types
-        #             # # #     keep_bead_types = torch.tensor(keep_bead_types, device=self.torch_device)
-        #             # # #     batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_bead_types)] = torch.nan
-
-        #             not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-        #             batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-        #             batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-        #             per_node_outputs_keys.append(key_clean)
+        for key in self.loss.coeffs:
+            if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
+                key_clean = self.loss.remove_suffix(key)
+                batch[key_clean] = batch[key_clean].squeeze()
+                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
+                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+                    per_node_outputs_keys.append(key_clean)
 
         per_node_outputs_values = []
         for per_node_output_key in per_node_outputs_keys:
@@ -862,7 +855,7 @@ class Trainer:
                 device=self.torch_device,
             )
 
-            if self.noise is not None: #!?
+            if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
 
             with cm:
@@ -890,9 +883,10 @@ class Trainer:
                         self.model.parameters(), self.max_gradient_norm
                     )
 
-                for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        param.grad[torch.isnan(param.grad)] = 0
+                if self.sanitize_gradients:
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad[torch.isnan(param.grad)] = 0
 
                 self.optim.step()
                 # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
@@ -911,52 +905,6 @@ class Trainer:
 
             if already_computed_nodes is None:
                 return
-
-    def batch_step(self, data, validation=False): # data is a: <class 'geqtrain.utils.torch_geometric.batch.Batch'> a custom pyg batch object!
-        # no need to have gradients from old steps taking up memory
-        self.optim.zero_grad(set_to_none=True)
-
-        if validation:
-            self.model.eval()
-            cm = torch.no_grad()
-        else:
-            self.model.train()
-            cm = contextlib.nullcontext()
-
-        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward, nb data is custom pyg Batch
-
-        ref = {'graph_labels': batch['graph_labels']}
-        with cm:
-            out = self.model(batch) # forward of the model
-        del batch
-
-        if not validation:
-            loss, loss_contrib = self.loss(pred=out, ref=ref) # compute loss
-
-            self.optim.zero_grad(set_to_none=True) # 0 grad
-
-            loss.backward() # compue grads
-
-            if self.max_gradient_norm < float("inf"): # grad clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
-
-            if self.sanitize_gradients:
-                for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        param.grad[torch.isnan(param.grad)] = 0
-
-            self.optim.step()
-            # self.model.normalize_weights() #? scales parms by their norm (Not weight_norm)
-
-            if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
-                self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
-        with torch.no_grad(): # val step if required and comp metrics for log
-            if validation:
-                loss, loss_contrib = self.loss(pred=out, ref=ref)
-
-            self.batch_losses = self.loss_stat(loss, loss_contrib)
-            self.batch_metrics = self.metrics(pred=out, ref=ref)
 
     @property
     def stop_cond(self):
@@ -997,16 +945,10 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dataset)
             for self.ibatch, batch in enumerate(dataset):
-                if self.chunking:
-                    self.batch_step_chucked(
-                        data=batch,
-                        validation=(category == VALIDATION),
-                    )
-                else:
-                    self.batch_step(
-                        data=batch,
-                        validation=(category == VALIDATION),
-                    )
+                self.batch_step(
+                    data=batch,
+                    validation=(category == VALIDATION),
+                )
 
                 self.end_of_batch_log(batch_type=category)
 
