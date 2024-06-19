@@ -22,22 +22,18 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         num_types: int,
-        embedding_dim: int = 64,
+        embedding_dim: int = 8,
         irreps_in=None,
     ):
         super().__init__()
-        self.num_types = num_types
-        self.embedding_dim = embedding_dim
+        self.embeddings = torch.nn.Embedding(num_types, embedding_dim) # scale_grad_by_freq = False by default
 
-        embeddings = torch.ones((self.num_types, self.embedding_dim), dtype=torch.get_default_dtype())
-        self.embeddings = torch.nn.Parameter(embeddings)
-
-        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(self.embedding_dim, (0, 1))])}
+        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(embedding_dim, (0, 1))])}
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         type_numbers = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-        node_attrs = self.embeddings[type_numbers]
+        node_attrs = self.embeddings(type_numbers)
 
         data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
         return data
