@@ -38,11 +38,12 @@ def init_n_update(config):
         id=config.run_id,
     )
 
-    source = str(Path().resolve() / "geqtrain")
-    dest = "./source_code.zip"
-    make_archive(source, dest)
-    wandb.save(dest, policy = "now")
-    # os.remove(dest) # can't remove since wandb.save call is async
+    if config['code_folder_name'] != '':
+        source = str(Path().resolve() / config['code_folder_name'])
+        dest = "./source_code.zip"
+        make_archive(source, dest)
+        wandb.save(dest, policy = "now")
+        # os.remove(dest) # can't remove since wandb.save call is async
 
     # # download from wandb set up
     updated_parameters = dict(wandb.config)
