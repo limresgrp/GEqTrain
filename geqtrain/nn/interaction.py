@@ -39,6 +39,29 @@ def pick_mpl_function(func):
 
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
+    '''when the ctor of this class is called, it takes as input all the stuff that is listed in the yaml
+    all the keys that are both in the arg list here and in the yaml are taken as input in the ctor of this class
+    posititon is irrelevant in ctor arg
+    concept from paper: this layer works on edge features: it splits edge info in 1) invariant descriptors 2) equivariant descriptors
+    it processes 1 and 2 separately but
+    conditions the operations in 2 using processed info coming from 1
+    and conditions the operations in 1 using invariant info coming from
+    idea: 2 tracks 1 handle invariants properties of sys, the other handles equivariant properties of sys
+    these 2 tracks talk to each other
+    the cutoff acts a weight that scales edgefeature wrt source/dist
+    the angular comonent is based on displacement vectr -> it thus implies a center/cental node
+    with this we have the ik weights selection for the angular track/tp
+    scatter on nodes nb ij != ji
+    readout
+
+    Nomenclature and dims:
+
+    "node_attrs"            [n_nodes, dim]      node_invariant_field            atom types (embedded?)
+    "edge_radial_attrs"     [n_edge, dim]       edge_invariant_field            radial embedding of displacement vectors BESSEL
+    "edge_angular_attrs"    [n_edge, dim]       edge_equivariant_field          angular embedding of displacement vectors SH
+    "edge_features"         [n_edge, dim]       out_field                       edge_features are the output of interaction block
+    '''
+
     # saved params
     num_layers: int
 
@@ -106,7 +129,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.head_dim = head_dim
         self.isqrtd = math.isqrt(head_dim)
         self.polynomial_cutoff_p = float(PolynomialCutoff_p)
-        self.avg_num_neighbors = avg_num_neighbors
 
         env_embed = pick_mpl_function(env_embed)
         two_body_latent = pick_mpl_function(two_body_latent)
@@ -126,13 +148,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # one per layer
         self.register_buffer(
             "env_sum_normalizations",
-            torch.as_tensor([5.] * num_layers),
+            torch.as_tensor([avg_num_neighbors] * num_layers),
         )
 
         latent =          functools.partial(latent,    **latent_kwargs)
         two_body_latent = functools.partial(latent,    **two_body_latent_kwargs)
         env_embed =       functools.partial(env_embed, **env_embed_kwargs)
 
+        self.norm_layers = torch.nn.ModuleList([])
         self.latents = torch.nn.ModuleList([])
         self.env_embed_mlps = torch.nn.ModuleList([])
         self.node_attr_to_queries = torch.nn.ModuleList([])
@@ -319,34 +342,28 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             if layer_idx == 0:
                 # at the first layer, we have no invariants from previous TPs
+                # Node invariants for center and neighbor (chemistry) + edge invariants for the edge (radius).
+                inp_dims = 2 * self.irreps_in[self.node_invariant_field].num_irreps + self.irreps_in[self.edge_invariant_field].num_irreps
                 self.latents.append(
                     two_body_latent(
-                        mlp_input_dimension=(
-                            (
-                                # Node invariants for center and neighbor (chemistry)
-                                2 * self.irreps_in[self.node_invariant_field].num_irreps
-                                # Plus edge invariants for the edge (radius).
-                                + self.irreps_in[self.edge_invariant_field].num_irreps
-                            )
-                        ),
+                        mlp_input_dimension=(inp_dims),
                         mlp_output_dimension=None,
                         weight_norm=False,
                     )
                 )
                 self._latent_dim = self.latents[-1].out_features
+                self.norm_layers.append(torch.nn.LayerNorm(inp_dims))
             else:
+                # the embedded latent invariants from the previous layer(s) and the invariants extracted from the last layer's TP:
+                inp_dims = self.latents[-1].out_features + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
                 self.latents.append(
                     latent(
-                        mlp_input_dimension=(
-                            # the embedded latent invariants from the previous layer(s)
-                            self.latents[-1].out_features
-                            # and the invariants extracted from the last layer's TP:
-                            + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
-                        ),
+                        mlp_input_dimension=(inp_dims),
                         mlp_output_dimension=None,
                         weight_norm=False,
                     )
                 )
+                self.norm_layers.append(torch.nn.LayerNorm(inp_dims))
 
             # the env embed MLP takes the last latent's output as input
             # and outputs enough weights for the env embedder
@@ -479,6 +496,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # This goes through layer0, layer1, ..., layer_max-1
         for (latent,
+            norm,
             env_embed_mlp,
             node_attr_to_query,
             edge_feat_to_key,
@@ -489,6 +507,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             tp
         ) in zip(
             self.latents,
+            self.norm_layers,
             self.env_embed_mlps,
             self.node_attr_to_queries,
             self.edge_feat_to_keys,
@@ -504,7 +523,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
 
             # Compute latents
-            new_latents = latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
+            node_i_node_j_rij = torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask]
+            normed_node_i_node_j_rij = norm(node_i_node_j_rij)
+            new_latents = latent(normed_node_i_node_j_rij)
             # Apply cutoff, which propagates through to everything else
             norm_const = self.env_sum_normalizations[layer_index]
             new_latents = cutoff_coeffs[active_edges].unsqueeze(-1) * new_latents * norm_const
