@@ -21,6 +21,12 @@ from geqtrain.nn.cutoffs import polynomial_cutoff
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
+from torch.nn import LayerNorm
+
+
+def exists(val):
+    return val is not None
+
 
 def pick_mpl_function(func):
     if isinstance(func, Callable):
@@ -80,6 +86,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         sparse_mode: Optional[str] = None,
         # Other:
         irreps_in=None,
+        use_norms: bool = False,
     ):
         super().__init__()
         SCALAR = o3.Irrep("0e")  # define for convinience
@@ -405,6 +412,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             }
         )
 
+        self.final_norm_layer = LayerNorm(self.latents[-1].out_features + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx]) if use_norms else None
+
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -568,7 +577,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 dim=0,
                 dim_size=num_nodes,
             )
-            
+
             active_node_centers = torch.unique(edge_center[active_edges])
             local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
 
@@ -620,7 +629,15 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         cutoff_coeffs = cutoff_coeffs_all[layer_index]
         prev_mask = cutoff_coeffs[active_edges] > 0
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
-        scalars = self.final_latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
+
+        # norm
+
+        if exists(self.final_norm_layer):
+            scalars = self.final_norm_layer(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
+
+        # final MLP
+
+        scalars = self.final_latent(scalars)
 
         out_features[active_edges, :self.out_multiplicity * features_n_scalars] = scalars
 
