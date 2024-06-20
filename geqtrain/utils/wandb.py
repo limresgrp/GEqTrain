@@ -60,7 +60,7 @@ def init_n_update(config):
 
     if 'code_folder_name' in config:
         source = Path().resolve() / config['code_folder_name']
-        upload_zipped_code_on_wandb(source, 'geqm9_source_code')
+        upload_zipped_code_on_wandb(source, f'{config['code_folder_name']}_source_code')
 
     # download from wandb set up
 

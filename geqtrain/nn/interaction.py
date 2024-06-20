@@ -381,6 +381,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 env_embed(
                     mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
                     mlp_output_dimension=env_embed_multiplicity * head_dim,
+                    use_norm_layer=False,
                 )
             )
 
@@ -389,6 +390,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 env_embed(
                     mlp_input_dimension=self.env_embed_mul,
                     mlp_output_dimension=env_embed_multiplicity * head_dim,
+                    use_norm_layer=False,
                 )
             )
 
