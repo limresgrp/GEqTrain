@@ -126,6 +126,7 @@ class Trainer:
         self,
         model,
         model_builders: Optional[list] = [],
+        model_requires_grads: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         seed: Optional[int] = None,
         dataset_seed: Optional[int] = None,
@@ -155,23 +156,23 @@ class Trainer:
         n_train: Optional[Union[List[int], int]] = None,
         n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[Union[list, list[list]]] = None,
-        val_idcs: Optional[Union[list, list[list]]] = None,
+        train_idcs: Optional[Union[List, List[List]]] = None,
+        val_idcs: Optional[Union[List, List[List]]] = None,
         train_val_split: str = "random",
         batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
-        init_callbacks: list = [],
-        end_of_epoch_callbacks: list = [],
-        end_of_batch_callbacks: list = [],
-        end_of_train_callbacks: list = [],
-        final_callbacks: list = [],
+        init_callbacks: List = [],
+        end_of_epoch_callbacks: List = [],
+        end_of_batch_callbacks: List = [],
+        end_of_train_callbacks: List = [],
+        final_callbacks: List = [],
         log_batch_freq: int = 1,
         log_epoch_freq: int = 1,
         save_checkpoint_freq: int = -1,
         report_init_validation: bool = True,
         verbose="INFO",
         sanitize_gradients: bool = False,
-        target_names: list = None,
+        target_names: List = None,
         **kwargs,
     ):
 
@@ -811,12 +812,13 @@ class Trainer:
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
+        cm = contextlib.nullcontext()
         if validation:
             self.model.eval()
-            cm = torch.no_grad()
+            if not self.model_requires_grads:
+                cm = torch.no_grad()
         else:
             self.model.train()
-            cm = contextlib.nullcontext()
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
@@ -876,7 +878,7 @@ class Trainer:
 
                 self.optim.zero_grad(set_to_none=True) # 0 grad
 
-                loss.backward() # compue grads
+                loss.backward() # compute grads
 
                 if self.max_gradient_norm < float("inf"): # grad clipping
                     torch.nn.utils.clip_grad_norm_(

@@ -3,7 +3,7 @@
 
 from copy import deepcopy
 from hashlib import sha1
-from typing import Union, Sequence, Tuple
+from typing import Dict, List, Union, Sequence, Tuple
 
 import yaml
 
@@ -196,7 +196,7 @@ class Metrics:
                 metrics[(key, reduction)] = stat.current_result()
         return metrics
 
-    def flatten_metrics(self, metrics, metrics_metadata: dict[str,list[str]]=None):
+    def flatten_metrics(self, metrics, metrics_metadata: Dict[str, List[str]]=None):
 
         type_names = metrics_metadata.get('type_names', [])
         target_names = metrics_metadata.get('target_names', [])

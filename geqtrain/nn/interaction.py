@@ -84,7 +84,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         r_max: float,
         out_irreps: Optional[Union[o3.Irreps, str]] = None,
         output_hidden_irreps: bool = False,
-        avg_num_neighbors: Optional[float] = None,
+        avg_num_neighbors: Optional[float] = 5.0,
         # cutoffs
         PolynomialCutoff_p: float = 6,
         # general hyperparameters:
@@ -94,7 +94,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         env_embed_multiplicity: int = 64,
         head_dim: int = 32,
-        product_correlation: int = 3,
+        product_correlation: int = 2,
 
         # MLP parameters:
         env_embed=ScalarMLPFunction,
@@ -107,6 +107,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Performance parameters:
         pad_to_alignment: int = 1,
         sparse_mode: Optional[str] = None,
+
         # Other:
         irreps_in=None,
         use_norms: bool = False,

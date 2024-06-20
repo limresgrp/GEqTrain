@@ -28,7 +28,7 @@ setup(
     install_requires=[
         "numpy",
         "tqdm",
-        "torch>=1.10.0,<=1.13,!=1.9.0",
+        "torch>=1.10.0",
         "wandb>=0.13",
         "e3nn>=0.4.4,<0.6.0",
         "pyyaml",
@@ -36,7 +36,6 @@ setup(
         'contextvars;python_version<"3.7"',  # backport of contextvars for savenload
         "typing_extensions;python_version<'3.8'",  # backport of Final
         "torch-runstats>=0.2.0",
-        "torch-ema>=0.3.0",
     ],
     zip_safe=True,
 )
