@@ -27,7 +27,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_nonlinearity: Optional[str] = "silu",
         weight_norm: bool = True,
         dim: int = 0,
-        has_bias: bool = False
+        has_bias: bool = False,
+        use_norm_layer: bool = False,
     ):
         super().__init__()
         nonlinearity = {
@@ -52,6 +53,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.out_features = dimensions[-1]
         self.weight_norm = weight_norm
         self.dim = dim
+        self.use_norm_layer = use_norm_layer
 
         # Code
         params = {}
@@ -65,6 +67,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         norm_from_last: float = 1.0
 
         base = torch.nn.Module()
+
+        if self.use_norm_layer:
+            setattr(self, "_layernorm", torch.nn.LayerNorm(dimensions[0]))
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
 
@@ -113,4 +118,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self._codegen_register({"_forward": fx.GraphModule(base, graph)})
 
     def forward(self, x):
+        if self.use_norm_layer:
+            x = self._layernorm(x)
         return self._forward(x)

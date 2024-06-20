@@ -55,7 +55,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         r_max: float,
         out_irreps: Optional[Union[o3.Irreps, str]] = None,
         output_hidden_irreps: bool = False,
-        avg_num_neighbors: Optional[float] = None,
+        avg_num_neighbors: Optional[float] = 5.0,
         # cutoffs
         PolynomialCutoff_p: float = 6,
         # general hyperparameters:
@@ -65,7 +65,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         env_embed_multiplicity: int = 64,
         head_dim: int = 32,
-        product_correlation: int = 3,
+        product_correlation: int = 2,
 
         # MLP parameters:
         env_embed=ScalarMLPFunction,
@@ -78,6 +78,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Performance parameters:
         pad_to_alignment: int = 1,
         sparse_mode: Optional[str] = None,
+
         # Other:
         irreps_in=None,
     ):
@@ -99,7 +100,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.head_dim = head_dim
         self.isqrtd = math.isqrt(head_dim)
         self.polynomial_cutoff_p = float(PolynomialCutoff_p)
-        self.avg_num_neighbors = avg_num_neighbors
 
         env_embed = pick_mpl_function(env_embed)
         two_body_latent = pick_mpl_function(two_body_latent)
@@ -119,7 +119,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # one per layer
         self.register_buffer(
             "env_sum_normalizations",
-            torch.as_tensor([5.] * num_layers),
+            torch.as_tensor([avg_num_neighbors] * num_layers),
         )
 
         latent =          functools.partial(latent,    **latent_kwargs)
