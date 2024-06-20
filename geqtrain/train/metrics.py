@@ -67,6 +67,7 @@ class Metrics:
                 for key, _, func, func_params in parse_dict(component): # func is a ctor
 
                     func_params["PerSpecies"] = func_params.get("PerSpecies", False)
+                    func_params["PerLabel"] = func_params.get("PerLabel", False)
                     func_params["PerNode"] = func_params.get("PerNode", False)
                     func_params["functional"] = func_params.get("functional", "L1Loss")
 
@@ -82,9 +83,9 @@ class Metrics:
                     # store for initialization
                     kwargs = deepcopy(func_params)
                     kwargs.pop("PerSpecies")
+                    kwargs.pop("PerLabel")
                     kwargs.pop("PerNode")
                     kwargs.pop("functional")
-                    kwargs.pop("PerLabel")
 
                     # by default, report a scalar that is mae and rmse over all component
                     loss_func = find_loss_function(func, func_params)
