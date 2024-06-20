@@ -119,7 +119,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # one per layer
         self.register_buffer(
             "env_sum_normalizations",
-            torch.as_tensor([avg_num_neighbors] * num_layers),
+            torch.as_tensor([avg_num_neighbors] * num_layers).rsqrt(),
         )
 
         latent =          functools.partial(latent,    **latent_kwargs)
