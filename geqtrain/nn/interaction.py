@@ -7,6 +7,8 @@ from typing import Callable, Optional, List, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 
+from einops import rearrange
+
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
@@ -90,7 +92,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         env_embed_multiplicity: int = 64,
-        head_dim: int = 32,
+        head_dim: int = 64,
+        head_num: int = 32,
         product_correlation: int = 2,
 
         # MLP parameters:
@@ -125,6 +128,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.env_embed_mul = env_embed_multiplicity
         self.head_dim = head_dim
         self.isqrtd = math.isqrt(head_dim)
+        self.head_num = head_num
         self.polynomial_cutoff_p = float(PolynomialCutoff_p)
 
         env_embed = pick_mpl_function(env_embed)
@@ -156,6 +160,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.env_embed_mlps = torch.nn.ModuleList([])
         self.node_attr_to_queries = torch.nn.ModuleList([])
         self.edge_feat_to_keys = torch.nn.ModuleList([])
+        self.local_env_per_node_mlps = torch.nn.ModuleList([])
         self.tps = torch.nn.ModuleList([])
         self.products = torch.nn.ModuleList([])
         self.reshape_in_modules = torch.nn.ModuleList([])
@@ -362,7 +367,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                             # and the invariants extracted from the last layer's TP:
                             + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
                         ),
-                        mlp_output_dimension=None,
+                        mlp_output_dimension=self._latent_dim,
                         weight_norm=False,
                     )
                 )
@@ -381,7 +386,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.node_attr_to_queries.append(
                 env_embed(
                     mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
-                    mlp_output_dimension=env_embed_multiplicity * head_dim,
+                    mlp_output_dimension=env_embed_multiplicity * head_dim * head_num,
                     use_norm_layer=False,
                     mlp_nonlinearity=None,
                 )
@@ -391,9 +396,18 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.edge_feat_to_keys.append(
                 env_embed(
                     mlp_input_dimension=self.env_embed_mul,
-                    mlp_output_dimension=env_embed_multiplicity * head_dim,
+                    mlp_output_dimension=env_embed_multiplicity * head_dim * head_num,
                     use_norm_layer=False,
                     mlp_nonlinearity=None,
+                )
+            )
+
+            self.local_env_per_node_mlps.append(
+                env_embed(
+                    mlp_input_dimension=head_num,
+                    mlp_output_dimension=head_num,
+                    use_norm_layer=True,
+                    mlp_nonlinearity='silu',
                 )
             )
 
@@ -504,6 +518,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             env_embed_mlp,
             node_attr_to_query,
             edge_feat_to_key,
+            local_env_per_node_mlp,
             env_linear,
             linear,
             prod,
@@ -514,6 +529,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.env_embed_mlps,
             self.node_attr_to_queries,
             self.edge_feat_to_keys,
+            self.local_env_per_node_mlps,
             self.env_linears,
             self.linears,
             self.products,
@@ -583,15 +599,16 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # Apply attention on emb_latent
             Q = node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
-            Q = Q.reshape(-1, self.env_embed_mul, self.head_dim)[edge_center[active_edges]]
+            Q = rearrange(Q, 'e (h m d) -> e h m d', h=self.head_num, m=self.env_embed_mul, d=self.head_dim)[edge_center[active_edges]]
 
             key_w = weights.narrow(-1, w_index, self.env_embed_mul)
             w_index += self.env_embed_mul
             K = edge_feat_to_key(key_w)
-            K = K.reshape(-1, self.env_embed_mul, self.head_dim)
+            K = rearrange(K, 'e (h m d) -> e h m d', h=self.head_num, m=self.env_embed_mul, d=self.head_dim)
 
-            A = torch.einsum('ijk,ijk -> ij', Q, K) * self.isqrtd
-            emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(A, edge_center[active_edges], dim=0))
+            W = torch.einsum('ehmd,ehmd -> ehm', Q, K) * self.isqrtd
+            
+            emb_latent = torch.einsum('emd,ehm->emhd', emb_latent, scatter_softmax(W, edge_center[active_edges], dim=0))
 
             # Pool over all attention-weighted edge features to build node local environment embedding
             local_env_per_node = scatter(
@@ -600,6 +617,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 dim=0,
                 dim_size=num_nodes,
             )
+            
+            nonlin_weights = local_env_per_node_mlp(local_env_per_node[..., 0])
+            local_env_per_node = torch.einsum('nmhd,nmh->nmd', local_env_per_node, nonlin_weights)
 
             active_node_centers = torch.unique(edge_center[active_edges])
             local_env_per_active_atom = env_linear(local_env_per_node[active_node_centers])
@@ -624,9 +644,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             # Get invariants
             # features has shape [z][mul][k]
             # we know scalars are first
-            scalars = features[:, :, :self._tp_n_scalar_outs[layer_index]].reshape(
-                features.shape[0], -1
-            )
+            scalars = rearrange(features[:, :, :self._tp_n_scalar_outs[layer_index]], 'e m s -> e (m s)')
 
             # do the linear
             features = linear(features)

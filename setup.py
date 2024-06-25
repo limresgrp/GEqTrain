@@ -27,6 +27,7 @@ setup(
     },
     install_requires=[
         "numpy",
+        "einops",
         "tqdm",
         "torch>=1.10.0",
         "wandb>=0.13",
