@@ -37,6 +37,12 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+import gc
+import torch
+
+def clean_cuda():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
@@ -809,6 +815,9 @@ class Trainer:
         return input_data, batch_chunk, batch_chunk_center_nodes
 
     def batch_step(self, data, validation=False):
+
+        clean_cuda()
+
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -886,7 +895,7 @@ class Trainer:
                     )
 
                 if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
 
@@ -1301,7 +1310,7 @@ class TrainerWandB(Trainer):
 
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
-            wandb.watch(self.model, **wandb_watch_kwargs)
+            wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
 
 
