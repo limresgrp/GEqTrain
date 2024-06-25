@@ -289,7 +289,11 @@ class Config(object):
             filename=filename,
             enforced_format=format,
         )
-        return Config.from_dict(dictionary, defaults)
+
+        config = Config.from_dict(dictionary, defaults)
+        config.filepath = filename
+
+        return config
 
     @staticmethod
     def from_dict(dictionary: dict, defaults: dict = {}):

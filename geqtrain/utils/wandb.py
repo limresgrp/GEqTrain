@@ -51,6 +51,10 @@ def init_n_update(config):
         id=config.run_id,
     )
 
+    # save config as-is on wandb for experiment relaunching
+
+    wandb.save(Path(config.filepath).resolve(), policy = "now")
+
     # upload geqtrain code
 
     source = Path(__file__).parent.resolve()
@@ -60,7 +64,7 @@ def init_n_update(config):
 
     if 'code_folder_name' in config:
         source = Path().resolve() / config['code_folder_name']
-        upload_zipped_code_on_wandb(source, f'{config['code_folder_name']}_source_code')
+        upload_zipped_code_on_wandb(source, f'{config["code_folder_name"]}_source_code')
 
     # download from wandb set up
 
