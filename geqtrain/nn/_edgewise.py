@@ -28,6 +28,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         readout_latent_kwargs={},
         head_dim: int = 32,
         use_attention: bool = True,
+        use_norm: bool = True, # applies norm post scatter
         irreps_in={},
     ):
         """Sum edges into nodes."""
@@ -42,6 +43,9 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             my_irreps_in={field: irreps},
             irreps_out={out_field: irreps},
         )
+
+        # self.irreps_out[self.out_field].dim
+        self.norm = torch.nn.LayerNorm(irreps.dim) if use_norm else None
 
         if self.use_attention:
 
@@ -91,6 +95,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                     self.out_field: out_irreps
                 }
             )
+            self.norm = torch.nn.LayerNorm(out_irreps.dim) if use_norm else None
         else:
             self.node_attr_to_query = None
 
@@ -100,7 +105,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
-        
+
         if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
             Q = Q.reshape(-1, self.K_out_dim, self.head_dim)[edge_center]
@@ -114,5 +119,13 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             edge_feat = torch.einsum('emd,em->emd', edge_feat[:, self.K_in_dim:], scatter_softmax(A, edge_center, dim=0))
             edge_feat = self.reshape_out(edge_feat)
 
-        data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
+        # aggregation step
+
+        node_feature = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
+
+        # apply norm
+
+        if self.norm:
+            data[self.out_field] = self.norm(node_feature)
+
         return data
