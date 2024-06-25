@@ -21,12 +21,6 @@ from geqtrain.nn.cutoffs import polynomial_cutoff
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
-from torch.nn import LayerNorm
-
-
-def exists(val):
-    return val is not None
-
 
 def pick_mpl_function(func):
     if isinstance(func, Callable):
@@ -39,7 +33,9 @@ def pick_mpl_function(func):
 
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
-    '''when the ctor of this class is called, it takes as input all the stuff that is listed in the yaml
+
+    '''
+    when the ctor of this class is called, it takes as input all the stuff that is listed in the yaml
     all the keys that are both in the arg list here and in the yaml are taken as input in the ctor of this class
     posititon is irrelevant in ctor arg
     concept from paper: this layer works on edge features: it splits edge info in 1) invariant descriptors 2) equivariant descriptors
@@ -60,6 +56,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     "edge_radial_attrs"     [n_edge, dim]       edge_invariant_field            radial embedding of displacement vectors BESSEL
     "edge_angular_attrs"    [n_edge, dim]       edge_equivariant_field          angular embedding of displacement vectors SH
     "edge_features"         [n_edge, dim]       out_field                       edge_features are the output of interaction block
+
     '''
 
     # saved params
@@ -110,7 +107,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Other:
         irreps_in=None,
-        use_norms: bool = False,
     ):
         super().__init__()
         SCALAR = o3.Irrep("0e")  # define for convinience
@@ -149,14 +145,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # one per layer
         self.register_buffer(
             "env_sum_normalizations",
-            torch.as_tensor([avg_num_neighbors] * num_layers),
+            torch.as_tensor([avg_num_neighbors] * num_layers).rsqrt(),
         )
 
         latent =          functools.partial(latent,    **latent_kwargs)
         two_body_latent = functools.partial(latent,    **two_body_latent_kwargs)
         env_embed =       functools.partial(env_embed, **env_embed_kwargs)
 
-        self.norm_layers = torch.nn.ModuleList([])
         self.latents = torch.nn.ModuleList([])
         self.env_embed_mlps = torch.nn.ModuleList([])
         self.node_attr_to_queries = torch.nn.ModuleList([])
@@ -343,28 +338,34 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             if layer_idx == 0:
                 # at the first layer, we have no invariants from previous TPs
-                # Node invariants for center and neighbor (chemistry) + edge invariants for the edge (radius).
-                inp_dims = 2 * self.irreps_in[self.node_invariant_field].num_irreps + self.irreps_in[self.edge_invariant_field].num_irreps
                 self.latents.append(
                     two_body_latent(
-                        mlp_input_dimension=(inp_dims),
+                        mlp_input_dimension=(
+                            (
+                                # Node invariants for center and neighbor (chemistry)
+                                2 * self.irreps_in[self.node_invariant_field].num_irreps
+                                # Plus edge invariants for the edge (radius).
+                                + self.irreps_in[self.edge_invariant_field].num_irreps
+                            )
+                        ),
                         mlp_output_dimension=None,
                         weight_norm=False,
                     )
                 )
                 self._latent_dim = self.latents[-1].out_features
-                self.norm_layers.append(torch.nn.LayerNorm(inp_dims))
             else:
-                # the embedded latent invariants from the previous layer(s) and the invariants extracted from the last layer's TP:
-                inp_dims = self.latents[-1].out_features + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
                 self.latents.append(
                     latent(
-                        mlp_input_dimension=(inp_dims),
+                        mlp_input_dimension=(
+                            # the embedded latent invariants from the previous layer(s)
+                            self.latents[-1].out_features
+                            # and the invariants extracted from the last layer's TP:
+                            + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx - 1]
+                        ),
                         mlp_output_dimension=None,
                         weight_norm=False,
                     )
                 )
-                self.norm_layers.append(torch.nn.LayerNorm(inp_dims))
 
             # the env embed MLP takes the last latent's output as input
             # and outputs enough weights for the env embedder
@@ -382,6 +383,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
                     mlp_output_dimension=env_embed_multiplicity * head_dim,
                     use_norm_layer=False,
+                    mlp_nonlinearity=None,
                 )
             )
 
@@ -391,6 +393,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     mlp_input_dimension=self.env_embed_mul,
                     mlp_output_dimension=env_embed_multiplicity * head_dim,
                     use_norm_layer=False,
+                    mlp_nonlinearity=None,
                 )
             )
 
@@ -404,6 +407,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             ),
             mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_idx],
             weight_norm=False,
+            use_norm_layer=True,
         )
 
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
@@ -431,8 +435,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 self.out_field: self.out_irreps
             }
         )
-
-        self.final_norm_layer = LayerNorm(self.latents[-1].out_features + env_embed_multiplicity * self._tp_n_scalar_outs[layer_idx]) if use_norms else None
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
@@ -499,7 +501,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # This goes through layer0, layer1, ..., layer_max-1
         for (latent,
-            norm,
             env_embed_mlp,
             node_attr_to_query,
             edge_feat_to_key,
@@ -510,7 +511,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             tp
         ) in zip(
             self.latents,
-            self.norm_layers,
             self.env_embed_mlps,
             self.node_attr_to_queries,
             self.edge_feat_to_keys,
@@ -526,9 +526,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
 
             # Compute latents
-            node_i_node_j_rij = torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask]
-            normed_node_i_node_j_rij = norm(node_i_node_j_rij)
-            new_latents = latent(normed_node_i_node_j_rij)
+            input_scalar_latents = torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask]
+            new_latents = latent(input_scalar_latents)
             # Apply cutoff, which propagates through to everything else
             norm_const = self.env_sum_normalizations[layer_index]
             new_latents = cutoff_coeffs[active_edges].unsqueeze(-1) * new_latents * norm_const
@@ -653,15 +652,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         cutoff_coeffs = cutoff_coeffs_all[layer_index]
         prev_mask = cutoff_coeffs[active_edges] > 0
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
-
-        # norm
-
-        if exists(self.final_norm_layer):
-            scalars = self.final_norm_layer(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
-
-        # final MLP
-
-        scalars = self.final_latent(scalars)
+        scalars = self.final_latent(torch.cat(latent_inputs_to_cat, dim=-1)[prev_mask])
 
         out_features[active_edges, :self.out_multiplicity * features_n_scalars] = scalars
 
