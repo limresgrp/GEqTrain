@@ -17,6 +17,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
     in_features: int
     out_features: int
     weight_norm: bool
+    use_norm_layer: bool
     dim: int
 
     def __init__(
@@ -68,6 +69,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
         base = torch.nn.Module()
 
+        self._layernorm: Optional[torch.nn.LayerNorm] = None # init to None for jit
         if self.use_norm_layer:
             setattr(self, "_layernorm", torch.nn.LayerNorm(dimensions[0]))
 
@@ -119,5 +121,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
     def forward(self, x):
         if self.use_norm_layer:
+            assert self._layernorm is not None
             x = self._layernorm(x)
         return self._forward(x)
