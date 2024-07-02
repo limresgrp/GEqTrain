@@ -26,7 +26,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
         mlp_nonlinearity: Optional[str] = "silu",
-        weight_norm: bool = True,
+        weight_norm: bool = False,
         dim: int = 0,
         has_bias: bool = False,
         use_norm_layer: bool = False,

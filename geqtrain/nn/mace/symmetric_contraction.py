@@ -160,7 +160,7 @@ class Contraction(torch.nn.Module):
                 # Parameters for the product basis
                 w = torch.nn.Parameter(
                     torch.randn((num_elements, num_params, self.num_features))
-                    / sqrt(self.num_features)
+                    / sqrt(num_elements * self.num_features)
                 )
                 self.weights_max = w
             else:
@@ -233,7 +233,7 @@ class Contraction(torch.nn.Module):
                 weight(),
                 y,
             )
-            c_tensor = c_tensor + out
+            c_tensor = 0.5 * (c_tensor + out)
             out = contract_features(c_tensor, x)
         resize_shape = torch.prod(torch.tensor(out.shape[1:]))
         return out.view(out.shape[0], resize_shape)

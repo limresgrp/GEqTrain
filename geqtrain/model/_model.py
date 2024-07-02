@@ -9,7 +9,7 @@ from geqtrain.nn import (
     InteractionModule,
 )
 from geqtrain.nn import (
-    OneHotAtomEncoding,
+    EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
@@ -39,7 +39,7 @@ def Model(
 
     layers = {
         # -- Encode --
-        "node_attrs":         OneHotAtomEncoding,
+        "node_attrs":         EmbeddingNodeAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
     }
@@ -56,15 +56,6 @@ def Model(
                     output_hidden_irreps=True,
                 ),
             ),
-            "pre_pooling_readout": (
-                ReadoutModule,
-                dict(
-                    field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_irreps=None,
-                    eq_has_internal_weights=True,
-                ),
-            ),
             "pooling": (
                 EdgewiseReduce,
                 dict(
@@ -73,7 +64,7 @@ def Model(
                     reduce=config.get("edge_reduce", "sum"),
                 ),
             ),
-            "readout": (
+            "head": (
                 ReadoutModule,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,

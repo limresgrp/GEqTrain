@@ -836,7 +836,6 @@ class Trainer:
         for key in self.loss.coeffs:
             if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
                 key_clean = self.loss.remove_suffix(key)
-                batch[key_clean] = batch[key_clean].squeeze()
                 if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
                     val = batch[key_clean].reshape(len(batch[key_clean]), -1)
                     not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
@@ -1311,8 +1310,3 @@ class TrainerWandB(Trainer):
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
-
-
-
-
-

@@ -1,15 +1,15 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from importlib import import_module
-import inspect
 import logging
-
+import inspect
 import torch.nn
-from torch_scatter import scatter, scatter_mean
 
-from geqtrain.data import AtomicDataDict
+from typing import Dict
+from importlib import import_module
+from torch_scatter import scatter, scatter_mean
 from geqtrain.utils import instantiate_from_cls_name
+from geqtrain.data import AtomicDataDict
 
 
 class SimpleLoss:
@@ -28,9 +28,11 @@ class SimpleLoss:
     if mean is True, return a scalar; else return the error matrix of each entry
     """
 
-    def __init__(self,
-                 func_name: str,
-                 params: dict = {}):
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
 
         for key, value in params.items():
             setattr(self, key, value)
@@ -55,7 +57,7 @@ class SimpleLoss:
         key: str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
     ):
-        ref_key, pred_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
 
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
@@ -72,7 +74,12 @@ class SimpleLoss:
             else:
                 return loss
 
-    def prepare(self, pred, ref, key):
+    def prepare(
+        self,
+        pred: Dict,
+        ref:  Dict,
+        key:  str,
+    ):
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
         pred_key = pred.get(key, None)
@@ -89,7 +96,7 @@ class SimpleLoss:
         else:
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
-        return ref_key,pred_key,has_nan,not_zeroes
+        return pred_key, ref_key, has_nan, not_zeroes
 
 class PerLabelLoss(SimpleLoss):
 
@@ -100,17 +107,17 @@ class PerLabelLoss(SimpleLoss):
 
     def __call__(
         self,
-        pred: dict,
-        ref: dict,
-        key: str, # first row of each element listed under loss_coeffs:
+        pred: Dict,
+        ref:  Dict,
+        key:  str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
     ):
-        loss = self.func(pred[key], ref[key])
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        loss = self.func(pred_key, ref_key)
 
         if mean:
             return loss.mean()
-        else:
-            return loss.mean(dim=0)
+        return loss.mean(dim=0)
 
 
 

@@ -365,6 +365,7 @@ def Contracter(
     has_weight: bool,
     connection_mode: str,
     pad_to_alignment: int = 1,
+    normalization='component',
     shared_weights: bool = False,
     sparse_mode: Optional[str] = None,
 ):
@@ -411,6 +412,7 @@ def Contracter(
         shared_weights=shared_weights,
         sparse_mode=sparse_mode,
         pad_to_alignment=pad_to_alignment,
+        normalization=normalization,
     )
     if mod is None:
         raise ValueError("Couldn't use strided for given layout")
