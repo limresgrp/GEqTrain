@@ -93,6 +93,8 @@ class AtomicInMemoryDataset(AtomicDataset):
         force_fixed_keys (list, optional): keys to move from AtomicData to fixed_fields dictionary
         extra_fixed_fields (dict, optional): extra key that are not stored in data but needed for AtomicData initialization
         include_frames (list, optional): the frames to process with the constructor.
+        target_indices (list, optional): If the dataset has multiple targets, you can optionally select a subset.
+        target_key (str, optional): If 'target_indices' is given, also specify which is the target key.
     """
 
     def __init__(
@@ -105,6 +107,8 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_fixed_fields: Dict[str, Any] = {},
         force_index_keys: List[str] = [AtomicDataDict.EDGE_INDEX_KEY],
         include_frames: Optional[List[int]] = None,
+        target_indices: Optional[List[int]] = None,
+        target_key: Optional[str] = None,
     ):
         self.dataset_id = dataset_id
         # TO DO, this may be simplified
@@ -124,6 +128,8 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.extra_fixed_fields = extra_fixed_fields
         self.force_index_keys = force_index_keys
         self.include_frames = include_frames
+        self.target_indices = target_indices
+        self.target_key = target_key
 
         self.data = None
         self.fixed_fields = None
@@ -152,6 +158,9 @@ class AtomicInMemoryDataset(AtomicDataset):
                     f"please delete the processed folder and rerun {self.processed_paths[0]}"
                 )
             self.fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = self.fixed_fields.get(AtomicDataDict.DATASET_INDEX_KEY, 0) * 0 + self.dataset_id
+        if self.target_indices is not None:
+            assert self.target_key is not None
+            self.data[self.target_key] = self.data[self.target_key][..., np.array(self.target_indices)]
 
     def len(self):
         if self.data is None:
@@ -361,6 +370,8 @@ class NpzDataset(AtomicInMemoryDataset):
         force_fixed_keys: List[str] = [],
         extra_fixed_fields: Dict[str, Any] = {},
         include_frames: Optional[List[int]] = None,
+        target_indices: Optional[List[int]] = None,
+        target_key: Optional[str] = None,
     ):
         self.key_mapping = key_mapping
         self.npz_fixed_field_keys = npz_fixed_field_keys
@@ -374,6 +385,8 @@ class NpzDataset(AtomicInMemoryDataset):
             force_fixed_keys=force_fixed_keys,
             extra_fixed_fields=extra_fixed_fields,
             include_frames=include_frames,
+            target_indices=target_indices,
+            target_key=target_key,
         )
 
     @property
