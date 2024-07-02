@@ -29,6 +29,7 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.NODE_TYPE_KEY,
+    AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
 }
 _DEFAULT_EDGE_FIELDS: Set[str] = {
