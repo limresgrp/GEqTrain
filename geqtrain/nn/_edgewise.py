@@ -1,6 +1,7 @@
 import torch
 import math
 from typing import Optional
+from einops import rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 
@@ -28,7 +29,6 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         readout_latent_kwargs={},
         head_dim: int = 32,
         use_attention: bool = True,
-        use_norm: bool = True, # applies norm post scatter
         irreps_in={},
     ):
         """Sum edges into nodes."""
@@ -43,9 +43,6 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             my_irreps_in={field: irreps},
             irreps_out={out_field: irreps},
         )
-
-        # self.irreps_out[self.out_field].dim
-        self.norm = torch.nn.LayerNorm(irreps.dim) if use_norm else None
 
         if self.use_attention:
 
@@ -70,34 +67,32 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             self.head_dim = head_dim
             self.isqrtd = math.isqrt(head_dim)
 
-            self.K_in_dim = self.irreps_mul * self.n_l[0]//2
-            out_irreps = o3.Irreps([(mul - mul//2, ir) if ir.l == 0 else (mul, ir) for mul, ir in irreps])
-            self.K_out_dim = out_irreps[0].mul
+            self.n_scalars = self.irreps_mul * self.n_l[0]
 
             self.reshape_in = reshape_irreps(irreps)
 
-            self.edge_feat_to_key = readout_latent(
-                mlp_input_dimension=self.K_in_dim,
-                mlp_output_dimension= self.K_out_dim * self.head_dim,
-                **readout_latent_kwargs,
-            )
-
             self.node_attr_to_query = readout_latent(
                 mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
-                mlp_output_dimension=self.K_out_dim * self.head_dim,
+                mlp_output_dimension=self.n_scalars * self.head_dim,
                 **readout_latent_kwargs,
             )
 
-            self.reshape_out = inverse_reshape_irreps(out_irreps)
+            self.edge_feat_to_key = readout_latent(
+                mlp_input_dimension=self.n_scalars,
+                mlp_output_dimension= self.n_scalars * self.head_dim,
+                **readout_latent_kwargs,
+            )
+
+            self.reshape_out = inverse_reshape_irreps(irreps)
 
             self.irreps_out.update(
                 {
-                    self.out_field: out_irreps
+                    self.out_field: irreps
                 }
             )
-            self.norm = torch.nn.LayerNorm(out_irreps.dim) if use_norm else None
         else:
             self.node_attr_to_query = None
+            self.edge_feat_to_key = None
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -107,25 +102,19 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         num_nodes = len(species)
 
         if self.use_attention and self.node_attr_to_query is not None:
-            Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
-            Q = Q.reshape(-1, self.K_out_dim, self.head_dim)[edge_center]
+            Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])
+            Q = rearrange(Q, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
-            K = self.edge_feat_to_key(edge_feat[:, :self.K_in_dim])
-            K = K.reshape(-1, self.K_out_dim, self.head_dim)
+            K = self.edge_feat_to_key(edge_feat[..., :self.n_scalars])
+            K = rearrange(K, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
-            A = torch.einsum('ijk,ijk -> ij', Q, K) * self.isqrtd
+            W = torch.einsum('ecd,ecd -> ec', Q, K) * self.isqrtd
 
             edge_feat = self.reshape_in(edge_feat)
-            edge_feat = torch.einsum('emd,em->emd', edge_feat[:, self.K_in_dim:], scatter_softmax(A, edge_center, dim=0))
+            edge_feat = torch.einsum('emd,em->emd', edge_feat, scatter_softmax(W, edge_center, dim=0))
             edge_feat = self.reshape_out(edge_feat)
 
         # aggregation step
-
-        node_feature = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
-
-        # apply norm
-
-        if self.norm:
-            data[self.out_field] = self.norm(node_feature)
+        data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
         return data
