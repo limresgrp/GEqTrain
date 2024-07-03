@@ -16,9 +16,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
     in_features: int
     out_features: int
-    weight_norm: bool
+    use_weight_norm: bool
     use_norm_layer: bool
-    dim: int
+    dim_weight_norm: int
 
     def __init__(
         self,
@@ -26,10 +26,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
         mlp_nonlinearity: Optional[str] = "silu",
-        weight_norm: bool = False,
-        dim: int = 0,
-        has_bias: bool = False,
         use_norm_layer: bool = False,
+        use_weight_norm: bool = False,
+        dim_weight_norm: int = 0,
+        has_bias: bool = False,
     ):
         super().__init__()
         nonlinearity = {
@@ -47,13 +47,13 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             + mlp_latent_dimensions
             + ([mlp_output_dimension] if mlp_output_dimension is not None else [])
         )
-        assert len(dimensions) >= 2  # Must have input and output dim
+        assert len(dimensions) >= 2  # Must have input and output dim_weight_norm
         num_layers = len(dimensions) - 1
 
         self.in_features = dimensions[0]
         self.out_features = dimensions[-1]
-        self.weight_norm = weight_norm
-        self.dim = dim
+        self.use_weight_norm = use_weight_norm
+        self.dim_weight_norm = dim_weight_norm
         self.use_norm_layer = use_norm_layer
 
         # Code
@@ -89,8 +89,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 params[f"_bias_{layer}"] = b
                 b = Proxy(graph.get_attr(f"_bias_{layer}"))
 
-            if self.weight_norm:
-                w_g = norm_except_dim(w_v, 2, self.dim).data
+            if self.use_weight_norm:
+                w_g = norm_except_dim(w_v, 2, self.dim_weight_norm).data
                 params[f"_weight_{layer}_g"] = w_g
                 w_g = Proxy(graph.get_attr(f"_weight_{layer}_g"))
 
@@ -98,8 +98,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             params[f"_weight_{layer}_v"] = w_v
             w_v = Proxy(graph.get_attr(f"_weight_{layer}_v"))
 
-            if self.weight_norm:
-                features = torch.matmul(features, _weight_norm(w_v, w_g, self.dim))
+            if self.use_weight_norm:
+                features = torch.matmul(features, _weight_norm(w_v, w_g, self.dim_weight_norm))
                 features = features + b if has_bias else features
 
             else:

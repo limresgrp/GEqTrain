@@ -69,7 +69,6 @@ def Model(
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
                     out_field=AtomicDataDict.NODE_OUTPUT_KEY,
-                    has_bias=True,
                 ),
             ),
         }
