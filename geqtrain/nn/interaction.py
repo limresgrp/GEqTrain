@@ -95,7 +95,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         env_embed_mul: int = 64,
         head_dim: int = 64,
+        use_mace_product: bool = True,
         product_correlation: int = 2,
+        use_interaction_attention: bool = True,
 
         # MLP parameters:
         env_embed=ScalarMLPFunction,
@@ -113,6 +115,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.DTYPE = torch.get_default_dtype()
+
+        self.use_mace_product = use_mace_product
+        self.use_interaction_attention = use_interaction_attention
 
         # save parameters
         assert (
@@ -475,7 +480,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             target_irreps=env_embed_irreps,
             correlation=product_correlation,
             num_elements=parent.irreps_in[parent.node_invariant_field].num_irreps,
-        )
+        ) if parent.use_mace_product else None
 
         # Reshape back product so that you can perform tp: n m d -> n (m d)
         reshape_in_module = reshape_irreps(env_embed_irreps)
@@ -586,7 +591,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             use_norm_layer=False,
             mlp_nonlinearity=None,
-        )
+        ) if parent.use_interaction_attention else None
 
         # Take the node attrs and obtain a query matrix
         dot = o3.FullyConnectedTensorProduct(
@@ -594,7 +599,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             env_embed_irreps,
             f"{self.env_embed_mul}x0e",
             path_normalization='path',
-        )
+        ) if parent.use_interaction_attention else None
         reshape_back_tp = inverse_reshape_irreps(env_embed_irreps)
 
         edge_feat_to_key = env_embed(
@@ -602,7 +607,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             use_norm_layer=False,
             mlp_nonlinearity=None,
-        )
+        ) if parent.use_interaction_attention else None
 
         self.latent_mlp = latent_mlp
         self.env_embed_mlp = env_embed_mlp
@@ -617,6 +622,9 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
         self.linear = linear
         self.reshape_back_tp = reshape_back_tp
+
+        self.use_interaction_attention = parent.use_interaction_attention
+        self.use_mace_product = parent.use_mace_product
 
         self.register_buffer(
             "env_sum_normalization",
@@ -691,22 +699,23 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         w_index += self._env_weighter.weight_numel
         emb_latent = self._env_weighter(edge_attr, env_w)
 
-        # Apply attention on features
-        edge_full_attr = torch.cat([
-            node_invariants[edge_center],
-            node_invariants[edge_neighbor],
-            edge_invariants,
-        ], dim=-1)
+        if self.use_interaction_attention:
+            # Apply attention on features
+            edge_full_attr = torch.cat([
+                node_invariants[edge_center],
+                node_invariants[edge_neighbor],
+                edge_invariants,
+            ], dim=-1)
 
-        Q = self.node_attr_to_query(edge_full_attr)
-        Q = rearrange(Q, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
+            Q = self.node_attr_to_query(edge_full_attr)
+            Q = rearrange(Q, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
 
-        K = self.edge_feat_to_key(self.dot(self.reshape_back_tp(emb_latent), self.reshape_back_tp(eq_features)))
-        K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
+            K = self.edge_feat_to_key(self.dot(self.reshape_back_tp(emb_latent), self.reshape_back_tp(eq_features)))
+            K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
 
-        W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
+            W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
 
-        emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
+            emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
 
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(
@@ -719,14 +728,19 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         active_node_centers = torch.unique(edge_center)
         local_env_per_active_atom = self.env_linear(local_env_per_node[active_node_centers])
 
-        expanded_features_per_active_atom: torch.Tensor = self.product(
-            node_feats=local_env_per_active_atom,
-            node_attrs=node_invariants[active_node_centers],
-        )
-        expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
+        if self.use_mace_product:
+            expanded_features_per_active_atom: torch.Tensor = self.product(
+                node_feats=local_env_per_active_atom,
+                node_attrs=node_invariants[active_node_centers],
+            )
+            expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
 
-        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=expanded_features_per_active_atom.dtype)
-        expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
+            expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=expanded_features_per_active_atom.dtype)
+            expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
+        else:
+            expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
+            expanded_features_per_node[active_node_centers] = local_env_per_active_atom
+
 
         # Copy to get per-edge
         # Large allocation, but no better way to do this:
