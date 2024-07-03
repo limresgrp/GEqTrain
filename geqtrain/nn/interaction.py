@@ -145,7 +145,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             ],
         )
 
-        two_body_latent = functools.partial(latent,    **two_body_latent_kwargs)
+        two_body_latent = functools.partial(two_body_latent,    **two_body_latent_kwargs)
         latent =          functools.partial(latent,    **latent_kwargs)
         env_embed =       functools.partial(env_embed, **env_embed_kwargs)
 
