@@ -127,7 +127,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.head_dim               = head_dim
         self.isqrtd                 = math.isqrt(head_dim)
         self.polynomial_cutoff_p    = float(PolynomialCutoff_p)
-        
+
         # performance
         self.pad_to_alignment       = pad_to_alignment
 
@@ -263,7 +263,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             )
 
         # - End Interaction Layers - #
-        
+
         self._latent_dim = self.interaction_layers[-1].latent_mlp.out_features
         self.out_multiplicity = out_irreps[0].mul
 
@@ -285,7 +285,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
 
         # - End build modules - #
-        
+
         out_feat_elems = []
         for irr in out_irreps:
             out_feat_elems.append(irr.ir.dim)
@@ -390,7 +390,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 edge_invariants=edge_invariants[active_edges],
                 edge_center=edge_center[active_edges],
                 edge_neighbor=edge_neighbor[active_edges],
-                
+
                 this_layer_update_coeff=layer_update_coefficients[layer_idx - 1] if layer_idx > 0 else None
             )
 
@@ -450,7 +450,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         two_body_latent: torch.nn.Module,
         latent: torch.nn.Module,
         env_embed: torch.nn.Module,
-        
+
         avg_num_neighbors: float,
     ) -> None:
         super().__init__()
@@ -498,7 +498,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         parent._tp_n_scalar_outs.append(tp_n_scalar_outs)
         full_out_irreps = o3.Irreps(full_out_irreps)
         assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
-        
+
         # Build tensor product between env-aware node feats and edge attrs
         tp = Contracter(
             irreps_in1=o3.Irreps(
@@ -641,7 +641,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
 
         # Compute latents
         new_latents = self.latent_mlp(inv_latent_cat)
-        
+
         # Apply cutoff, which propagates through to everything else
         new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
 
@@ -705,7 +705,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
 
         W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
-        
+
         emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
 
         # Pool over all attention-weighted edge features to build node local environment embedding
@@ -725,7 +725,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         )
         expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
 
-        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=self.DTYPE)
+        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=expanded_features_per_active_atom.dtype)
         expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
 
         # Copy to get per-edge
@@ -753,5 +753,4 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         eq_features = self.linear(eq_features)
 
         return latents, inv_latent, eq_features
-        
-    
+
