@@ -57,7 +57,7 @@ def init_n_update(config):
 
     # upload geqtrain code
 
-    source = Path(__file__).parent.resolve()
+    source = Path(__file__).parent.parent.resolve()
     upload_zipped_code_on_wandb(source, 'geqtrain_source_code')
 
     # upload ad-hoc code
