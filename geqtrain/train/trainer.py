@@ -40,7 +40,10 @@ from .early_stopping import EarlyStopping
 import gc
 import torch
 
-def clean_cuda():
+def clean_cuda(cls=None):
+    '''
+    ptr to trainer instance, not used
+    '''
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -182,6 +185,8 @@ class Trainer:
         **kwargs,
     ):
 
+        self.is_wandb_trainer = isinstance(self, TrainerWandB)
+
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
@@ -277,6 +282,7 @@ class Trainer:
         # --- load all callbacks
         self._init_callbacks         = [load_callable(callback) for callback in init_callbacks]
         self._end_of_epoch_callbacks = [load_callable(callback) for callback in end_of_epoch_callbacks]
+        end_of_batch_callbacks.append(load_callable(clean_cuda))
         self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
@@ -291,15 +297,33 @@ class Trainer:
         - early stopping conditions
 
         '''
+
+        # set up correctly wd
+        # get all params that require grad
+
+        param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
+
+        # split them according to their shape (which implies wheter to apply wd on them or not)
+
+        params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
+        params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
+        optim_groups = [
+            {'params': params_to_be_decayed, 'weight_decay': self.kwargs['optimizer_params']['weight_decay']},
+            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.0},
+        ]
+
         # initialize optimizer
+
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
             class_name=self.optimizer_name,
             prefix="optimizer",
-            positional_args=dict(params=self.model.parameters(), lr=self.learning_rate),
+            positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
             optional_args=self.optimizer_kwargs,
         )
+
+        # set up norm
 
         self.max_gradient_norm = (
             float(self.max_gradient_norm)
@@ -814,9 +838,13 @@ class Trainer:
 
         return input_data, batch_chunk, batch_chunk_center_nodes
 
-    def batch_step(self, data, validation=False):
+    def model_forward(self, input_data, batch_chunk):
+        out = self.model(input_data) # forward of the model
+        del input_data
+        loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
+        return out, loss, loss_contrib
 
-        clean_cuda()
+    def batch_step(self, data, validation=False):
 
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
@@ -829,6 +857,8 @@ class Trainer:
         else:
             self.model.train()
 
+        mixed_precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16)
+
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
         # - Remove edges of atoms whose result is NaN - #
@@ -836,6 +866,7 @@ class Trainer:
         for key in self.loss.coeffs:
             if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
                 key_clean = self.loss.remove_suffix(key)
+                batch[key_clean] = batch[key_clean].squeeze()
                 if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
                     val = batch[key_clean].reshape(len(batch[key_clean]), -1)
                     not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
@@ -868,9 +899,41 @@ class Trainer:
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
 
-            with cm:
-                out = self.model(input_data) # forward of the model
-            del input_data
+            # batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY] = batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY][:, 0].unsqueeze(-1)
+
+            with cm, mixed_precision:
+                out, loss, loss_contrib = self.model_forward(input_data, batch_chunk)
+
+            # update metrics
+
+            with torch.no_grad():
+                self.batch_losses = self.loss_stat(loss, loss_contrib)
+                self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
+            del batch_chunk
+
+            if not validation:
+
+                loss.backward()
+
+                # grad clipping: avoid "shocks" to the model (params) during optimization;
+                # returns norms; their expected trend is from high to low and stabilize
+                norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
+
+                if self.is_wandb_trainer:
+                    wandb.log({"Grad_norm": norm})
+
+                if self.sanitize_gradients:
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad[torch.isnan(param.grad)] = 0
+
+                self.optim.step()
+                # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
+
+                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
+                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+
+            # evaluate ending condition
 
             if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
                 if len(batch_chunk_center_nodes) < num_batch_center_nodes:
@@ -880,38 +943,6 @@ class Trainer:
             else:
                 assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
                 already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-            if not validation:
-                loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
-
-                self.optim.zero_grad(set_to_none=True) # 0 grad
-
-                loss.backward() # compute grads
-
-                if self.max_gradient_norm < float("inf"): # grad clipping
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.max_gradient_norm
-                    )
-
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
-
-                self.optim.step()
-                # self.model.normalize_weights() # scales parms by their norm (Not use_weight_norm)
-
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
-            with torch.no_grad(): # val step if required and comp metrics for log
-                if validation:
-                    loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
-
-                self.batch_losses = self.loss_stat(loss, loss_contrib)
-                self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
-
-            del batch_chunk
 
             if already_computed_nodes is None:
                 return
@@ -1310,3 +1341,8 @@ class TrainerWandB(Trainer):
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
+
+
+
+
+
