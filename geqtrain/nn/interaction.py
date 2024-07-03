@@ -3,7 +3,7 @@ import functools
 import torch
 import torch.nn.functional as F
 
-from typing import Callable, Optional, List, Union
+from typing import Callable, Optional, List, Tuple, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 
@@ -24,6 +24,9 @@ from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
+SCALAR = o3.Irrep("0e")  # define for convinience
+
+
 def pick_mpl_function(func):
     if isinstance(func, Callable):
         return func
@@ -33,187 +36,6 @@ def pick_mpl_function(func):
     raise Exception(f"MLP Funciton {func} not implemented.")
 
 
-@compile_mode("script")
-class InteractionLayer(GraphModuleMixin, torch.nn.Module):
-
-    def __init__(
-        self,
-        latent_mlp,
-        env_embed_mlp,
-        env_weighter,
-        node_attr_to_query,
-        edge_feat_to_key,
-        dot,
-        env_linear,
-        product,
-        reshape_in_module,
-        tp,
-        tp_n_scalar_out,
-        linear,
-        reshape_back_tp,
-        
-        avg_num_neighbors: float,
-        env_embed_mul,
-        head_dim,
-    ) -> None:
-        super().__init__()
-        self.DTYPE = torch.get_default_dtype()
-
-        self.latent_mlp = latent_mlp
-        self.env_embed_mlp = env_embed_mlp
-        self._env_weighter = env_weighter
-        self.node_attr_to_query = node_attr_to_query
-        self.edge_feat_to_key = edge_feat_to_key
-        self.dot = dot
-        self.env_linear = env_linear
-        self.product = product
-        self.reshape_in_module = reshape_in_module
-        self.tp = tp
-        self.tp_n_scalar_out = tp_n_scalar_out
-        self.linear = linear
-        self.reshape_back_tp = reshape_back_tp
-
-        self.register_buffer(
-            "env_sum_normalization",
-            torch.as_tensor([avg_num_neighbors]).rsqrt(),
-        )
-        self.env_embed_mul = env_embed_mul
-        self.head_dim = head_dim
-        self.isqrtd = math.isqrt(head_dim)
-
-    def forward(
-        self,
-        layer_idx,
-        active_edges,
-        num_nodes,
-        latents,
-        inv_latent_cat,
-        eq_features,
-        cutoff_coeffs: torch.Tensor,
-        edge_attr: torch.Tensor,
-        node_invariants,
-        edge_invariants,
-        edge_center,
-        edge_neighbor,
-        this_layer_update_coeff: Optional[torch.Tensor],
-    ):
-
-        # Compute latents
-        new_latents = self.latent_mlp(inv_latent_cat)
-        
-        # Apply cutoff, which propagates through to everything else
-        new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
-
-        if layer_idx > 0:
-            assert this_layer_update_coeff is not None
-            # At init, we assume new and old to be approximately uncorrelated
-            # Thus their variances add
-            # we always want the latent space to be normalized to variance = 1.0,
-            # because it is critical for learnability. Still, we want to preserve
-            # the _relative_ magnitudes of the current latent and the residual update
-            # to be controled by `this_layer_update_coeff`
-            # Solving the simple system for the two coefficients:
-            #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
-            # gives
-            #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
-            # rsqrt is reciprocal sqrt
-            coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
-            coefficient_new = this_layer_update_coeff * coefficient_old
-            # Residual update
-            # Note that it only runs when there are latents to resnet with, so not at the first layer
-            # index_add adds only to the edges for which we have something to contribute
-            latents = torch.index_add(
-                coefficient_old * latents,
-                0,
-                active_edges,
-                coefficient_new * new_latents,
-            )
-        else:
-            # Normal (non-residual) update
-            # index_copy replaces, unlike index_add
-            latents = torch.index_copy(latents, 0, active_edges, new_latents)
-
-        # From the latents, compute the weights for active edges:
-        weights = self.env_embed_mlp(latents[active_edges])
-        w_index: int = 0
-
-        if layer_idx == 0:
-            # embed initial edge
-            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
-            w_index += self._env_weighter.weight_numel
-            eq_features = self._env_weighter(
-                eq_features, env_w
-            )  # eq_features is edge_attr
-
-        # Extract weights for the environment builder
-        env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
-        w_index += self._env_weighter.weight_numel
-        emb_latent = self._env_weighter(edge_attr, env_w)
-
-        # Apply attention on emb_latent
-        edge_full_attr = torch.cat([
-            node_invariants[edge_center],
-            node_invariants[edge_neighbor],
-            edge_invariants,
-        ], dim=-1)
-
-        Q = self.node_attr_to_query(edge_full_attr)
-        Q = rearrange(Q, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
-
-        K = self.edge_feat_to_key(self.dot(self.reshape_back_tp(emb_latent), self.reshape_back_tp(eq_features)))
-        K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
-
-        W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
-        
-        emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
-
-        # Pool over all attention-weighted edge features to build node local environment embedding
-        local_env_per_node = scatter(
-            emb_latent,
-            edge_center,
-            dim=0,
-            dim_size=num_nodes,
-        ) * self.env_sum_normalization
-
-        active_node_centers = torch.unique(edge_center)
-        local_env_per_active_atom = self.env_linear(local_env_per_node[active_node_centers])
-
-        expanded_features_per_active_atom: torch.Tensor = self.product(
-            node_feats=local_env_per_active_atom,
-            node_attrs=node_invariants[active_node_centers],
-        )
-        expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
-
-        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=self.DTYPE)
-        expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
-
-        # Copy to get per-edge
-        # Large allocation, but no better way to do this:
-        local_env_per_active_edge = expanded_features_per_node[edge_center]
-
-        # Now do the TP
-        # recursively tp current features with the environment embeddings
-        eq_features = self.tp(eq_features, local_env_per_active_edge)
-
-        # Get invariants
-        # features has shape [z][mul][k]
-        # we know scalars are first
-        scalars = rearrange(eq_features[:, :, :self.tp_n_scalar_out], 'e m s -> e (m s)')
-
-        inv_latent = torch.cat(
-            [
-                latents[active_edges],
-                scalars,
-            ],
-            dim=-1
-        )
-
-        # do the linear for eq. features
-        eq_features = self.linear(eq_features)
-
-        return latents, inv_latent, eq_features
-        
-        
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
@@ -250,7 +72,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     edge_equivariant_field: str
     out_field: str
     env_embed_mul: int
-    weight_numel: int
 
     # internal values
     _env_builder_w_index: List[int]
@@ -272,7 +93,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
         edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-        env_embed_multiplicity: int = 64,
+        env_embed_mul: int = 64,
         head_dim: int = 64,
         product_correlation: int = 2,
 
@@ -286,13 +107,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Performance parameters:
         pad_to_alignment: int = 1,
-        sparse_mode: Optional[str] = None,
 
         # Other:
         irreps_in=None,
     ):
         super().__init__()
-        SCALAR = o3.Irrep("0e")  # define for convinience
         self.DTYPE = torch.get_default_dtype()
 
         # save parameters
@@ -304,10 +123,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_invariant_field   = edge_invariant_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
-        self.env_embed_mul          = env_embed_multiplicity
+        self.env_embed_mul          = env_embed_mul
         self.head_dim               = head_dim
         self.isqrtd                 = math.isqrt(head_dim)
         self.polynomial_cutoff_p    = float(PolynomialCutoff_p)
+        
+        # performance
+        self.pad_to_alignment       = pad_to_alignment
 
         env_embed       = pick_mpl_function(env_embed)
         two_body_latent = pick_mpl_function(two_body_latent)
@@ -323,8 +145,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             ],
         )
 
-        latent =          functools.partial(latent,    **latent_kwargs)
         two_body_latent = functools.partial(latent,    **two_body_latent_kwargs)
+        latent =          functools.partial(latent,    **latent_kwargs)
         env_embed =       functools.partial(env_embed, **env_embed_kwargs)
 
         self.interaction_layers = torch.nn.ModuleList([])
@@ -333,12 +155,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
         assert all(mul == 1 for mul, _ in input_edge_eq_irreps)
 
-        env_embed_irreps = o3.Irreps([(env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
+        env_embed_irreps = o3.Irreps([(self.env_embed_mul, ir) for _, ir in input_edge_eq_irreps])
         assert (
             env_embed_irreps[0].ir == SCALAR
         ), "env_embed_irreps must start with scalars"
         self._input_pad = (
-            int(math.ceil(env_embed_irreps.dim / pad_to_alignment)) * pad_to_alignment
+            int(math.ceil(env_embed_irreps.dim / self.pad_to_alignment)) * self.pad_to_alignment
         ) - env_embed_irreps.dim
 
         if out_irreps is None:
@@ -347,7 +169,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
         if output_hidden_irreps:
             out_irreps = o3.Irreps(
-                [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps if ir.l in [0] + out_irreps.ls]
+                [(self.env_embed_mul, ir) for _, ir in env_embed_irreps if ir.l in [0] + out_irreps.ls]
             )
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges
@@ -408,9 +230,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Environment builder:
         env_weighter = MakeWeightedChannels(
             irreps_in=input_edge_eq_irreps,
-            multiplicity_out=env_embed_multiplicity,
-            pad_to_alignment=pad_to_alignment,
-            use_norm_layer=False,
+            multiplicity_out=self.env_embed_mul,
+            pad_to_alignment=self.pad_to_alignment,
+            use_norm_layer=True,
         )
 
         self._tp_n_scalar_outs: List[int] = []
@@ -418,194 +240,46 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # - Start Interaction Layers - #
 
-        for layer_index, (l_arg_irreps, l_out_irreps) in enumerate(
+        for layer_index, tps_irreps in enumerate(
             zip(tps_irreps_in, tps_irreps_out)
         ):
-
-            # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
-            env_linear = Linear(
-                env_embed_irreps,
-                env_embed_irreps,
-                shared_weights=True,
-                internal_weights=True,
-            )
-
-            # Perform eq. Atomic Cluster Expansion
-            product = EquivariantProductBasisBlock(
-                node_feats_irreps=env_embed_irreps,
-                target_irreps=env_embed_irreps,
-                correlation=product_correlation,
-                num_elements=self.irreps_in[self.node_invariant_field].num_irreps,
-            )
-
-            # Reshape back product so that you can perform tp: n m d -> n (m d)
-            reshape_in_module = reshape_irreps(env_embed_irreps)
-
-            # Make TP
-            tmp_i_out: int = 0
-            instr = []
-            tp_n_scalar_outs: int = 0
-            full_out_irreps = []
-            for i_out, (_, ir_out) in enumerate(l_out_irreps):
-                for i_1, (_, ir_1) in enumerate(l_arg_irreps):
-                    for i_2, (_, ir_2) in enumerate(env_embed_irreps):
-                        if ir_out in ir_1 * ir_2:
-                            if ir_out == SCALAR:
-                                tp_n_scalar_outs += 1
-                            instr.append((i_1, i_2, tmp_i_out))
-                            full_out_irreps.append((env_embed_multiplicity, ir_out))
-                            tmp_i_out += 1
-            self._tp_n_scalar_outs.append(tp_n_scalar_outs)
-            full_out_irreps = o3.Irreps(full_out_irreps)
-            assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
-            
-            # Build tensor product between env-aware node feats and edge attrs
-            tp = Contracter(
-                irreps_in1=o3.Irreps(
-                    [(env_embed_multiplicity, ir) for _, ir in l_arg_irreps]
-                ),
-                irreps_in2=o3.Irreps(
-                    [(env_embed_multiplicity, ir) for _, ir in env_embed_irreps]
-                ),
-                irreps_out=o3.Irreps(
-                    [(env_embed_multiplicity, ir) for _, ir in full_out_irreps]
-                ),
-                instructions=instr,
-                connection_mode=("uuu"),
-                shared_weights=False,
-                has_weight=False,
-                normalization='component',
-                pad_to_alignment=pad_to_alignment,
-                sparse_mode=sparse_mode,
-            )
-
-            # Make env embed mlp
-            generate_n_weights = (env_weighter.weight_numel)  # the weight for the edge embedding
-            generate_n_weights += self.env_embed_mul                # + the weights for the edge attention
-            if layer_index == 0:
-                # also need weights to embed the edge itself
-                # this is because the 2 body latent is mixed in with the first layer
-                # in terms of code
-                generate_n_weights += env_weighter.weight_numel
-
-            # the linear acts after the extractor
-            linear_out_irreps = out_irreps if layer_index == self.num_layers - 1 else env_embed_irreps
-
-            _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
-            self._features_n_scalar_outs.append(_features_n_scalar_outs)
-
-            linear = Linear(
-                full_out_irreps,
-                linear_out_irreps,
-                shared_weights=True,
-                internal_weights=True,
-                pad_to_alignment=pad_to_alignment,
-            )
-
-            if layer_index == 0:
-                # at the first layer, we have no invariants from previous TPs
-                latent_mlp = two_body_latent(
-                    mlp_input_dimension=(
-                        (
-                            # Node invariants for center and neighbor (chemistry)
-                            2 * self.irreps_in[self.node_invariant_field].num_irreps
-                            # Plus edge invariants for the edge (radius).
-                            + self.irreps_in[self.edge_invariant_field].num_irreps
-                        )
-                    ),
-                    mlp_output_dimension=None,
-                    weight_norm=False,
-                )
-                self._latent_dim = latent_mlp.out_features
-            else:
-                latent_mlp = latent(
-                    mlp_input_dimension=(
-                        # the embedded latent invariants from the previous layer(s)
-                        latent_mlp.out_features
-                        # and the invariants extracted from the last layer's TP:
-                        + env_embed_multiplicity * self._tp_n_scalar_outs[layer_index - 1]
-                    ),
-                    mlp_output_dimension=self._latent_dim,
-                    weight_norm=False,
-                )
-
-            # the env embed MLP takes the last latent's output as input
-            # and outputs enough weights for the env embedder
-            env_embed_mlp = env_embed(
-                mlp_input_dimension=latent_mlp.out_features,
-                mlp_output_dimension=generate_n_weights,
-                weight_norm=False,
-            )
-
-            # Take the node attrs and obtain a query matrix
-            node_attr_to_query = env_embed(
-                mlp_input_dimension=(
-                    # Node invariants for center and neighbor (chemistry)
-                    2 * self.irreps_in[self.node_invariant_field].num_irreps
-                    # Plus edge invariants for the edge (radius).
-                    + self.irreps_in[self.edge_invariant_field].num_irreps
-                ),
-                mlp_output_dimension=env_embed_multiplicity * head_dim,
-                use_norm_layer=True,
-                mlp_nonlinearity=None,
-            )
-
-            # Take the node attrs and obtain a query matrix
-            dot = o3.FullyConnectedTensorProduct(
-                env_embed_irreps,
-                env_embed_irreps,
-                f"{self.env_embed_mul}x0e",
-                path_normalization='path',
-            )
-            reshape_back_tp = inverse_reshape_irreps(env_embed_irreps)
-
-            edge_feat_to_key = env_embed(
-                mlp_input_dimension=dot.irreps_out.dim,
-                mlp_output_dimension=env_embed_multiplicity * head_dim,
-                use_norm_layer=True,
-            )
-
             self.interaction_layers.append(
                 InteractionLayer(
-                    latent_mlp=latent_mlp,
-                    env_embed_mlp=env_embed_mlp,
+                    layer_index=layer_index,
+                    parent=self,
+                    env_embed_irreps=env_embed_irreps,
+                    tps_irreps=tps_irreps,
+                    out_irreps=out_irreps,
+                    product_correlation=product_correlation,
+                    previous_latent_dim=self.interaction_layers[-1].latent_mlp.out_features if layer_index > 0 else None,
+
                     env_weighter=env_weighter,
-                    node_attr_to_query=node_attr_to_query,
-                    edge_feat_to_key=edge_feat_to_key,
-                    dot=dot,
-                    env_linear=env_linear,
-                    product=product,
-                    reshape_in_module=reshape_in_module,
-                    tp=tp,
-                    tp_n_scalar_out=tp_n_scalar_outs,
-                    linear=linear,
-                    reshape_back_tp=reshape_back_tp,
+                    two_body_latent=two_body_latent,
+                    latent=latent,
+                    env_embed=env_embed,
 
                     avg_num_neighbors=avg_num_neighbors,
-                    env_embed_mul=env_embed_multiplicity,
-                    head_dim=head_dim,
                 )
             )
 
         # - End Interaction Layers - #
         
+        self._latent_dim = self.interaction_layers[-1].latent_mlp.out_features
         self.out_multiplicity = out_irreps[0].mul
 
         self.final_latent_mlp = latent(
             mlp_input_dimension=(
                 # the embedded latent invariants from the previous layer(s)
-                latent_mlp.out_features
+                self._latent_dim
                 # and the invariants extracted from the last layer's TP:
-                + env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]
+                + self.env_embed_mul * self._tp_n_scalar_outs[layer_index]
             ),
             mlp_output_dimension=self._latent_dim,
-            weight_norm=False,
         )
 
         self.final_readout_mlp = latent(
             mlp_input_dimension=self._latent_dim,
             mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_index],
-            weight_norm=False,
         )
 
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
@@ -705,7 +379,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
 
             latents, inv_latent_cat, eq_features = layer(
-                layer_idx=layer_idx,
                 active_edges=active_edges,
                 num_nodes=num_nodes,
                 latents=latents,
@@ -758,3 +431,327 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 normalized_param = F.normalize(param, p=2, dim=0)
                 # Assign normalized parameter back to the model
                 param.data.copy_(normalized_param)
+
+
+@compile_mode("script")
+class InteractionLayer(GraphModuleMixin, torch.nn.Module):
+
+    def __init__(
+        self,
+        layer_index: int,
+        parent: InteractionModule,
+        env_embed_irreps: o3.Irreps,
+        tps_irreps: Tuple[o3.Irreps],
+        out_irreps: o3.Irreps,
+        product_correlation: int,
+        previous_latent_dim: int,
+
+        env_weighter: MakeWeightedChannels,
+        two_body_latent: torch.nn.Module,
+        latent: torch.nn.Module,
+        env_embed: torch.nn.Module,
+        
+        avg_num_neighbors: float,
+    ) -> None:
+        super().__init__()
+
+        self.layer_index = layer_index
+        self.DTYPE = torch.get_default_dtype()
+        self.env_embed_mul = parent.env_embed_mul
+        self.head_dim = parent.head_dim
+        self.isqrtd = math.isqrt(self.head_dim)
+
+        # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
+        env_linear = Linear(
+            env_embed_irreps,
+            env_embed_irreps,
+            shared_weights=True,
+            internal_weights=True,
+        )
+
+        # Perform eq. Atomic Cluster Expansion
+        product = EquivariantProductBasisBlock(
+            node_feats_irreps=env_embed_irreps,
+            target_irreps=env_embed_irreps,
+            correlation=product_correlation,
+            num_elements=parent.irreps_in[parent.node_invariant_field].num_irreps,
+        )
+
+        # Reshape back product so that you can perform tp: n m d -> n (m d)
+        reshape_in_module = reshape_irreps(env_embed_irreps)
+
+        # Make TP
+        l_arg_irreps, l_out_irreps = tps_irreps
+        tmp_i_out: int = 0
+        instr = []
+        tp_n_scalar_outs: int = 0
+        full_out_irreps = []
+        for i_out, (_, ir_out) in enumerate(l_out_irreps):
+            for i_1, (_, ir_1) in enumerate(l_arg_irreps):
+                for i_2, (_, ir_2) in enumerate(env_embed_irreps):
+                    if ir_out in ir_1 * ir_2:
+                        if ir_out == SCALAR:
+                            tp_n_scalar_outs += 1
+                        instr.append((i_1, i_2, tmp_i_out))
+                        full_out_irreps.append((self.env_embed_mul, ir_out))
+                        tmp_i_out += 1
+        parent._tp_n_scalar_outs.append(tp_n_scalar_outs)
+        full_out_irreps = o3.Irreps(full_out_irreps)
+        assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
+        
+        # Build tensor product between env-aware node feats and edge attrs
+        tp = Contracter(
+            irreps_in1=o3.Irreps(
+                [(self.env_embed_mul, ir) for _, ir in l_arg_irreps]
+            ),
+            irreps_in2=o3.Irreps(
+                [(self.env_embed_mul, ir) for _, ir in env_embed_irreps]
+            ),
+            irreps_out=o3.Irreps(
+                [(self.env_embed_mul, ir) for _, ir in full_out_irreps]
+            ),
+            instructions=instr,
+            connection_mode=("uuu"),
+            shared_weights=False,
+            has_weight=False,
+            normalization='component',
+            pad_to_alignment=parent.pad_to_alignment,
+        )
+
+        # Make env embed mlp
+        generate_n_weights = (env_weighter.weight_numel)  # the weight for the edge embedding
+        generate_n_weights += self.env_embed_mul        # + the weights for the edge attention
+        if self.layer_index == 0:
+            # also need weights to embed the edge itself
+            # this is because the 2 body latent is mixed in with the first layer
+            # in terms of code
+            generate_n_weights += env_weighter.weight_numel
+
+        # the linear acts after the extractor
+        linear_out_irreps = out_irreps if self.layer_index == parent.num_layers - 1 else env_embed_irreps
+
+        _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
+        parent._features_n_scalar_outs.append(_features_n_scalar_outs)
+
+        linear = Linear(
+            full_out_irreps,
+            linear_out_irreps,
+            shared_weights=True,
+            internal_weights=True,
+            pad_to_alignment=parent.pad_to_alignment,
+        )
+
+        if self.layer_index == 0:
+            # at the first layer, we have no invariants from previous TPs
+            latent_mlp = two_body_latent(
+                mlp_input_dimension=(
+                    (
+                        # Node invariants for center and neighbor (chemistry)
+                        2 * parent.irreps_in[parent.node_invariant_field].num_irreps
+                        # Plus edge invariants for the edge (radius).
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps
+                    )
+                ),
+                mlp_output_dimension=None,
+            )
+            self._latent_dim = latent_mlp.out_features
+        else:
+            assert previous_latent_dim is not None
+            self._latent_dim = previous_latent_dim
+            latent_mlp = latent(
+                mlp_input_dimension=(
+                    # the embedded latent invariants from the previous layer(s)
+                    self._latent_dim
+                    # and the invariants extracted from the last layer's TP:
+                    + self.env_embed_mul * parent._tp_n_scalar_outs[self.layer_index - 1]
+                ),
+                mlp_output_dimension=self._latent_dim,
+            )
+
+        # the env embed MLP takes the last latent's output as input
+        # and outputs enough weights for the env embedder
+        env_embed_mlp = env_embed(
+            mlp_input_dimension=self._latent_dim,
+            mlp_output_dimension=generate_n_weights,
+        )
+
+        # Take the node attrs and obtain a query matrix
+        node_attr_to_query = env_embed(
+            mlp_input_dimension=(
+                 # Node invariants for center and neighbor (chemistry)
+                2 * parent.irreps_in[parent.node_invariant_field].num_irreps
+                # Plus edge invariants for the edge (radius).
+                + parent.irreps_in[parent.edge_invariant_field].num_irreps
+            ),
+            mlp_output_dimension=self.env_embed_mul * self.head_dim,
+            use_norm_layer=False,
+            mlp_nonlinearity=None,
+        )
+
+        # Take the node attrs and obtain a query matrix
+        dot = o3.FullyConnectedTensorProduct(
+            env_embed_irreps,
+            env_embed_irreps,
+            f"{self.env_embed_mul}x0e",
+            path_normalization='path',
+        )
+        reshape_back_tp = inverse_reshape_irreps(env_embed_irreps)
+
+        edge_feat_to_key = env_embed(
+            mlp_input_dimension=dot.irreps_out.dim,
+            mlp_output_dimension=self.env_embed_mul * self.head_dim,
+            use_norm_layer=False,
+            mlp_nonlinearity=None,
+        )
+
+        self.latent_mlp = latent_mlp
+        self.env_embed_mlp = env_embed_mlp
+        self._env_weighter = env_weighter
+        self.node_attr_to_query = node_attr_to_query
+        self.edge_feat_to_key = edge_feat_to_key
+        self.dot = dot
+        self.env_linear = env_linear
+        self.product = product
+        self.reshape_in_module = reshape_in_module
+        self.tp = tp
+        self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
+        self.linear = linear
+        self.reshape_back_tp = reshape_back_tp
+
+        self.register_buffer(
+            "env_sum_normalization",
+            torch.as_tensor([avg_num_neighbors]).rsqrt(),
+        )
+
+    def forward(
+        self,
+        active_edges,
+        num_nodes,
+        latents,
+        inv_latent_cat,
+        eq_features,
+        cutoff_coeffs: torch.Tensor,
+        edge_attr: torch.Tensor,
+        node_invariants,
+        edge_invariants,
+        edge_center,
+        edge_neighbor,
+        this_layer_update_coeff: Optional[torch.Tensor],
+    ):
+
+        # Compute latents
+        new_latents = self.latent_mlp(inv_latent_cat)
+        
+        # Apply cutoff, which propagates through to everything else
+        new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
+
+        if self.layer_index > 0:
+            assert this_layer_update_coeff is not None
+            # At init, we assume new and old to be approximately uncorrelated
+            # Thus their variances add
+            # we always want the latent space to be normalized to variance = 1.0,
+            # because it is critical for learnability. Still, we want to preserve
+            # the _relative_ magnitudes of the current latent and the residual update
+            # to be controled by `this_layer_update_coeff`
+            # Solving the simple system for the two coefficients:
+            #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+            # gives
+            #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+            # rsqrt is reciprocal sqrt
+            coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
+            coefficient_new = this_layer_update_coeff * coefficient_old
+            # Residual update
+            # Note that it only runs when there are latents to resnet with, so not at the first layer
+            # index_add adds only to the edges for which we have something to contribute
+            latents = torch.index_add(
+                coefficient_old * latents,
+                0,
+                active_edges,
+                coefficient_new * new_latents,
+            )
+        else:
+            # Normal (non-residual) update
+            # index_copy replaces, unlike index_add
+            latents = torch.index_copy(latents, 0, active_edges, new_latents)
+
+        # From the latents, compute the weights for active edges:
+        weights = self.env_embed_mlp(latents[active_edges])
+        w_index: int = 0
+
+        if self.layer_index == 0:
+            # embed initial edge
+            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
+            w_index += self._env_weighter.weight_numel
+            eq_features = self._env_weighter(
+                eq_features, env_w
+            )  # eq_features is edge_attr
+
+        # Extract weights for the edge attrs
+        env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
+        w_index += self._env_weighter.weight_numel
+        emb_latent = self._env_weighter(edge_attr, env_w)
+
+        # Apply attention on features
+        edge_full_attr = torch.cat([
+            node_invariants[edge_center],
+            node_invariants[edge_neighbor],
+            edge_invariants,
+        ], dim=-1)
+
+        Q = self.node_attr_to_query(edge_full_attr)
+        Q = rearrange(Q, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
+
+        K = self.edge_feat_to_key(self.dot(self.reshape_back_tp(emb_latent), self.reshape_back_tp(eq_features)))
+        K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_mul, d=self.head_dim)
+
+        W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
+        
+        emb_latent = torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
+
+        # Pool over all attention-weighted edge features to build node local environment embedding
+        local_env_per_node = scatter(
+            emb_latent,
+            edge_center,
+            dim=0,
+            dim_size=num_nodes,
+        )# * self.env_sum_normalization
+
+        active_node_centers = torch.unique(edge_center)
+        local_env_per_active_atom = self.env_linear(local_env_per_node[active_node_centers])
+
+        expanded_features_per_active_atom: torch.Tensor = self.product(
+            node_feats=local_env_per_active_atom,
+            node_attrs=node_invariants[active_node_centers],
+        )
+        expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
+
+        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=self.DTYPE)
+        expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
+
+        # Copy to get per-edge
+        # Large allocation, but no better way to do this:
+        local_env_per_active_edge = expanded_features_per_node[edge_center]
+
+        # Now do the TP
+        # recursively tp current features with the environment embeddings
+        eq_features = self.tp(eq_features, local_env_per_active_edge)
+
+        # Get invariants
+        # features has shape [z][mul][k]
+        # we know scalars are first
+        scalars = rearrange(eq_features[:, :, :self.tp_n_scalar_out], 'e m s -> e (m s)')
+
+        inv_latent = torch.cat(
+            [
+                latents[active_edges],
+                scalars,
+            ],
+            dim=-1
+        )
+
+        # do the linear for eq. features
+        eq_features = self.linear(eq_features)
+
+        return latents, inv_latent, eq_features
+        
+    
