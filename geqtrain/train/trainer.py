@@ -882,19 +882,19 @@ class Trainer:
 
     def batch_step(self, data, validation=False):
 
-        ### WIP
+        # ### WIP
 
-        list_of_hookables = get_all_modules(self.model)
-        hooks = []
-        for i, (name, layer) in enumerate(list_of_hookables):
-            try:
-                hooks.append(layer.register_forward_hook(partial(print_shape, i, []))) # 'LayerNorm'
-            except:
-                print(f"Cant hook on {name}")
-                pass
+        # list_of_hookables = get_all_modules(self.model)
+        # hooks = []
+        # for i, (name, layer) in enumerate(list_of_hookables):
+        #     try:
+        #         hooks.append(layer.register_forward_hook(partial(print_shape, i, []))) # 'LayerNorm'
+        #     except:
+        #         print(f"Cant hook on {name}")
+        #         pass
 
 
-        ###
+        # ###
 
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
