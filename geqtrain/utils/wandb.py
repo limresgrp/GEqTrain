@@ -47,6 +47,7 @@ def init_n_update(config):
         project=config.wandb_project,
         config=conf_dict,
         name=config.run_name,
+        notes=conf_dict.get('experiment_description', None),
         resume="allow",
         id=config.run_id,
     )
