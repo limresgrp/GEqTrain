@@ -5,7 +5,7 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.nn.allegro import Linear
-from geqtrain.nn.allegro._fc import ScalarMLPFunction
+from geqtrain.nn.allegro._not_a_shitty_fc import ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
@@ -92,7 +92,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     internal_weights=self.eq_has_internal_weights,
                     pad_to_alignment=1,
                 )
-            
+
             if not self.eq_has_internal_weights:
                 self.weights_emb = readout_latent(
                     mlp_input_dimension=self.n_scalars_in,
@@ -107,7 +107,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                  "Please remove non-scalar features from the input, which otherwise would remain unused."
             )
             self.reshape_in = None
-        
+
         self.out_irreps_dim = self.out_irreps.dim
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -135,6 +135,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 weights = self.weights_emb(features[:, :self.n_scalars_in])
                 eq_features = self.eq_readout(eq_features, weights)
             out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)
-        
+
         data[self.out_field] = out_features
         return data

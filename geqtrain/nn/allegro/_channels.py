@@ -23,7 +23,6 @@ class MakeWeightedChannels(torch.nn.Module):
         irreps_in,
         multiplicity_out: int,
         pad_to_alignment: int = 1,
-        use_norm_layer: bool = False,
     ):
         super().__init__()
         assert all(mul == 1 for mul, ir in irreps_in)
@@ -43,19 +42,13 @@ class MakeWeightedChannels(torch.nn.Module):
         # there is
         self.multiplicity_out = multiplicity_out
         self.weight_numel = len(irreps_in) * multiplicity_out
-        self.use_norm_layer = use_norm_layer
 
-        if self.use_norm_layer:
-            setattr(self, "_layernorm", torch.nn.LayerNorm(self.weight_numel))
 
     def forward(self, edge_attr, weights):
         # weights are [e, m, d], tensor of scalars
         # edge_attr are [e, d], geometric tensor
         # d runs over all irreps, which is why the weights need
         # to be indexed in order to go from [num_d] to [d]
-
-        if self.use_norm_layer:
-            weights = self._layernorm(weights)
 
         return torch.einsum(
             "ed,emd->emd",

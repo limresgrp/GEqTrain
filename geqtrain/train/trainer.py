@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import ConcatDataset
+import torch.nn as nn
 
 from geqtrain.data import DataLoader, AtomicData, AtomicDataDict
 from geqtrain.utils import (
@@ -39,6 +40,7 @@ from .early_stopping import EarlyStopping
 
 import gc
 import torch
+from functools import partial
 
 def clean_cuda(cls=None):
     '''
@@ -46,6 +48,40 @@ def clean_cuda(cls=None):
     '''
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def has_children(module):
+    return len(list(module.named_children()))
+
+def get_all_modules(model):
+    modules = []
+
+    def recurse(mod, prefix=''):
+        for name, child in mod.named_children():
+            full_name = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, nn.Module):
+                if has_children(child):
+                    recurse(child, full_name)
+                else:
+                    modules.append((full_name, child))
+
+    recurse(model)
+    return modules
+
+def p(t): print(t.mean(), t.std(), t.min(),t.max())
+def print_shape(i, filter, mod, inp, out):
+    '''
+    filter: type of layer to skip
+
+    '''
+    if mod.__class__.__name__ in filter:
+        return
+
+    try:
+        print(f"{i}, {mod}", inp[0].shape, out.shape)
+        torch.save({f"{i}_{mod}": out}, f"./diagnostic/{i}_{mod}_out")
+    except:
+        pass
 
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
@@ -846,6 +882,20 @@ class Trainer:
 
     def batch_step(self, data, validation=False):
 
+        ### WIP
+
+        list_of_hookables = get_all_modules(self.model)
+        hooks = []
+        for i, (name, layer) in enumerate(list_of_hookables):
+            try:
+                hooks.append(layer.register_forward_hook(partial(print_shape, i, []))) # 'LayerNorm'
+            except:
+                print(f"Cant hook on {name}")
+                pass
+
+
+        ###
+
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -857,7 +907,7 @@ class Trainer:
         else:
             self.model.train()
 
-        mixed_precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16)
+        mixed_precision = contextlib.nullcontext() # torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16)
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 

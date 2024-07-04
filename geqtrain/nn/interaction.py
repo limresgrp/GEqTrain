@@ -16,7 +16,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.utils.tp_utils import tp_path_exists
 
-from geqtrain.nn.allegro._fc import ScalarMLPFunction
+from geqtrain.nn.allegro._not_a_shitty_fc import ScalarMLPFunction
 from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
 from geqtrain.nn.cutoffs import polynomial_cutoff
 
@@ -237,7 +237,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             irreps_in=input_edge_eq_irreps,
             multiplicity_out=self.env_embed_mul,
             pad_to_alignment=self.pad_to_alignment,
-            use_norm_layer=True,
         )
 
         self._tp_n_scalar_outs: List[int] = []
@@ -519,7 +518,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             connection_mode=("uuu"),
             shared_weights=False,
             has_weight=False,
-            normalization='component',
+            normalization='norm',
             pad_to_alignment=parent.pad_to_alignment,
         )
 
@@ -723,7 +722,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             edge_center,
             dim=0,
             dim_size=num_nodes,
-        )# * self.env_sum_normalization
+        ) * self.env_sum_normalization
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_active_atom = self.env_linear(local_env_per_node[active_node_centers])
