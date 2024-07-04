@@ -323,14 +323,6 @@ class Trainer:
             optional_args=self.optimizer_kwargs,
         )
 
-        # set up norm
-
-        self.max_gradient_norm = (
-            float(self.max_gradient_norm)
-            if self.max_gradient_norm is not None
-            else float("inf")
-        )
-
         # initialize scheduler
         assert (
             self.lr_scheduler_name
@@ -898,8 +890,6 @@ class Trainer:
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
 
-            # batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY] = batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY][:, 0].unsqueeze(-1)
-
             with cm, mixed_precision:
                 out, loss, loss_contrib = self.model_forward(input_data, batch_chunk)
 
@@ -1326,13 +1316,11 @@ class TrainerWandB(Trainer):
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
 
-    def init(self, experiment_description: str = ""):
+    def init(self):
         super().init()
 
         if not self._initialized:
             return
-
-        wandb.log({"Experiment Description": experiment_description})
 
         # upload some new fields to wandb
         wandb.config.update({"num_weights": self.num_weights})
