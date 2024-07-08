@@ -21,8 +21,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
         per_type_bias=None,
-        has_bias=False,
-        eq_has_internal_weights=False,
+        has_bias: bool = False,
+        eq_has_internal_weights: bool = False,
+        resnet: bool = False,
         irreps_in=None,
     ):
         super().__init__()
@@ -35,6 +36,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.has_eq_out = False
         self.has_bias = has_bias
         self.eq_has_internal_weights = eq_has_internal_weights
+        self.resnet = resnet
 
         in_irreps = irreps_in[field]
         out_irreps = (
@@ -48,14 +50,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.out_irreps_muls = [ir.mul for ir in out_irreps]
 
         # check and init irreps
+        my_irreps_in = {field: in_irreps}
+        if self.resnet:
+            my_irreps_in.update({self.out_field: out_irreps})
         self._init_irreps(
             irreps_in=irreps_in,
-            my_irreps_in={
-                field: in_irreps,
-                },
-            irreps_out={
-                self.out_field: out_irreps,
-            }
+            my_irreps_in=my_irreps_in,
+            irreps_out={self.out_field: out_irreps},
         )
 
         self.n_scalars_in = in_irreps.ls.count(0)
@@ -102,11 +103,17 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         else:
             assert in_irreps.dim == self.n_scalars_in, (
-                f"Module input contains features with irreps which are not scalars ({in_irreps})." +
-                f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
-                 "Please remove non-scalar features from the input, which otherwise would remain unused."
-            )
+                    f"Module input contains features with irreps which are not scalars ({in_irreps})." +
+                    f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
+                    "Please remove non-scalar features from the input, which otherwise would remain unused." +
+                    f"If features come from InteractionModule, you can add the parameter 'output_hidden_ls=[0]' in the constructor"
+                )
             self.reshape_in = None
+        
+        self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
+        if self.resnet:
+            assert in_irreps == out_irreps
+            self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
         
         self.out_irreps_dim = self.out_irreps.dim
 
@@ -136,5 +143,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 eq_features = self.eq_readout(eq_features, weights)
             out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)
         
+        if self.resnet:
+            assert self._resnet_update_coeff is not None
+            old_features = data[self.out_field]
+            _coeff = self._resnet_update_coeff.sigmoid()
+            coefficient_old = torch.rsqrt(_coeff.square() + 1)
+            coefficient_new = _coeff * coefficient_old
+            # Residual update
+            out_features = coefficient_old * old_features + coefficient_new * out_features
         data[self.out_field] = out_features
         return data
