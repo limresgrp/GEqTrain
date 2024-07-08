@@ -1,4 +1,6 @@
+import re
 import logging
+from typing import List
 
 def parse_dict(coeffs: dict):
     for key, value in coeffs.items():
@@ -29,3 +31,12 @@ def parse_dict(coeffs: dict):
             )
         logging.debug(f" parsing {coeff} {func}")
         yield key, coeff, func, func_params
+
+def find_matching_indices(ls: List[str], patterns: List[str]):
+    matching_indices = []
+    for i, string in enumerate(ls):
+        for pattern in patterns:
+            if re.search(pattern, string):
+                matching_indices.append(i)
+                break  # Stop checking other patterns if one matches
+    return matching_indices

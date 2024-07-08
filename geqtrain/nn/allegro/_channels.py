@@ -43,7 +43,6 @@ class MakeWeightedChannels(torch.nn.Module):
         self.multiplicity_out = multiplicity_out
         self.weight_numel = len(irreps_in) * multiplicity_out
 
-
     def forward(self, edge_attr, weights):
         # weights are [e, m, d], tensor of scalars
         # edge_attr are [e, d], geometric tensor
