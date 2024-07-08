@@ -13,6 +13,8 @@ from .savenload import (
 )
 from .config import Config
 from .output import Output
+from ._cuda_utils import clean_cuda
+from ._hooks import ForwardHookHandler, print_stats
 
 __all__ = [
     instantiate_from_cls_name,
@@ -26,4 +28,7 @@ __all__ = [
     atomic_write_group,
     Config,
     Output,
+    clean_cuda,
+    ForwardHookHandler,
+    print_stats,
 ]

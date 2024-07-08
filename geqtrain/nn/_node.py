@@ -1,6 +1,6 @@
 import torch
 import torch.nn
-
+import math
 from e3nn.o3 import Irreps
 from e3nn.util.jit import compile_mode
 
@@ -27,6 +27,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.embeddings = torch.nn.Embedding(num_types, embedding_dim) # scale_grad_by_freq = False by default
+        torch.nn.init.normal_(self.embeddings.weight, mean=0, std=1/math.sqrt(embedding_dim)) # xavier: 1/sqrt(input dim of the layer)
 
         irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(embedding_dim, (0, 1))])}
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)

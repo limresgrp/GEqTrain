@@ -93,7 +93,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     internal_weights=self.eq_has_internal_weights,
                     pad_to_alignment=1,
                 )
-            
+
             if not self.eq_has_internal_weights:
                 self.weights_emb = readout_latent(
                     mlp_input_dimension=self.n_scalars_in,
@@ -109,12 +109,11 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     f"If features come from InteractionModule, you can add the parameter 'output_hidden_ls=[0]' in the constructor"
                 )
             self.reshape_in = None
-        
+
         self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
         if self.resnet:
             assert in_irreps == out_irreps
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
-        
         self.out_irreps_dim = self.out_irreps.dim
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -151,5 +150,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             coefficient_new = _coeff * coefficient_old
             # Residual update
             out_features = coefficient_old * old_features + coefficient_new * out_features
+
         data[self.out_field] = out_features
         return data
