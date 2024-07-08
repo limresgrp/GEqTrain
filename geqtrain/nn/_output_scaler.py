@@ -5,7 +5,7 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.nn.allegro import Linear
-from geqtrain.nn.allegro._not_a_shitty_fc import ScalarMLPFunction
+from geqtrain.nn.allegro._fc import ScalarMLPFunction
 # from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from torch_scatter import scatter
 

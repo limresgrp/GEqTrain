@@ -8,7 +8,7 @@ from torch_scatter.composite import scatter_softmax
 from e3nn import o3
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.nn.allegro._not_a_shitty_fc import ScalarMLPFunction
+from geqtrain.nn.allegro._fc import ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 

@@ -7,6 +7,13 @@ import numpy as np
 import wandb
 
 
+'''
+To create a new hook function you must register it into function_mappings dict as:
+- k: name of the method, this key is parsed as string from the yaml
+- value, the actual python method
+'''
+
+
 ##################
 ### IN TESTING ###
 ##################

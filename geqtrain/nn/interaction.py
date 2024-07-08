@@ -16,7 +16,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.utils.tp_utils import tp_path_exists
 
-from geqtrain.nn.allegro._not_a_shitty_fc import ScalarMLPFunction
+from geqtrain.nn.allegro._fc import ScalarMLPFunction
 from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
 from geqtrain.nn.cutoffs import polynomial_cutoff
 

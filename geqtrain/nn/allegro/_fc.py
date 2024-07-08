@@ -8,7 +8,7 @@ from typing import List, Optional
 from math import sqrt
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus
+from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
 
 
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
@@ -30,15 +30,24 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         use_weight_norm: bool = False,
         dim_weight_norm: int = 0,
         has_bias: bool = False,
+        zero_init_last_layer_weights: bool = False,
+
     ):
         super().__init__()
         nonlinearity = {
             None: None,
             "silu": torch.nn.functional.silu,
-            "ssp": ShiftedSoftPlus,
+            "ssp": ShiftedSoftPlusModule, # ShiftedSoftPlus,
+            "selu": torch.nn.functional.selu,
         }[mlp_nonlinearity]
+
         if nonlinearity is not None:
-            nonlin_const = normalize2mom(nonlinearity).cst
+            if mlp_nonlinearity == "ssp":
+                nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+            elif mlp_nonlinearity == "selu":
+                nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
+            else:
+                nonlin_const = normalize2mom(nonlinearity).cst
         else:
             nonlin_const = 1.0
 
@@ -55,72 +64,47 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
         self.use_norm_layer = use_norm_layer
+        self.zero_init_last_layer_weights = zero_init_last_layer_weights
 
-        # Code
-        params = {}
-        graph = fx.Graph()
-        tracer = fx.proxy.GraphAppendingTracer(graph)
-
-        def Proxy(n):
-            return fx.Proxy(n, tracer=tracer)
-
-        features = Proxy(graph.placeholder("x"))
-        norm_from_last: float = 1.0
-
-        base = torch.nn.Module()
-
-        self._layernorm: Optional[torch.nn.LayerNorm] = None # init to None for jit
+        self.base = []
         if self.use_norm_layer:
-            setattr(self, "_layernorm", torch.nn.LayerNorm(dimensions[0]))
+            self.base.append(torch.nn.LayerNorm(dimensions[0]))
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
 
-            # make weights
-            w_v = torch.empty(h_in, h_out)
-            w_v.normal_()
-            w_v = w_v * (
-                norm_from_last / sqrt(float(h_in))
-            )
+            is_last_layer = num_layers - 1 == layer
 
-            # make biases if requested
             if has_bias:
-                b = torch.empty(h_out)
-                b.normal_()
-                params[f"_bias_{layer}"] = b
-                b = Proxy(graph.get_attr(f"_bias_{layer}"))
+                lin_layer = torch.nn.Linear(h_in, h_out, bias= True)
+                # todo init bias
+            else:
+                lin_layer = torch.nn.Linear(h_in, h_out, bias= False)
 
-            if self.use_weight_norm:
-                w_g = norm_except_dim(w_v, 2, self.dim_weight_norm).data
-                params[f"_weight_{layer}_g"] = w_g
-                w_g = Proxy(graph.get_attr(f"_weight_{layer}_g"))
+            if (nonlinearity is not None) and (not is_last_layer):
+                # add nonlinearity
+                if mlp_nonlinearity == 'ssp':
+                    non_lin_instance = ShiftedSoftPlusModule()
+                elif mlp_nonlinearity == "silu":
+                    non_lin_instance = torch.nn.SiLU()
+                elif mlp_nonlinearity == "selu":
+                    non_lin_instance = torch.nn.SELU()
+                elif mlp_nonlinearity:
+                    raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
 
-            # generate code
-            params[f"_weight_{layer}_v"] = w_v
-            w_v = Proxy(graph.get_attr(f"_weight_{layer}_v"))
-
-            if self.use_weight_norm:
-                features = torch.matmul(features, _weight_norm(w_v, w_g, self.dim_weight_norm))
-                features = features + b if has_bias else features
+                with torch.no_grad():
+                    # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
+                    lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
+                self.base.append(torch.nn.Sequential(lin_layer, non_lin_instance))
 
             else:
-                features = torch.matmul(features, w_v)
-                features = features + b if has_bias else features
+                with torch.no_grad():
+                    # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
+                    lin_layer.weight = lin_layer.weight.normal_(0, 1. / sqrt(float(h_in)))
+                self.base.append(lin_layer)
 
-            # generate nonlinearity code
-            if nonlinearity is not None and layer < num_layers - 1:
-                features = nonlinearity(features)
-                # add the normalization const in next layer
-                norm_from_last = nonlin_const
-
-        graph.output(features.node)
-
-        for pname, p in params.items():
-            setattr(base, pname, torch.nn.Parameter(p))
-
-        self._codegen_register({"_forward": fx.GraphModule(base, graph)})
+        self.sequential = torch.nn.Sequential(*self.base)
+        if self.zero_init_last_layer_weights:
+            self.sequential[-1].weight.data = self.sequential[-1].weight.data * 0.05
 
     def forward(self, x):
-        if self.use_norm_layer:
-            assert self._layernorm is not None
-            x = self._layernorm(x)
-        return self._forward(x)
+        return self.sequential(x)

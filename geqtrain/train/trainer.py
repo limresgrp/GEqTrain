@@ -723,6 +723,8 @@ class Trainer:
 
         self.final_log()
 
+        # deregister_hooks.deregister()
+
         self.save()
         finish_all_writes()
 
