@@ -899,7 +899,7 @@ class Trainer:
             )
 
             if input_data is None:
-                return
+                return False
 
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
@@ -948,7 +948,7 @@ class Trainer:
                 already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
 
             if already_computed_nodes is None:
-                return
+                return True
 
     @property
     def stop_cond(self):
@@ -989,15 +989,16 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dataset)
             for self.ibatch, batch in enumerate(dataset):
-                self.batch_step(
+                success = self.batch_step(
                     data=batch,
                     validation=(category == VALIDATION),
                 )
 
-                self.end_of_batch_log(batch_type=category)
+                if success:
+                    self.end_of_batch_log(batch_type=category)
 
-                for callback in self._end_of_batch_callbacks:
-                    callback(self)
+                    for callback in self._end_of_batch_callbacks:
+                        callback(self)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
