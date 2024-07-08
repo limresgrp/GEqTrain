@@ -518,7 +518,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             connection_mode=("uuu"),
             shared_weights=False,
             has_weight=False,
-            normalization='norm',
+            normalization='norm', # 'norm' or 'component'
             pad_to_alignment=parent.pad_to_alignment,
         )
 
@@ -583,17 +583,19 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
 
 
         # Take the node attrs and obtain a query matrix
-        node_attr_to_query = env_embed(
+        node_attr_to_query = ScalarMLPFunction(
             mlp_input_dimension=(
                  # Node invariants for center and neighbor (chemistry)
                 2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                 # Plus edge invariants for the edge (radius).
                 + parent.irreps_in[parent.edge_invariant_field].num_irreps
             ),
+            mlp_latent_dimensions = [],
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
-            use_norm_layer=False,
-            mlp_nonlinearity=None,
+            mlp_nonlinearity = None,
+            use_norm_layer = True,
         ) if parent.use_interaction_attention else None
+
 
         # Take the node attrs and obtain a query matrix
         dot = o3.FullyConnectedTensorProduct(
@@ -604,12 +606,14 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         ) if parent.use_interaction_attention else None
         reshape_back_tp = inverse_reshape_irreps(env_embed_irreps)
 
-        edge_feat_to_key = env_embed(
+        edge_feat_to_key = ScalarMLPFunction(
             mlp_input_dimension=dot.irreps_out.dim,
+            mlp_latent_dimensions = [],
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
-            use_norm_layer=False,
-            mlp_nonlinearity=None,
+            mlp_nonlinearity = None,
+            use_norm_layer = True,
         ) if parent.use_interaction_attention else None
+
 
         self.latent_mlp = latent_mlp
         self.env_embed_mlp = env_embed_mlp
@@ -687,8 +691,8 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         # From the latents, compute the weights for active edges:
         weights = self.env_embed_mlp(latents[active_edges])
         weights = self.env_embed_mlp_norm(weights)
-        w_index: int = 0
 
+        w_index: int = 0
         if self.layer_index == 0:
             # embed initial edge
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
@@ -771,6 +775,5 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
 
         # do the linear for eq. features
         eq_features = self.linear(eq_features)
-
         return latents, inv_latent, eq_features
 

@@ -15,8 +15,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
 from torch.utils.data import ConcatDataset
-import torch.nn as nn
 
 from geqtrain.data import DataLoader, AtomicData, AtomicDataDict
 from geqtrain.utils import (
@@ -30,6 +30,9 @@ from geqtrain.utils import (
     atomic_write,
     finish_all_writes,
     atomic_write_group,
+    clean_cuda,
+    ForwardHookHandler,
+    print_stats,
 )
 from geqtrain.model import model_from_config
 
@@ -38,50 +41,6 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
-import gc
-import torch
-from functools import partial
-
-def clean_cuda(cls=None):
-    '''
-    ptr to trainer instance, not used
-    '''
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
-def has_children(module):
-    return len(list(module.named_children()))
-
-def get_all_modules(model):
-    modules = []
-
-    def recurse(mod, prefix=''):
-        for name, child in mod.named_children():
-            full_name = f"{prefix}.{name}" if prefix else name
-            if isinstance(child, nn.Module):
-                if has_children(child):
-                    recurse(child, full_name)
-                else:
-                    modules.append((full_name, child))
-
-    recurse(model)
-    return modules
-
-def p(t): print(t.mean(), t.std(), t.min(),t.max())
-def print_shape(i, filter, mod, inp, out):
-    '''
-    filter: type of layer to skip
-
-    '''
-    if mod.__class__.__name__ in filter:
-        return
-
-    try:
-        print(f"{i}, {mod}", inp[0].shape, out.shape)
-        torch.save({f"{i}_{mod}": out}, f"./diagnostic/{i}_{mod}_out")
-    except:
-        pass
 
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
@@ -750,6 +709,9 @@ class Trainer:
 
         self.init_metrics()
 
+        # automatic detach of hook(s) from model when hook_handler2 goes out of scope
+        # hook_handler2 = ForwardHookHandler(self, print_stats, filter_out=["Embedding"])
+
         # actual train loop
         while not self.stop_cond:
 
@@ -882,20 +844,6 @@ class Trainer:
 
     def batch_step(self, data, validation=False):
 
-        # ### WIP
-
-        # list_of_hookables = get_all_modules(self.model)
-        # hooks = []
-        # for i, (name, layer) in enumerate(list_of_hookables):
-        #     try:
-        #         hooks.append(layer.register_forward_hook(partial(print_shape, i, []))) # 'LayerNorm'
-        #     except:
-        #         print(f"Cant hook on {name}")
-        #         pass
-
-
-        # ###
-
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
@@ -907,7 +855,7 @@ class Trainer:
         else:
             self.model.train()
 
-        mixed_precision = contextlib.nullcontext() # torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16)
+        mixed_precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) # contextlib.nullcontext()
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
@@ -947,8 +895,6 @@ class Trainer:
 
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
-
-            # batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY] = batch_chunk[AtomicDataDict.GRAPH_OUTPUT_KEY][:, 0].unsqueeze(-1)
 
             with cm, mixed_precision:
                 out, loss, loss_contrib = self.model_forward(input_data, batch_chunk)
@@ -1376,13 +1322,11 @@ class TrainerWandB(Trainer):
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
 
-    def init(self, experiment_description: str = ""):
+    def init(self):
         super().init()
 
         if not self._initialized:
             return
-
-        wandb.log({"Experiment Description": experiment_description})
 
         # upload some new fields to wandb
         wandb.config.update({"num_weights": self.num_weights})
@@ -1390,8 +1334,3 @@ class TrainerWandB(Trainer):
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
-
-
-
-
-

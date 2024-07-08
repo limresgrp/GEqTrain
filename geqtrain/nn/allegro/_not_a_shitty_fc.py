@@ -30,17 +30,22 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         use_weight_norm: bool = False,
         dim_weight_norm: int = 0,
         has_bias: bool = False,
+        zero_init_last_layer_weights: bool = False,
+
     ):
         super().__init__()
         nonlinearity = {
             None: None,
             "silu": torch.nn.functional.silu,
-            "ssp": ShiftedSoftPlusModule ,# ShiftedSoftPlus,
+            "ssp": ShiftedSoftPlusModule, # ShiftedSoftPlus,
+            "selu": torch.nn.functional.selu,
         }[mlp_nonlinearity]
 
         if nonlinearity is not None:
             if mlp_nonlinearity == "ssp":
                 nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+            elif mlp_nonlinearity == "selu":
+                nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
             else:
                 nonlin_const = normalize2mom(nonlinearity).cst
         else:
@@ -59,13 +64,15 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
         self.use_norm_layer = use_norm_layer
-        norm_from_last: float = 1.0
+        self.zero_init_last_layer_weights = zero_init_last_layer_weights
 
-        self.base = [] #torch.nn.ModuleList([])
+        self.base = []
         if self.use_norm_layer:
             self.base.append(torch.nn.LayerNorm(dimensions[0]))
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
+
+            is_last_layer = num_layers - 1 == layer
 
             if has_bias:
                 lin_layer = torch.nn.Linear(h_in, h_out, bias= True)
@@ -73,24 +80,31 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             else:
                 lin_layer = torch.nn.Linear(h_in, h_out, bias= False)
 
-            lin_layer.weight.data = lin_layer.weight.data * (norm_from_last / sqrt(float(h_in)))
-
-            if nonlinearity is not None and layer < num_layers - 1:
+            if (nonlinearity is not None) and (not is_last_layer):
                 # add nonlinearity
                 if mlp_nonlinearity == 'ssp':
                     non_lin_instance = ShiftedSoftPlusModule()
                 elif mlp_nonlinearity == "silu":
                     non_lin_instance = torch.nn.SiLU()
+                elif mlp_nonlinearity == "selu":
+                    non_lin_instance = torch.nn.SELU()
                 elif mlp_nonlinearity:
                     raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
 
+                with torch.no_grad():
+                    # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
+                    lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
                 self.base.append(torch.nn.Sequential(lin_layer, non_lin_instance))
-                # add the normalization const in next layer
-                norm_from_last = nonlin_const
+
             else:
+                with torch.no_grad():
+                    # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
+                    lin_layer.weight = lin_layer.weight.normal_(0, 1. / sqrt(float(h_in)))
                 self.base.append(lin_layer)
 
         self.sequential = torch.nn.Sequential(*self.base)
+        if self.zero_init_last_layer_weights:
+            self.sequential[-1].weight.data = self.sequential[-1].weight.data * 0.05
 
     def forward(self, x):
         return self.sequential(x)
