@@ -179,6 +179,7 @@ class Trainer:
         verbose="INFO",
         sanitize_gradients: bool = False,
         target_names: List = None,
+        mixed_precision: bool = False,
         **kwargs,
     ):
 
@@ -857,7 +858,7 @@ class Trainer:
         else:
             self.model.train()
 
-        mixed_precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) # contextlib.nullcontext()
+        precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if self.mixed_precision else contextlib.nullcontext()
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
@@ -904,7 +905,7 @@ class Trainer:
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
 
-            with cm, mixed_precision:
+            with cm, precision:
                 out, loss, loss_contrib = self.model_forward(input_data, batch_chunk)
 
             # update metrics
