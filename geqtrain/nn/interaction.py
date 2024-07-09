@@ -25,6 +25,7 @@ from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
 SCALAR = o3.Irrep("0e")  # define for convinience
+DTYPE = torch.get_default_dtype()
 
 
 def pick_mpl_function(func):
@@ -85,6 +86,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         r_max: float,
         out_irreps: Optional[Union[o3.Irreps, str]] = None,
         output_hidden_irreps: bool = False,
+        output_hidden_ls: Optional[List[int]] = None,
         avg_num_neighbors: Optional[float] = 5.0,
         # cutoffs
         PolynomialCutoff_p: float = 6,
@@ -97,7 +99,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         head_dim: int = 64,
         use_mace_product: bool = True,
         product_correlation: int = 2,
-        use_interaction_attention: bool = True,
+        use_attention: bool = True,
 
         # MLP parameters:
         env_embed=ScalarMLPFunction,
@@ -114,10 +116,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         irreps_in=None,
     ):
         super().__init__()
-        self.DTYPE = torch.get_default_dtype()
-
-        self.use_mace_product = use_mace_product
-        self.use_interaction_attention = use_interaction_attention
 
         # save parameters
         assert (
@@ -133,6 +131,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.isqrtd                 = math.isqrt(head_dim)
         self.polynomial_cutoff_p    = float(PolynomialCutoff_p)
 
+        # architectural choices
+        self.use_mace_product = use_mace_product
+        self.use_attention = use_attention
+        
         # performance
         self.pad_to_alignment       = pad_to_alignment
 
@@ -173,8 +175,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         else:
             out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
         if output_hidden_irreps:
+            if output_hidden_ls is None:
+                output_hidden_ls = out_irreps.ls
+            assert isinstance(output_hidden_ls, List)
             out_irreps = o3.Irreps(
-                [(self.env_embed_mul, ir) for _, ir in env_embed_irreps if ir.l in [0] + out_irreps.ls]
+                [(self.env_embed_mul, ir) for _, ir in env_embed_irreps if ir.l in [0] + output_hidden_ls]
             )
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges
@@ -296,13 +301,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.out_feat_elems = sum(out_feat_elems)
         self.out_irreps = out_irreps
 
-        # - layer resnet update weights -
+        # - Layer resnet update weights - #
         # We initialize to zeros, which under the sigmoid() become 0.5
         # so 1/2 * layer_1 + 1/4 * layer_2 + ...
         # note that the sigmoid of these are the factor _between_ layers
         # so the first entry is the ratio for the latent resnet of the first and second layers, etc.
         # e.g. if there are 3 layers, there are 2 ratios: l1:l2, l2:l3
-        self._latent_resnet_update_params  = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=self.DTYPE))
+        self._latent_resnet_update_params  = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=DTYPE))
 
         self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
         self.register_buffer("_zero", torch.as_tensor(0.0))
@@ -339,12 +344,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Initialize state
         out_features = torch.zeros(
             (num_edges, self.out_multiplicity, self.out_feat_elems),
-            dtype=self.DTYPE,
+            dtype=DTYPE,
             device=edge_attr.device
         )
+
         latents = torch.zeros(
             (num_edges, self._latent_dim),
-            dtype=self.DTYPE,
+            dtype=DTYPE,
             device=edge_attr.device,
         )
         active_edges = torch.arange(
@@ -366,7 +372,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         eq_features = edge_attr
 
         layer_index: int = 0
-        # compute the sigmoids vectorized instead of each loop
+        # Compute the sigmoids vectorized instead of each loop
         layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
 
         # Vectorized precompute per layer cutoffs
@@ -398,7 +404,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 this_layer_update_coeff=layer_update_coefficients[layer_idx - 1] if layer_idx > 0 else None
             )
 
-        # - final layer -
+        # - final layer - #
         features_n_scalars = self._features_n_scalar_outs[layer_index- 1]
 
         # - Output equivariant values - #
@@ -410,10 +416,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         prev_mask = cutoff_coeffs[active_edges] > 0
         active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
 
-        # Compute latents
+        # - Compute latents - #
         new_latents = self.final_latent_mlp(inv_latent_cat[prev_mask])
         # Apply cutoff, which propagates through to everything else
-        new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
+        new_latents = cutoff_coeffs[active_edges].unsqueeze(-1) * new_latents
 
         coefficient_old = torch.rsqrt(layer_update_coefficients[layer_idx].square() + 1)
         coefficient_new = layer_update_coefficients[layer_idx] * coefficient_old
@@ -460,7 +466,6 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         super().__init__()
 
         self.layer_index = layer_index
-        self.DTYPE = torch.get_default_dtype()
         self.env_embed_mul = parent.env_embed_mul
         self.head_dim = parent.head_dim
         self.isqrtd = math.isqrt(self.head_dim)
@@ -594,7 +599,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
-        ) if parent.use_interaction_attention else None
+        ) if parent.use_attention else None
 
 
         # Take the node attrs and obtain a query matrix
@@ -603,7 +608,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             env_embed_irreps,
             f"{self.env_embed_mul}x0e",
             path_normalization='path',
-        ) if parent.use_interaction_attention else None
+        ) if parent.use_attention else None
         reshape_back_tp = inverse_reshape_irreps(env_embed_irreps)
 
         edge_feat_to_key = ScalarMLPFunction(
@@ -612,7 +617,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
-        ) if parent.use_interaction_attention else None
+        ) if parent.use_attention else None
 
 
         self.latent_mlp = latent_mlp
@@ -629,13 +634,14 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         self.linear = linear
         self.reshape_back_tp = reshape_back_tp
 
-        self.use_interaction_attention = parent.use_interaction_attention
+        self.use_attention = parent.use_attention
         self.use_mace_product = parent.use_mace_product
 
-        self.register_buffer(
-            "env_sum_normalization",
-            torch.as_tensor([avg_num_neighbors]).rsqrt(),
-        )
+        if not parent.use_attention:
+            self.register_buffer(
+                "env_sum_normalization",
+                torch.as_tensor([avg_num_neighbors]).rsqrt(),
+            )
 
     def forward(
         self,
@@ -706,7 +712,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         w_index += self._env_weighter.weight_numel
         emb_latent = self._env_weighter(edge_attr, env_w)
 
-        if self.use_interaction_attention:
+        if self.use_attention:
             # Apply attention on features
             edge_full_attr = torch.cat([
                 node_invariants[edge_center],
@@ -732,7 +738,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             dim=0,
             dim_size=num_nodes,
         )
-        if not self.use_interaction_attention:
+        if not self.use_attention:
             local_env_per_node = local_env_per_node * self.env_sum_normalization
 
         active_node_centers = torch.unique(edge_center)
@@ -743,14 +749,9 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
                 node_feats=local_env_per_active_atom,
                 node_attrs=node_invariants[active_node_centers],
             )
-            expanded_features_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
-
-            expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=expanded_features_per_active_atom.dtype)
-            expanded_features_per_node[active_node_centers] = expanded_features_per_active_atom
-        else:
-            expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
-            expanded_features_per_node[active_node_centers] = local_env_per_active_atom
-
+            local_env_per_active_atom = self.reshape_in_module(expanded_features_per_active_atom)
+        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
+        expanded_features_per_node[active_node_centers] = local_env_per_active_atom
 
         # Copy to get per-edge
         # Large allocation, but no better way to do this:
@@ -776,4 +777,3 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         # do the linear for eq. features
         eq_features = self.linear(eq_features)
         return latents, inv_latent, eq_features
-

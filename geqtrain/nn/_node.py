@@ -33,10 +33,11 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        type_numbers = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-        node_attrs = self.embeddings(type_numbers)
+        if data.get(AtomicDataDict.NODE_ATTRS_KEY, None) is None:
+            type_numbers = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+            node_attrs = self.embeddings(type_numbers)
 
-        data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
+            data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
         return data
 
 
@@ -63,12 +64,13 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out) # my guess: None -> NatomsTypes of l = 0, defines inpt/outpt shapes
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        type_numbers = data.get(AtomicDataDict.NODE_TYPE_KEY, data["node_types"]).squeeze(-1) # my guess: [bs, n, 1]
-        one_hot = torch.nn.functional.one_hot(
-            type_numbers, num_classes=self.num_types
-        ).to(device=type_numbers.device, dtype=data[AtomicDataDict.POSITIONS_KEY].dtype) # my guess: [bs, n, NatomsTypes]
+        if data.get(AtomicDataDict.NODE_ATTRS_KEY, None) is None:
+            type_numbers = data.get(AtomicDataDict.NODE_TYPE_KEY, data["node_types"]).squeeze(-1) # my guess: [bs, n, 1]
+            one_hot = torch.nn.functional.one_hot(
+                type_numbers, num_classes=self.num_types
+            ).to(device=type_numbers.device, dtype=data[AtomicDataDict.POSITIONS_KEY].dtype) # my guess: [bs, n, NatomsTypes]
 
-        data[AtomicDataDict.NODE_ATTRS_KEY] = one_hot
-        if self.set_features:
-            data[AtomicDataDict.NODE_FEATURES_KEY] = one_hot
+            data[AtomicDataDict.NODE_ATTRS_KEY] = one_hot
+            if self.set_features:
+                data[AtomicDataDict.NODE_FEATURES_KEY] = one_hot
         return data

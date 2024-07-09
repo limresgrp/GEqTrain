@@ -34,6 +34,7 @@ from geqtrain.utils import (
     ForwardHookHandler,
 )
 from geqtrain.model import model_from_config
+from geqtrain.train.utils import find_matching_indices
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
@@ -138,6 +139,7 @@ class Trainer:
         train_on_keys: Optional[List[str]] = None,
         type_names: Optional[List[str]] = None,
         keep_type_names: Optional[List[str]] = None,
+        keep_node_types: Optional[List[int]] = None,
         metrics_components: Optional[Union[dict, str]] = None,
         metrics_key: str = f"{VALIDATION}_" + ABBREV.get(LOSS_KEY, LOSS_KEY),
         early_stopping_conds: Optional[EarlyStopping] = None,
@@ -176,6 +178,7 @@ class Trainer:
         verbose="INFO",
         sanitize_gradients: bool = False,
         target_names: List = None,
+        mixed_precision: bool = False,
         hooks: Dict = {},
         **kwargs,
     ):
@@ -239,6 +242,12 @@ class Trainer:
 
         self.logger.info(f"Torch device: {self.device}")
         self.torch_device = torch.device(self.device)
+
+        # --- filter node target to train on based on node type or type name
+        if self.keep_type_names is not None:
+            self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
+        if self.keep_node_types is not None:
+            self.keep_node_types = torch.tensor(self.keep_node_types, device=self.torch_device)
 
         # --- sort out all the other parameters
         # for samplers, optimizer and scheduler
@@ -316,14 +325,6 @@ class Trainer:
             positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
             optional_args=self.optimizer_kwargs,
-        )
-
-        # set up norm
-
-        self.max_gradient_norm = (
-            float(self.max_gradient_norm)
-            if self.max_gradient_norm is not None
-            else float("inf")
         )
 
         # initialize scheduler
@@ -751,7 +752,7 @@ class Trainer:
             batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
         batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
         if len(batch_chunk_center_node_idcs) == 0:
-            return
+            return None, None, None
 
         # = Iteratively remove edges from batch_chunk = #
         # = ----------------------------------------- = #
@@ -856,7 +857,7 @@ class Trainer:
         else:
             self.model.train()
 
-        mixed_precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) # contextlib.nullcontext()
+        precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if self.mixed_precision else contextlib.nullcontext()
 
         batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
 
@@ -867,6 +868,9 @@ class Trainer:
                 key_clean = self.loss.remove_suffix(key)
                 if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
                     val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+                    if self.keep_node_types is not None:
+                        batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), self.keep_node_types)] = torch.nan
+
                     not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
                     batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
                     batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
@@ -894,10 +898,13 @@ class Trainer:
                 device=self.torch_device,
             )
 
+            if input_data is None:
+                return False
+
             if self.noise is not None:
                 input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
 
-            with cm, mixed_precision:
+            with cm, precision:
                 out, loss, loss_contrib = self.model_forward(input_data, batch_chunk)
 
             # update metrics
@@ -941,7 +948,7 @@ class Trainer:
                 already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
 
             if already_computed_nodes is None:
-                return
+                return True
 
     @property
     def stop_cond(self):
@@ -982,15 +989,16 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dataset)
             for self.ibatch, batch in enumerate(dataset):
-                self.batch_step(
+                success = self.batch_step(
                     data=batch,
                     validation=(category == VALIDATION),
                 )
 
-                self.end_of_batch_log(batch_type=category)
+                if success:
+                    self.end_of_batch_log(batch_type=category)
 
-                for callback in self._end_of_batch_callbacks:
-                    callback(self)
+                    for callback in self._end_of_batch_callbacks:
+                        callback(self)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
