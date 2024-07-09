@@ -72,7 +72,7 @@ class SimpleLoss:
             if mean:
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else:
-                return loss
+                return loss.mean(dim=0)
 
     def prepare(
         self,
@@ -97,29 +97,6 @@ class SimpleLoss:
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
         return pred_key, ref_key, has_nan, not_zeroes
-
-class PerLabelLoss(SimpleLoss):
-
-    def __init__(self, func_name: str, params: dict = ...):
-        self.instanciated = True
-        super().__init__(func_name, params)
-
-
-    def __call__(
-        self,
-        pred: Dict,
-        ref:  Dict,
-        key:  str, # first row of each element listed under loss_coeffs:
-        mean: bool = True,
-    ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
-        loss = self.func(pred_key, ref_key)
-
-        if mean:
-            return loss.mean()
-        return loss.mean(dim=0)
-
-
 
 
 class PerSpeciesLoss(SimpleLoss):
@@ -206,7 +183,7 @@ def find_loss_function(name: str, params):
         try:
             module_name = ".".join(name.split(".")[:-1])
             class_name  = ".".join(name.split(".")[-1:])
-            functional = params.get("functional", "MSELoss")
+            functional = params.get("functional", "L1Loss")
             return getattr(import_module(module_name), class_name)(functional, params) # func_name, params of SimpleLoss ctor
         except Exception:
             return SimpleLoss(name, params)
