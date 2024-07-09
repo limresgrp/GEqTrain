@@ -4,8 +4,6 @@ from typing import Optional
 from einops import rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
-
-from e3nn import o3
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.nn.allegro._fc import ScalarMLPFunction
@@ -61,8 +59,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
             if 'mlp_latent_dimensions' not in readout_latent_kwargs:
                 readout_latent_kwargs['mlp_latent_dimensions'] = [64, 64]
-            if 'use_norm_layer' in readout_latent_kwargs:
-                assert readout_latent_kwargs.get('use_norm_layer') == False
+            if 'zero_init_last_layer_weights' not in readout_latent_kwargs:
+                readout_latent_kwargs['zero_init_last_layer_weights'] = True
 
             self.head_dim = head_dim
             self.isqrtd = math.isqrt(head_dim)
