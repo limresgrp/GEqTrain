@@ -41,6 +41,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "selu": torch.nn.functional.selu,
         }[mlp_nonlinearity]
 
+        nonlin_const = 1.0
         if nonlinearity is not None:
             if mlp_nonlinearity == "ssp":
                 nonlin_const = normalize2mom(ShiftedSoftPlus).cst
@@ -48,8 +49,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
             else:
                 nonlin_const = normalize2mom(nonlinearity).cst
-        else:
-            nonlin_const = 1.0
 
         dimensions = (
             ([mlp_input_dimension] if mlp_input_dimension is not None else [])
