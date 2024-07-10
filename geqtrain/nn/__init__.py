@@ -7,7 +7,7 @@ from ._edgewise import (  # noqa: F401
 )  # noqa: F401
 from .interaction import InteractionModule
 from .readout import ReadoutModule
-from ._output_scaler import OutputScaler
+from ._scale import PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 
 __all__ = [
@@ -20,6 +20,6 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
-    OutputScaler,
+    PerTypeScaleModule,
     NodewiseReduce,
 ]
