@@ -240,7 +240,7 @@ def restart(config):
     # compare dictionary to config and update stop condition related arguments
     for k in config.keys():
         if config[k] != dictionary.get(k, ""):
-            if k in ["max_epochs", "loss_coeffs", "learning_rate",
+            if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
                      "metrics_components", "noise"]:
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
