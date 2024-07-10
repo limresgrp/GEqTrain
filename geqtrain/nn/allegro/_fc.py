@@ -6,6 +6,7 @@ from torch import _weight_norm, norm_except_dim
 from torch import fx
 from typing import List, Optional
 from math import sqrt
+from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
@@ -78,7 +79,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         has_bias: bool = False,
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
-
     ):
         super().__init__()
         nonlinearity = {
@@ -88,6 +88,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "selu": torch.nn.functional.selu,
         }[mlp_nonlinearity]
 
+        nonlin_const = 1.0
         if nonlinearity is not None:
             if mlp_nonlinearity == "ssp":
                 nonlin_const = normalize2mom(ShiftedSoftPlus).cst
@@ -95,8 +96,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
             else:
                 nonlin_const = normalize2mom(nonlinearity).cst
-        else:
-            nonlin_const = 1.0
 
         dimensions = (
             ([mlp_input_dimension] if mlp_input_dimension is not None else [])
@@ -112,9 +111,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.dim_weight_norm = dim_weight_norm
         self.use_norm_layer = use_norm_layer
 
-        self.base = []
+        sequential_dict = OrderedDict()
         if self.use_norm_layer:
-            self.base.append(torch.nn.LayerNorm(dimensions[0]))
+            sequential_dict['layer_norm'] = torch.nn.LayerNorm(dimensions[0])
         
         if bias is not None:
             has_bias = True
@@ -136,15 +135,20 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 with torch.no_grad():
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
-                self.base.append(torch.nn.Sequential(lin_layer, non_lin_instance))
+                sequential_dict[f"{layer}_activated"] = torch.nn.Sequential(
+                    OrderedDict([
+                        ("linear", lin_layer),
+                        ("activation", non_lin_instance),
+                    ]),
+                )
 
             else:
                 with torch.no_grad():
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, 1. / sqrt(float(h_in)))
-                self.base.append(lin_layer)
+                sequential_dict[f"{layer}"] = lin_layer
 
-        self.sequential = torch.nn.Sequential(*self.base)
+        self.sequential = torch.nn.Sequential(sequential_dict)
         if has_bias and bias is not None:
             self.sequential[-1].bias.data = torch.tensor(bias).reshape(*self.sequential[-1].bias.data.shape)
         if zero_init_last_layer_weights:
