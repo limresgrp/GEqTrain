@@ -14,7 +14,8 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.utils.tp_utils import tp_path_exists
+from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
+from geqtrain.utils._global_options import DTYPE
 
 from geqtrain.nn.allegro._fc import ScalarMLPFunction
 from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
@@ -22,10 +23,6 @@ from geqtrain.nn.cutoffs import polynomial_cutoff
 
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-
-
-SCALAR = o3.Irrep("0e")  # define for convinience
-DTYPE = torch.get_default_dtype()
 
 
 def pick_mpl_function(func):
@@ -523,7 +520,7 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             connection_mode=("uuu"),
             shared_weights=False,
             has_weight=False,
-            normalization='norm', # 'norm' or 'component'
+            normalization='component', # 'norm' or 'component'
             pad_to_alignment=parent.pad_to_alignment,
         )
 
@@ -599,8 +596,8 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
+            zero_init_last_layer_weights= True,
         ) if parent.use_attention else None
-
 
         # Take the node attrs and obtain a query matrix
         dot = o3.FullyConnectedTensorProduct(
@@ -617,8 +614,8 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=self.env_embed_mul * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
+            zero_init_last_layer_weights = True,
         ) if parent.use_attention else None
-
 
         self.latent_mlp = latent_mlp
         self.env_embed_mlp = env_embed_mlp
@@ -633,7 +630,6 @@ class InteractionLayer(GraphModuleMixin, torch.nn.Module):
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
         self.linear = linear
         self.reshape_back_tp = reshape_back_tp
-
         self.use_attention = parent.use_attention
         self.use_mace_product = parent.use_mace_product
 
