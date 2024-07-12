@@ -1304,7 +1304,7 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(10 if self.dataloader_num_workers > 0 else 0),
+            timeout=(30 if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )

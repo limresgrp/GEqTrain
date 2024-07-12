@@ -75,15 +75,16 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
 
         edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
+        node_features = data[self.field]
 
         # Apply per-type std scaling if available
         if self.per_type_std is not None:
-            data[self.field][edge_center] *= self.per_type_std[center_species]
+            node_features[edge_center] *= self.per_type_std[center_species]
 
         # Apply per-type bias if available
         if self.per_type_bias is not None:
-            data[self.field][edge_center] += self.per_type_bias[center_species]
+            node_features[edge_center] += self.per_type_bias[center_species]
 
-        data[self.out_field] = data[self.field]
+        data[self.out_field] = node_features
 
         return data
