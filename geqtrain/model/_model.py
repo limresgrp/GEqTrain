@@ -11,6 +11,7 @@ from geqtrain.nn import (
 from geqtrain.nn import (
     EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
+    EmbeddingGraphAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
 )
@@ -36,12 +37,17 @@ def Model(
         # check consistency
         assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
         config["irreps_edge_sh"] = irreps_edge_sh
+    
+    if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
+        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY]
+
 
     layers = {
         # -- Encode --
         "node_attrs":         EmbeddingNodeAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
+        # -- Optional -- "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     layers.update(

@@ -1,24 +1,24 @@
-from typing import Optional
 import logging
 
 from e3nn import o3
-from geqtrain.data import AtomicDataDict, AtomicDataset
+from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
     NodewiseReduce,
     InteractionModule,
-)
-from geqtrain.nn import (
     EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
+    EmbeddingGraphAttrs,
     ReadoutModule,
 )
 
 
 def GlobalGraphModel(
     config,
+    dataset,
+    initialize: bool,
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -37,12 +37,16 @@ def GlobalGraphModel(
         # check consistency
         assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
         config["irreps_edge_sh"] = irreps_edge_sh
+    
+    if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
+        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY].item()
 
     layers = {
         # -- Encode --
         "node_attrs":         EmbeddingNodeAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
+        # -- Optional -- "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     layers.update(
