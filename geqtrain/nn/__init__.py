@@ -1,5 +1,6 @@
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
+from .radial_basis import BesselBasis, BesselBasisVec
 from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
 from ._graph import EmbeddingGraphAttrs
 from ._edgewise import (  # noqa: F401
@@ -12,11 +13,16 @@ from ._scale import PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 
+from ._dipole import DipoleMomentModule
+from ._grad_output import GradientOutput
+
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
     OneHotAtomEncoding,
     EmbeddingNodeAttrs,
+    BesselBasis,
+    BesselBasisVec,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
@@ -26,4 +32,7 @@ __all__ = [
     PerTypeScaleModule,
     NodewiseReduce,
     FiLMFunction,
+
+    DipoleMomentModule,
+    GradientOutput,
 ]
