@@ -9,6 +9,7 @@ from .interaction import InteractionModule
 from .readout import ReadoutModule
 from ._scale import PerTypeScaleModule
 from ._nodewise import NodewiseReduce
+from ._film import FiLMFunction
 
 __all__ = [
     GraphModuleMixin,
@@ -22,4 +23,5 @@ __all__ = [
     ReadoutModule,
     PerTypeScaleModule,
     NodewiseReduce,
+    FiLMFunction,
 ]
