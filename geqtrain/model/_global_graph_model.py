@@ -39,7 +39,7 @@ def GlobalGraphModel(
         config["irreps_edge_sh"] = irreps_edge_sh
     
     if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
-        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY].item()
+        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY]
 
     layers = {
         # -- Encode --
