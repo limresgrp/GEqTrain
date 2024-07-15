@@ -5,6 +5,10 @@ import warnings
 from typing import Callable, Optional, Union, Tuple, List, Dict
 import numpy as np
 import wandb
+from kaleido.scopes.plotly import PlotlyScope
+import plotly.graph_objects as go
+
+
 
 
 
@@ -107,8 +111,87 @@ def get_all_hookable_modules(model):
             warnings.warn(f'Cannot attach hook to layer with ID {id}: {name}')
     return hookable_modules
 
+# NON plotly VERSION
+# def plot_gradients(model):
+#     import matplotlib.pyplot as plt
+#     l = get_all_hookable_modules(model)
+#     fig, ax = plt.subplots(figsize=(30, 15))  # Create a figure and axis object
+#     legends = []
+
+#     #NUM_COLORS = len(l)
+#     #cm = plt.get_cmap('gist_rainbow')
+#     #ax.set_prop_cycle('color', [cm(1.*i/NUM_COLORS) for i in range(NUM_COLORS)])
+#     colors = [
+#         '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
+#         '#FF8000', '#8000FF', '#0080FF', '#FF0080', '#80FF00', '#00FF80',
+#         '#800000', '#008000', '#000080', '#808000', '#800080', '#008080'
+#     ]
+#     color_idx = 0
+#     for (i, n, m) in l:
+#         if hasattr(m, 'weight') and m.weight.ndim >= 2:
+#             x = m.weight.grad.to('cpu')
+#             mean, std = np.round(x.mean().item(), 4), np.round(x.std().item(), 4)
+#             hy, hx = torch.histogram(x, density=True)
+#             ax.plot(hx[:-1].detach(), hy.detach(), color=colors[color_idx])
+#             color_idx +=1
+#             legends.append(f'{i} ({n}) mu: {mean}, std: {std}')
+
+#     ax.legend(legends, fontsize=17)
+#     plt.savefig('./gradients/gradients.png')
+#     plt.close(fig)  # Close the figure to free up memory
+
+
+def plot_gradients(model):
+    l = get_all_hookable_modules(model)
+
+    colors = [
+        '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
+        '#FF8000', '#8000FF', '#0080FF', '#FF0080', '#80FF00', '#00FF80',
+        '#800000', '#008000', '#000080', '#808000', '#800080', '#008080'
+    ]
+
+    fig = go.Figure()
+
+    color_idx = 0
+    for (i, n, m) in l:
+        if hasattr(m, 'weight') and m.weight.ndim >= 2:
+            x = m.weight.grad.to('cpu')
+            mean, std = np.round(x.mean().item(), 4), np.round(x.std().item(), 4)
+            hy, hx = torch.histogram(x, density=True)
+
+            fig.add_trace(go.Scatter(
+                x=hx[:-1].detach().numpy(),
+                y=hy.detach().numpy(),
+                mode='lines',
+                name=f'{i} ({n}) mu: {mean}, std: {std}',
+                line=dict(color=colors[color_idx % len(colors)])
+            ))
+
+            color_idx += 1
+
+    fig.update_layout(
+        title='Gradient Distribution',
+        xaxis_title='Gradient Value',
+        yaxis_title='Density',
+        legend_title='Layers',
+        width=1500,
+        height=750,
+        legend=dict(
+            font=dict(size=14),
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.05
+        )
+    )
+
+    fig.write_image("./gradients/gradients.png")
+    fig.write_html("./gradients/gradients.html")
+
 
 def print_stats(hook_handler, module_id, module_name, module, input, output):
+    #! this can also be a class with a __call__ method with the signature as above
+    #! this can also be applied to model using self.apply from nn.Module
 
     def print_tensor(t):
         return f"shape: {t.shape}, mean: {t.mean().item()}, std: {t.std().item()}, min: {t.min().item()}, max {t.max().item()}"
@@ -130,30 +213,31 @@ def print_stats(hook_handler, module_id, module_name, module, input, output):
     if not hasattr(hook_handler, "stats"):
         hook_handler.stats = {} # stores means and stds of hookable layers
 
-    key = f"{module_id}_{module_name}"
+    if hook_handler.is_wandb_trainer:
 
-    # wandb.log({f"{module_id}_{module_name}":
-    #          wandb.Histogram(output.tolist())})
+        key = f"{module_id}_{module_name}"
 
-    if key not in hook_handler.stats:
-        hook_handler.stats[key] = {'output_mean': [], 'output_std': []}
+        # wandb.log({key: wandb.Histogram(output.tolist())})
 
-    hook_handler.stats[key]['output_mean'].append(output.mean().item())
-    hook_handler.stats[key]['output_std'].append(output.std().item())
+        if key not in hook_handler.stats:
+            hook_handler.stats[key] = {'output_mean': [], 'output_std': []}
 
-    columns = ['output_mean', 'output_std']
-    n = len(hook_handler.stats[key]['output_mean'])
-    xs = list(range(n))
-    ys = [hook_handler.stats[key]['output_mean'], hook_handler.stats[key]['output_std']]
+        hook_handler.stats[key]['output_mean'].append(output.mean().item())
+        hook_handler.stats[key]['output_std'].append(output.std().item())
 
-    wandb.log(
-        {f"{key}" :wandb.plot.line_series(
-            xs=xs,
-            ys=ys,
-            keys=columns,
-            title=f"Activations mean/std {key}")
-        }
-    )
+        columns = ['output_mean', 'output_std']
+        n = len(hook_handler.stats[key]['output_mean'])
+        xs = list(range(n))
+        ys = [hook_handler.stats[key]['output_mean'], hook_handler.stats[key]['output_std']]
+
+        wandb.log(
+            {f"{key}" :wandb.plot.line_series(
+                xs=xs,
+                ys=ys,
+                keys=columns,
+                title=f"Activations mean/std {key}")
+            }
+        )
 
 
 '''
@@ -186,6 +270,7 @@ class ForwardHookHandler:
     '''
     def __init__(self, trainer, callables: List[Dict] = []):
         model = trainer.model
+        self.is_wandb_trainer = trainer.is_wandb_trainer
         self.hooks = []
         self.hookable_layers: List = get_all_hookable_modules(model)
         self.clean_module_name = lambda s : s.split('(')[0].lower()
