@@ -10,7 +10,7 @@ import contextlib
 from copy import deepcopy
 from os.path import isfile
 from time import perf_counter
-from typing import Callable, Optional, Union, Tuple, List
+from typing import Callable, Optional, Union, Tuple, List, Dict
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +32,6 @@ from geqtrain.utils import (
     atomic_write_group,
     clean_cuda,
     ForwardHookHandler,
-    print_stats,
 )
 from geqtrain.model import model_from_config
 from geqtrain.train.utils import find_matching_indices
@@ -180,6 +179,7 @@ class Trainer:
         sanitize_gradients: bool = False,
         target_names: List = None,
         mixed_precision: bool = False,
+        hooks: Dict = {},
         **kwargs,
     ):
 
@@ -710,8 +710,7 @@ class Trainer:
 
         self.init_metrics()
 
-        # automatic detach of hook(s) from model when hook_handler2 goes out of scope
-        # hook_handler2 = ForwardHookHandler(self, print_stats, filter_out=["Embedding"])
+        hooks_handler = ForwardHookHandler(self, self.hooks)
 
         # actual train loop
         while not self.stop_cond:
@@ -724,7 +723,7 @@ class Trainer:
 
         self.final_log()
 
-        # deregister_hooks.deregister()
+        hooks_handler.deregister_hooks()
 
         self.save()
         finish_all_writes()
@@ -840,9 +839,9 @@ class Trainer:
         return input_data, batch_chunk, batch_chunk_center_nodes
 
     def model_forward(self, input_data, batch_chunk):
-        out = self.model(input_data) # forward of the model
+        out = self.model(input_data)
         del input_data
-        loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
+        loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
         return out, loss, loss_contrib
 
     def batch_step(self, data, validation=False):

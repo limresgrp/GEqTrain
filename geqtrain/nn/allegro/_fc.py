@@ -14,7 +14,7 @@ from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
 
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
     """
-        ScalarMLPFunction is a flexible Multi-Layer Perceptron (MLP) module designed to provide various configurations of MLPs, 
+        ScalarMLPFunction is a flexible Multi-Layer Perceptron (MLP) module designed to provide various configurations of MLPs,
         including options for weight normalization, normalization layers, and custom non-linearities.
 
         Attributes:
@@ -79,6 +79,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         has_bias: bool = False,
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
+        use_dropout: bool = False,
     ):
         super().__init__()
         nonlinearity = {
@@ -153,6 +154,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             self.sequential[-1].bias.data = torch.tensor(bias).reshape(*self.sequential[-1].bias.data.shape)
         if zero_init_last_layer_weights:
             self.sequential[-1].weight.data = self.sequential[-1].weight.data * 1.e-3
+        if use_dropout:
+            self.sequential.append(torch.nn.Dropout(.2))
+
 
     def forward(self, x):
         return self.sequential(x)

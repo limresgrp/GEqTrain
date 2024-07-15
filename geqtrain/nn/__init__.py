@@ -11,6 +11,7 @@ from .interaction import InteractionModule
 from .readout import ReadoutModule
 from ._scale import PerTypeScaleModule
 from ._nodewise import NodewiseReduce
+from ._equivariant_ln import EquivariantNormLayer
 from ._film import FiLMFunction
 
 from ._dipole import DipoleMomentModule
@@ -31,8 +32,8 @@ __all__ = [
     ReadoutModule,
     PerTypeScaleModule,
     NodewiseReduce,
+    EquivariantNormLayer,
     FiLMFunction,
-
     DipoleMomentModule,
     GradientOutput,
 ]
