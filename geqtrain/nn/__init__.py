@@ -14,9 +14,6 @@ from ._nodewise import NodewiseReduce
 from ._equivariant_ln import EquivariantNormLayer
 from ._film import FiLMFunction
 
-from ._dipole import DipoleMomentModule
-from ._grad_output import GradientOutput
-
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
@@ -34,6 +31,4 @@ __all__ = [
     NodewiseReduce,
     EquivariantNormLayer,
     FiLMFunction,
-    DipoleMomentModule,
-    GradientOutput,
 ]
