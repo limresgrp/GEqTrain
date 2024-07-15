@@ -133,6 +133,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
         self.data = None
         self.fixed_fields = None
+        self.graph_fields = None
 
         # !!! don't delete this block.
         # otherwise the inherent children class
@@ -149,7 +150,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # Then pre-process the data if disk files are not found
         super().__init__(root=root)
         if self.data is None:
-            self.data, self.fixed_fields, include_frames = torch.load(
+            self.data, self.fixed_fields, self.graph_fields, include_frames = torch.load(
                 self.processed_paths[0]
             )
             if not np.all(include_frames == self.include_frames):
@@ -213,7 +214,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             assert all(isinstance(e, AtomicData) for e in data_list)
             assert all(AtomicDataDict.BATCH_KEY not in e for e in data_list)
 
-            fields, fixed_fields = {}, {}
+            fields, fixed_fields, graph_fields = {}, {}, {}
 
             # take the force_fixed_keys away from the fields
             for key in self.force_fixed_keys:
@@ -222,19 +223,17 @@ class AtomicInMemoryDataset(AtomicDataset):
 
             fixed_fields.update(self.extra_fixed_fields)
 
-        elif len(data) == 2:
+        elif len(data) == 3:
 
             # It's fields and fixed_fields
             # Get our data
-            fields, fixed_fields = data
+            fields, fixed_fields, graph_raw_fields = data
 
             fixed_fields.update(self.extra_fixed_fields)
 
             # check keys
-            all_keys = set(fields.keys()).union(fixed_fields.keys())
-            assert len(all_keys) == len(fields) + len(
-                fixed_fields
-            ), "No overlap in keys between data and fixed fields allowed!"
+            all_keys = set(fields.keys()).union(fixed_fields.keys()).union(graph_raw_fields.keys())
+            assert len(all_keys) == len(fields) + len(fixed_fields) + len(graph_raw_fields), "No overlap in keys between data and fixed fields allowed!"
             assert AtomicDataDict.BATCH_KEY not in all_keys
             # Check bad key combinations, but don't require that this be a graph yet.
             AtomicDataDict.validate_keys(all_keys, graph_required=False)
@@ -248,6 +247,33 @@ class AtomicInMemoryDataset(AtomicDataset):
             for key in self.force_index_keys:
                 if key in fields:
                     index_fields[key] = fields.pop(key)
+            
+            graph_fields = {}
+            graph_input_types = []
+            graph_input_num_types = []
+            for key, val in graph_raw_fields.items():
+                splits = key.split(':')[1:]
+
+                if len(splits) == 1:
+                    if val is None:
+                        val = np.array([-1])
+                    graph_input_types.append(torch.from_numpy(val.reshape(-1) + 1).long())
+                    # + 1 for 'unkown' token
+                    graph_input_num_types.append(int(splits[0]) + 1)
+                elif len(splits) == 3:
+                    _min, _max, _bins = splits
+                    bins = np.linspace(float(_min), float(_max), int(_bins))
+                    if val is None:
+                        graph_input_type = np.array([-1])
+                    else:
+                        graph_input_type = np.digitize(val.reshape(-1), bins) # goes from 0 to _bins (included)
+                    graph_input_types.append(torch.from_numpy(graph_input_type + 1).long())
+                    # + 1 for 'unkown' token
+                    # the actual number of bins is _bins + 1 (e.g. 0|10|20 becomes <0 | 0<10 | 10<20 | >20)
+                    graph_input_num_types.append(int(_bins) + 1 + 1)
+
+            graph_fields[AtomicDataDict.GRAPH_INPUT_TYPE_KEY] = graph_input_types
+            graph_fields[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = graph_input_num_types
 
             # check dimesionality
             num_examples = set([len(a) for a in fields.values()])
@@ -272,7 +298,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
             data_list = [
-                constructor(**{**{f: v[i] for f, v in fields.items()}, **fixed_fields, **index_fields})
+                constructor(**{**{f: v[i] for f, v in fields.items()}, **fixed_fields, **index_fields, **graph_fields})
                 for i in include_frames
             ]
 
@@ -303,7 +329,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # datasets. It only matters that they don't simultaneously try
         # to write the _same_ file, corrupting it.
         with atomic_write(self.processed_paths[0], binary=True) as f:
-            torch.save((data, fixed_fields, self.include_frames), f)
+            torch.save((data, fixed_fields, graph_fields, self.include_frames), f)
         with atomic_write(self.processed_paths[1], binary=False) as f:
             yaml.dump(self._get_parameters(), f)
 
@@ -311,6 +337,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
         self.data = data
         self.fixed_fields = fixed_fields
+        self.graph_fields = graph_fields
 
     def get(self, idx):
         out = self.data.get_example(idx)
@@ -365,6 +392,7 @@ class NpzDataset(AtomicInMemoryDataset):
         key_mapping: Dict[str, str] = {},
         include_keys: List[str] = [],
         npz_fixed_field_keys: List[str] = [],
+        npz_graph_field_keys: List[str] = [],
         file_name: Optional[str] = None,
         url: Optional[str] = None,
         force_fixed_keys: List[str] = [],
@@ -375,6 +403,7 @@ class NpzDataset(AtomicInMemoryDataset):
     ):
         self.key_mapping = key_mapping
         self.npz_fixed_field_keys = npz_fixed_field_keys
+        self.npz_graph_field_keys = npz_graph_field_keys
         self.include_keys = include_keys
 
         super().__init__(
@@ -405,18 +434,29 @@ class NpzDataset(AtomicInMemoryDataset):
         # only the keys explicitly mentioned in the yaml file will be parsed
         keys = set(list(self.key_mapping.keys()))
         keys.update(self.npz_fixed_field_keys)
+        keys.update(self.npz_graph_field_keys)
         keys.update(self.include_keys)
         keys.update(list(self.extra_fixed_fields.keys()))
         keys = keys.intersection(set(list(data.keys())))
 
         mapped = {self.key_mapping.get(k, k): data[k] for k in keys}
+        for k in self.npz_graph_field_keys:
+            if k not in mapped:
+                mapped[k] = None
 
-        fields = {k: fix_batch_dim(v) for k, v in mapped.items() if k not in self.npz_fixed_field_keys}
+        fields = {
+            k: fix_batch_dim(v) for k, v in mapped.items() 
+            if (k not in self.npz_fixed_field_keys) and (not k.startswith(tuple(self.npz_graph_field_keys)))
+        }
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: v for k, v in mapped.items() if k in self.npz_fixed_field_keys
         }
         fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_id)
+
+        graph_fields = {
+            k: v for k, v in mapped.items() if k.startswith(tuple(self.npz_graph_field_keys))
+        }
 
         for key in mapped.keys():
             if key in fields and np.issubdtype(fields[key].dtype, np.integer):
@@ -424,4 +464,4 @@ class NpzDataset(AtomicInMemoryDataset):
             if key in fixed_fields and np.issubdtype(fixed_fields[key].dtype, np.integer):
                 fixed_fields[key] = fixed_fields[key].astype(np.int64)
 
-        return fields, fixed_fields
+        return fields, fixed_fields, graph_fields

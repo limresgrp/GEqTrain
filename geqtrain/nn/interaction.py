@@ -16,17 +16,16 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 from ._equivariant_ln import EquivariantNormLayer
 from geqtrain.utils.tp_utils import tp_path_exists
+from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
+from geqtrain.utils._global_options import DTYPE
 
 from geqtrain.nn.allegro._fc import ScalarMLPFunction
 from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
 from geqtrain.nn.cutoffs import polynomial_cutoff
+from geqtrain.nn._film import FiLMFunction
 
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-
-
-SCALAR = o3.Irrep("0e")  # define for convinience
-DTYPE = torch.get_default_dtype()
 
 
 def pick_mpl_function(func):
@@ -110,6 +109,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         latent=ScalarMLPFunction,
         latent_kwargs={},
 
+        # Graph conditioning
+        graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
+
         # Performance parameters:
         pad_to_alignment: int = 1,
 
@@ -128,7 +130,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_invariant_field   = edge_invariant_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
-        self.env_embed_multiplicity          = env_embed_multiplicity
+        self.env_embed_multiplicity = env_embed_multiplicity
         self.head_dim               = head_dim
         self.isqrtd                 = math.isqrt(head_dim)
         self.polynomial_cutoff_p    = float(PolynomialCutoff_p)
@@ -265,6 +267,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     out_irreps=out_irreps,
                     product_correlation=product_correlation,
                     previous_latent_dim=self.interaction_layers[-1].latent_mlp.out_features if layer_index > 0 else None,
+                    graph_conditioning_field=graph_conditioning_field,
 
                     env_weighter=env_weighter,
                     two_body_latent=two_body_latent,
@@ -393,6 +396,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             active_edges = (cutoff_coeffs > 0).nonzero().squeeze(-1)
 
             latents, inv_latent_cat, eq_features = layer(
+                data=data,
                 active_edges=active_edges,
                 num_nodes=num_nodes,
                 latents=latents,
@@ -405,7 +409,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 edge_center=edge_center[active_edges],
                 edge_neighbor=edge_neighbor[active_edges],
 
-                this_layer_update_coeff=layer_update_coefficients[layer_idx - 1] if layer_idx > 0 else None
+                this_layer_update_coeff=layer_update_coefficients[layer_idx - 1] if layer_idx > 0 else None,
             )
 
         # - final layer - #
@@ -459,6 +463,7 @@ class InteractionLayer(torch.nn.Module):
         out_irreps: o3.Irreps,
         product_correlation: int,
         previous_latent_dim: int,
+        graph_conditioning_field: str,
 
         env_weighter: MakeWeightedChannels,
         two_body_latent: torch.nn.Module,
@@ -508,7 +513,7 @@ class InteractionLayer(torch.nn.Module):
                     if ir_out in ir_1 * ir_2: # checks if this L can be obtained via tp between the 2 considered irreps
                         if ir_out == SCALAR:
                             tp_n_scalar_outs += 1 # count number of scalars
-                        instr.append((i_1, i_2, tmp_i_out)) # whio with who, then index of position of operation
+                        instr.append((i_1, i_2, tmp_i_out))
                         full_out_irreps.append((self.env_embed_multiplicity, ir_out))
                         tmp_i_out += 1
         parent._tp_n_scalar_outs.append(tp_n_scalar_outs)
@@ -532,18 +537,30 @@ class InteractionLayer(torch.nn.Module):
             connection_mode=("uuu"),
             shared_weights=False,
             has_weight=False,
-            normalization='norm', # 'norm' or 'component'
+            normalization='component', # 'norm' or 'component'
             pad_to_alignment=parent.pad_to_alignment,
         )
 
         # Make env embed mlp
         generate_n_weights = (env_weighter.weight_numel)  # the weight for the edge embedding
         generate_n_weights += self.env_embed_multiplicity # + the weights for the edge attention
+
         if self.layer_index == 0:
             # also need weights to embed the edge itself
             # this is because the 2 body latent is mixed in with the first layer
             # in terms of code
             generate_n_weights += env_weighter.weight_numel
+        
+        # FiLM layer for conditioning on graph input features
+        self.film = None
+        self.graph_conditioning_field = graph_conditioning_field
+        if self.graph_conditioning_field in parent.irreps_in:
+            self.film = FiLMFunction(
+                mlp_input_dimension=parent.irreps_in[self.graph_conditioning_field].dim,
+                mlp_latent_dimensions=[],
+                mlp_output_dimension=generate_n_weights,
+                mlp_nonlinearity=None,
+            )
 
         # the linear acts after the extractor
         linear_out_irreps = out_irreps if self.layer_index == parent.num_layers - 1 else env_embed_irreps
@@ -610,8 +627,8 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
+            zero_init_last_layer_weights= True,
         ) if parent.use_attention else None
-
 
         # Take the node attrs and obtain a query matrix
         dot = o3.FullyConnectedTensorProduct(
@@ -628,8 +645,8 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             use_norm_layer = True,
+            zero_init_last_layer_weights = True,
         ) if parent.use_attention else None
-
 
         self.latent_mlp = latent_mlp
         self.env_embed_mlp = env_embed_mlp
@@ -658,6 +675,7 @@ class InteractionLayer(torch.nn.Module):
 
     def forward(
         self,
+        data,
         active_edges,
         num_nodes,
         latents,
@@ -710,6 +728,9 @@ class InteractionLayer(torch.nn.Module):
         # From the latents, compute the weights for active edges:
         weights = self.env_embed_mlp(latents[active_edges])
         weights = self.env_embed_mlp_norm(weights)
+        
+        if self.film is not None:
+            weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
 
         w_index: int = 0
         if self.layer_index == 0:

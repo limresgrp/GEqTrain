@@ -241,6 +241,14 @@ class Config(object):
 
         keys = []
 
+        if 'include' in dictionary:
+            include_files = dictionary.pop('include')
+            if not isinstance(include_files, list):
+                include_files = [include_files]
+            for include_file in include_files:
+                included_dict = load_file(supported_formats={"yaml": ("yml", "yaml"), "json": "json"}, filename=include_file)
+                self.update(included_dict)
+
         # first log in all typehints or hidden variables
         for k, value in dictionary.items():
             if k.startswith("_"):
@@ -369,8 +377,6 @@ class Config(object):
             return Config(config=default_params, allow_list=param_keys)
         else:
             return Config(config=default_params, allow_list=param_keys)
-
-    load = from_file
 
     def parse_node_types(self):
         if "type_names" in self:

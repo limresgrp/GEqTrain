@@ -47,6 +47,8 @@ NODE_ATTRS_KEY: Final[str] = "node_attrs"
 NODE_FEATURES_KEY: Final[str] = "node_features"
 # [n_nodes, dim] (possibly equivariant) output features of each node
 NODE_OUTPUT_KEY: Final[str] = "node_output"
+# [n_graphs, dim] invariant input feature of graph
+GRAPH_ATTRS_KEY: Final[str] = "graph_attrs"
 # [n_graphs, dim] (possibly equivariant) output feature of graph
 GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
 # [n_edges, 3] tensor of displacement vectors associated to edges
@@ -61,6 +63,8 @@ EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
 EDGE_FEATURES_KEY: Final[str] = "edge_features"
 
 GRAPH_LABELS: Final[str] = "graph_labels" # theorically [N_graphs, (n_of_labels)]
+GRAPH_INPUT_TYPE_KEY: Final[str] = "graph_input_types"
+GRAPH_INPUT_NUM_TYPES_KEY: Final[str] = "graph_input_num_types"
 
 
 NOISE: Final[str] = "noise"

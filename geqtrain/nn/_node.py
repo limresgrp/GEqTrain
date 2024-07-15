@@ -65,7 +65,7 @@ class OneHotAtomEncoding(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         if data.get(AtomicDataDict.NODE_ATTRS_KEY, None) is None:
-            type_numbers = data.get(AtomicDataDict.NODE_TYPE_KEY, data["node_types"]).squeeze(-1) # my guess: [bs, n, 1]
+            type_numbers = data.get(AtomicDataDict.NODE_TYPE_KEY).squeeze(-1)
             one_hot = torch.nn.functional.one_hot(
                 type_numbers, num_classes=self.num_types
             ).to(device=type_numbers.device, dtype=data[AtomicDataDict.POSITIONS_KEY].dtype) # my guess: [bs, n, NatomsTypes]

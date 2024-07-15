@@ -5,6 +5,8 @@ from typing import Optional, Union, List
 import inspect
 import logging
 
+from geqtrain.utils.savenload import load_callable
+
 from .config import Config
 
 
@@ -164,7 +166,9 @@ def instantiate(
             continue
 
         if not (callable(sub_builder) or inspect.isclass(sub_builder)):
-            raise ValueError(f"Builder for submodule `{key}` must be a callable or a class, got `{sub_builder!r}` instead.")
+            if isinstance(sub_builder, str):
+                sub_builder = load_callable(sub_builder, prefix=prefix)
+                final_optional_args[key] = sub_builder
 
         # add double check to avoid cycle
         # only overwrite the optional argument, not the positional ones
