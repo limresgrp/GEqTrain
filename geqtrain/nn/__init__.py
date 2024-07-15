@@ -9,6 +9,7 @@ from .interaction import InteractionModule
 from .readout import ReadoutModule
 from ._output_scaler import OutputScaler
 from ._nodewise import NodewiseReduce
+from ._equivariant_ln import EquivariantNormLayer
 
 __all__ = [
     GraphModuleMixin,
@@ -22,4 +23,5 @@ __all__ = [
     ReadoutModule,
     OutputScaler,
     NodewiseReduce,
+    EquivariantNormLayer,
 ]
