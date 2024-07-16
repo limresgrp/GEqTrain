@@ -272,8 +272,9 @@ class AtomicInMemoryDataset(AtomicDataset):
                     # the actual number of bins is _bins + 1 (e.g. 0|10|20 becomes <0 | 0<10 | 10<20 | >20)
                     graph_input_num_types.append(int(_bins) + 1 + 1)
 
-            graph_fields[AtomicDataDict.GRAPH_INPUT_TYPE_KEY] = graph_input_types
-            graph_fields[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = graph_input_num_types
+            if len(graph_input_types) > 0:
+                graph_fields[AtomicDataDict.GRAPH_INPUT_TYPE_KEY] = graph_input_types
+                graph_fields[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = graph_input_num_types
 
             # check dimesionality
             num_examples = set([len(a) for a in fields.values()])
