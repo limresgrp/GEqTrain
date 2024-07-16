@@ -13,14 +13,14 @@ from e3nn import o3
 from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin
+from geqtrain.nn import GraphModuleMixin, SO3_Linear
 from ._equivariant_ln import EquivariantNormLayer
 from geqtrain.utils.tp_utils import tp_path_exists
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
 from geqtrain.utils._global_options import DTYPE
 
 from geqtrain.nn.allegro._fc import ScalarMLPFunction
-from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
+from geqtrain.nn.allegro import Contracter, MakeWeightedChannels
 from geqtrain.nn.cutoffs import polynomial_cutoff
 from geqtrain.nn._film import FiLMFunction
 
@@ -117,7 +117,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Other:
         irreps_in=None,
-        l_max: int = 2,
     ):
         super().__init__()
 
@@ -134,7 +133,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.head_dim               = head_dim
         self.isqrtd                 = math.isqrt(head_dim)
         self.polynomial_cutoff_p    = float(PolynomialCutoff_p)
-        self.l_max                  = l_max
 
         # architectural choices
         self.use_mace_product       = use_mace_product
@@ -480,12 +478,11 @@ class InteractionLayer(torch.nn.Module):
         self.isqrtd = math.isqrt(self.head_dim)
 
         # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
-        env_linear_norm = EquivariantNormLayer("layer_norm_sh", parent.l_max, self.env_embed_multiplicity)
-        env_linear = Linear(
+        env_linear = SO3_Linear(
             env_embed_irreps,
             env_embed_irreps,
-            shared_weights=True,
-            internal_weights=True,
+            bias=True,
+            normalization='component',
         )
 
         product, reshape_in_module = None, None
@@ -520,8 +517,8 @@ class InteractionLayer(torch.nn.Module):
         full_out_irreps = o3.Irreps(full_out_irreps)
         assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
 
-        self.tp_input_1_norm = EquivariantNormLayer("layer_norm_sh", parent.l_max, self.env_embed_multiplicity)
-        self.tp_input_2_norm = EquivariantNormLayer("layer_norm_sh", parent.l_max, self.env_embed_multiplicity)
+        self.tp_input_1_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
+        self.tp_input_2_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
         # Build tensor product between env-aware node feats and edge attrs
         tp = Contracter(
             irreps_in1=o3.Irreps(
@@ -569,13 +566,11 @@ class InteractionLayer(torch.nn.Module):
         parent._features_n_scalar_outs.append(_features_n_scalar_outs)
 
         is_last_layer = True if self.layer_index+1 == parent.num_layers else False
-        eq_lin_norm = EquivariantNormLayer("layer_norm_sh", parent.l_max, self.env_embed_multiplicity) if not is_last_layer else None
-        linear = Linear(
+        linear = SO3_Linear(
             full_out_irreps,
             linear_out_irreps,
-            shared_weights=True,
-            internal_weights=True,
-            pad_to_alignment=parent.pad_to_alignment,
+            bias=True,
+            normalization='component',
         )
 
         if self.layer_index == 0:
@@ -654,13 +649,11 @@ class InteractionLayer(torch.nn.Module):
         self.node_attr_to_query = node_attr_to_query
         self.edge_feat_to_key = edge_feat_to_key
         self.dot = dot
-        self.env_linear_norm = env_linear_norm
         self.env_linear = env_linear
         self.product = product
         self.reshape_in_module = reshape_in_module
         self.tp = tp
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
-        self.eq_lin_norm = eq_lin_norm
         self.linear = linear
         self.reshape_back_tp = reshape_back_tp
         self.use_attention = parent.use_attention
@@ -777,9 +770,6 @@ class InteractionLayer(torch.nn.Module):
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
-
-        # normalize
-        local_env_per_node_active_node_centers = self.env_linear_norm(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
 
         if self.use_mace_product:
@@ -819,10 +809,5 @@ class InteractionLayer(torch.nn.Module):
 
         # do the linear for eq. features
         eq_features = self.linear(eq_features)
-
-        if not self.is_last_layer:
-            # last layer equivariant normalization must be done after linear
-            # since input to linear has a non rearrangeable shape
-            eq_features = self.eq_lin_norm(eq_features)
 
         return latents, inv_latent, eq_features
