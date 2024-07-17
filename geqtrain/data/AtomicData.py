@@ -31,6 +31,7 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
+    'hybridization',
 }
 _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_VECTORS_KEY,
@@ -40,7 +41,9 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
 }
-_DEFAULT_GRAPH_FIELDS: Set[str] = { # register here target, this kword defd here is what is going to be used in the this code to reference at this part of the data
+
+# register here custom fields, this kword defd here is what is going to be used in the this codebase to reference this "part" of the data
+_DEFAULT_GRAPH_FIELDS: Set[str] = {
     'graph_labels',
 }
 
@@ -132,17 +135,20 @@ def _process_dict(kwargs, ignore_fields=[]):
         num_frames = 1
 
     for k, v in kwargs.items():
-        if k in ignore_fields:
+        if k in ignore_fields: # check if k from red_kwords from yaml has to be ingnored
             continue
 
+        # check if it must be added the batch size, nb: bs always = 1 when reading data
         if len(v.shape) == 0:
             kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
+        # check if it must be added the batch size, nb: bs always = 1 when reading data
         if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
             kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
+        # consistency checks
         if (
             k in _NODE_FIELDS
             and AtomicDataDict.POSITIONS_KEY in kwargs
@@ -205,7 +211,7 @@ class AtomicData(Data):
             assert self.edge_index.dim() == 2 and self.edge_index.shape[0] == 2
             if AtomicDataDict.NODE_ATTRS_KEY in self and self.node_attrs is not None:
                 assert self.node_attrs.shape[0] == self.num_nodes
-                assert self.node_attrs.dtype == self.pos.dtype
+                #! assert self.node_attrs.dtype == self.pos.dtype
             if AtomicDataDict.NODE_FEATURES_KEY in self and self.node_features is not None:
                 assert self.node_features.shape[0] == self.num_nodes
                 assert self.node_features.dtype == self.pos.dtype

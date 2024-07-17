@@ -7,6 +7,7 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 
+from typing import Dict
 
 @compile_mode("script")
 class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
@@ -17,27 +18,44 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         embedding_dim (int): Dimension of the node attribute embedding tensor.
     """
 
-    num_types: int
+    # num_types: int
 
     def __init__(
         self,
-        num_types: int,
-        embedding_dim: int = 8,
+        # num_types: int,
+        # embedding_dim: int = 8,
         irreps_in=None,
+        node_attributes: Dict = {},
     ):
         super().__init__()
-        self.embeddings = torch.nn.Embedding(num_types, embedding_dim) # scale_grad_by_freq = False by default
-        torch.nn.init.normal_(self.embeddings.weight, mean=0, std=1/math.sqrt(embedding_dim)) # xavier: 1/sqrt(input dim of the layer)
 
-        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(embedding_dim, (0, 1))])}
-        self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
+        attributes_to_embed = {} # k: str to get data from AtomicDataDict, v: name of the associated nn.Embedding layer; used to retrieve correct nn.Embedding layer in forward
+        final_node_dimensionality = 0
+        for attribute_name, values in node_attributes.items():
+            emb_layer_name = f"{attribute_name}_embedding"
+            attributes_to_embed[attribute_name] = emb_layer_name
+            num_types = values['num_types']
+            embedding_dimensionality = values['embedding_dimensionality']
+            setattr(self, emb_layer_name, torch.nn.Embedding(num_types, embedding_dimensionality))
+            torch.nn.init.normal_(getattr(self, emb_layer_name).weight, mean=0, std=math.isqrt(embedding_dimensionality))
+            final_node_dimensionality += embedding_dimensionality
+
+        self.attributes_to_embed = attributes_to_embed
+        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(final_node_dimensionality, (0, 1))])}
+        self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out) # irreps_out = {'node_attrs': <Irreps, len() = 1>} -> final_node_dimensionality x 0e
+
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if data.get(AtomicDataDict.NODE_ATTRS_KEY, None) is None:
-            type_numbers = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-            node_attrs = self.embeddings(type_numbers)
+        '''
+        atm only categorical features are supported
+        '''
+        out = []
+        for attribute_name, emb_layer_name in self.attributes_to_embed.items():
+            x = data[attribute_name].squeeze()
+            x = getattr(self, emb_layer_name)(x)
+            out.append(x)
 
-            data[AtomicDataDict.NODE_ATTRS_KEY] = node_attrs
+        data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1)
         return data
 
 
