@@ -79,7 +79,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         has_bias: bool = False,
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
-        use_dropout: bool = False,
+        dropout: Optional[float] = None,
     ):
         super().__init__()
         nonlinearity = {
@@ -148,15 +148,18 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, 1. / sqrt(float(h_in)))
                 sequential_dict[f"{layer}"] = lin_layer
+        
+        last = -1
+        if dropout is not None:
+            assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
+            sequential_dict["dropout"] = torch.nn.Dropout(dropout)
+            last -= 1
 
         self.sequential = torch.nn.Sequential(sequential_dict)
         if has_bias and bias is not None:
-            self.sequential[-1].bias.data = torch.tensor(bias).reshape(*self.sequential[-1].bias.data.shape)
+            self.sequential[last].bias.data = torch.tensor(bias).reshape(*self.sequential[last].bias.data.shape)
         if zero_init_last_layer_weights:
-            self.sequential[-1].weight.data = self.sequential[-1].weight.data * 1.e-3
-        if use_dropout:
-            self.sequential.append(torch.nn.Dropout(.2))
-
+            self.sequential[last].weight.data = self.sequential[last].weight.data * 1.e-3
 
     def forward(self, x):
         return self.sequential(x)
