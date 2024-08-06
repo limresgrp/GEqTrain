@@ -1,4 +1,4 @@
-from .so3 import SO3_Linear
+from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
 from .radial_basis import BesselBasis, BesselBasisVec
@@ -33,4 +33,5 @@ __all__ = [
     EquivariantNormLayer,
     FiLMFunction,
     SO3_Linear,
+    SO3_LayerNorm,
 ]

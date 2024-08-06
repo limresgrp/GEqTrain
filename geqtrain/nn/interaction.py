@@ -13,7 +13,7 @@ from e3nn import o3
 from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin, SO3_Linear
+from geqtrain.nn import GraphModuleMixin, SO3_Linear, SO3_LayerNorm
 from ._equivariant_ln import EquivariantNormLayer
 from geqtrain.utils.tp_utils import tp_path_exists
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
@@ -478,11 +478,13 @@ class InteractionLayer(torch.nn.Module):
         self.isqrtd = math.isqrt(self.head_dim)
 
         # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
+        env_norm = SO3_LayerNorm(
+            env_embed_irreps,
+        )
         env_linear = SO3_Linear(
             env_embed_irreps,
             env_embed_irreps,
             bias=True,
-            normalization='component',
         )
 
         product, reshape_in_module = None, None
@@ -517,8 +519,10 @@ class InteractionLayer(torch.nn.Module):
         full_out_irreps = o3.Irreps(full_out_irreps)
         assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
 
-        self.tp_input_1_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
-        self.tp_input_2_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
+        self.tp_input_1_norm = SO3_LayerNorm(l_arg_irreps)
+        # self.tp_input_1_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
+        self.tp_input_2_norm = SO3_LayerNorm(l_arg_irreps)
+        # self.tp_input_2_norm = EquivariantNormLayer("layer_norm_sh", max(l_arg_irreps.ls), self.env_embed_multiplicity)
         # Build tensor product between env-aware node feats and edge attrs
         tp = Contracter(
             irreps_in1=o3.Irreps(
@@ -536,6 +540,11 @@ class InteractionLayer(torch.nn.Module):
             has_weight=False,
             normalization='component', # 'norm' or 'component'
             pad_to_alignment=parent.pad_to_alignment,
+        )
+        self.tp_norm = SO3_LayerNorm(
+            o3.Irreps(
+                [(self.env_embed_multiplicity, ir) for _, ir in full_out_irreps]
+            ),
         )
 
         # Make env embed mlp
@@ -570,7 +579,6 @@ class InteractionLayer(torch.nn.Module):
             full_out_irreps,
             linear_out_irreps,
             bias=True,
-            normalization='component',
         )
 
         if self.layer_index == 0:
@@ -649,6 +657,7 @@ class InteractionLayer(torch.nn.Module):
         self.node_attr_to_query = node_attr_to_query
         self.edge_feat_to_key = edge_feat_to_key
         self.dot = dot
+        self.env_norm = env_norm
         self.env_linear = env_linear
         self.product = product
         self.reshape_in_module = reshape_in_module
@@ -770,6 +779,8 @@ class InteractionLayer(torch.nn.Module):
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
+        
+        local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
 
         if self.use_mace_product:
@@ -793,6 +804,7 @@ class InteractionLayer(torch.nn.Module):
         # Now do the TP
         # recursively tp current features with the environment embeddings
         eq_features = self.tp(eq_features, local_env_per_active_edge)
+        eq_features = self.tp_norm(eq_features)
 
         # Get invariants
         # features has shape [z][mul][k]
