@@ -6,7 +6,7 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 from .radial_basis import BesselBasis
-from .cutoffs import PolynomialCutoff
+from .cutoffs import TanhCutoff
 
 
 @compile_mode("script")
@@ -64,7 +64,7 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         basis=BesselBasis,
-        cutoff=PolynomialCutoff,
+        cutoff=TanhCutoff,
         basis_kwargs={},
         cutoff_kwargs={},
         out_field: str = AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,

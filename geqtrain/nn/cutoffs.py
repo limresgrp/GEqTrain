@@ -1,3 +1,4 @@
+import math
 import torch
 
 
@@ -59,3 +60,57 @@ class PolynomialCutoff(torch.nn.Module):
         x: torch.Tensor, input distance
         """
         return _poly_cutoff(x * self._factor, p=self.p)
+
+
+@torch.jit.script
+def _tanh_cutoff(x: torch.Tensor, n: float = 6.0) -> torch.Tensor:
+    return torch.tanh(1 - torch.pow(x, n)) / math.tanh(1)
+
+@torch.jit.script
+def tanh_cutoff(
+    x: torch.Tensor, r_max: torch.Tensor, n: float = 6.0
+) -> torch.Tensor:
+    """Tanh cutoff
+
+
+    Parameters
+    ----------
+    r_max : tensor
+        Broadcasts over r_max.
+
+    N : int
+        Power used in envelope function
+    """
+    assert n >= 1.0
+    r_max, x = torch.broadcast_tensors(r_max.unsqueeze(-1), x.unsqueeze(0))
+
+    return _tanh_cutoff(x / r_max, n=n)
+
+class TanhCutoff(torch.nn.Module):
+    _factor: float
+    p: float
+
+    def __init__(self, r_max: float, n: float = 6):
+        r"""Tanh cutoff
+
+
+        Parameters
+        ----------
+        r_max : float
+            Cutoff radius
+
+        n : int
+            Power used in envelope function
+        """
+        super().__init__()
+        assert n >= 1.0
+        self.n = float(n)
+        self._factor = 1.0 / float(r_max)
+
+    def forward(self, x):
+        """
+        Evaluate cutoff function.
+
+        x: torch.Tensor, input distance
+        """
+        return _tanh_cutoff(x * self._factor, n=self.n)
