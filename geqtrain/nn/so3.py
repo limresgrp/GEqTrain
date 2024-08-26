@@ -46,7 +46,8 @@ class SO3_Linear(torch.nn.Module):
         super().__init__()
         self.in_irreps = in_irreps
         self.out_irreps = out_irreps
-        self.mul = in_irreps[0].mul
+        self.mul_in = in_irreps[0].mul
+        self.mul_out = out_irreps[0].mul
         self.bias = None
         
         params = {}
@@ -55,11 +56,11 @@ class SO3_Linear(torch.nn.Module):
 
         for l in set(out_irreps.ls):
             l_in_irr = [irr for irr in in_irreps if irr.ir.l == l]
-            assert all([irr.mul == self.mul for irr in l_in_irr])  # assert all have same multiplicity
-            in_features = self.mul * len(l_in_irr)
+            assert all([irr.mul == self.mul_in for irr in l_in_irr])  # assert all have same multiplicity
+            in_features = self.mul_in * len(l_in_irr)
             l_out_irr = [irr for irr in out_irreps if irr.ir.l == l]
-            assert all([irr.mul == self.mul for irr in l_out_irr]) # assert all have same multiplicity
-            out_features = self.mul * len(l_out_irr)
+            assert all([irr.mul == self.mul_out for irr in l_out_irr]) # assert all have same multiplicity
+            out_features = self.mul_out * len(l_out_irr)
             
             l_weight = torch.nn.Parameter(torch.randn(out_features, in_features))
             bound = 1 / math.sqrt(in_features)
@@ -70,7 +71,7 @@ class SO3_Linear(torch.nn.Module):
             l_dims_out.append([2 * l + 1] * len(l_out_irr))
 
             if l == 0 and bias:
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_out_irr)))
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, len(l_out_irr)))
         
         self.params     = torch.nn.ParameterDict(params)
         self.l_dims_in  = l_dims_in
@@ -93,9 +94,9 @@ class SO3_Linear(torch.nn.Module):
         for _weight, _l_dims_in, _l_dims_out in zip(self.params.values(), self.l_dims_in, self.l_dims_out):
             length = sum(_l_dims_in)
             feature = x.narrow(dim=-1, start=start, length=length)
-            feature = rearrange(feature, 'b m (i l) -> b l (m i)', m=self.mul, l=_l_dims_in[0],  i=len(_l_dims_in))
+            feature = rearrange(feature, 'b m (i l) -> b l (m i)', m=self.mul_in, l=_l_dims_in[0],  i=len(_l_dims_in))
             feature = torch.einsum('bli, oi -> blo', feature, _weight)
-            feature = rearrange(feature, 'b l (m o) -> b m (o l)', m=self.mul, l=_l_dims_out[0], o=len(_l_dims_out))
+            feature = rearrange(feature, 'b l (m o) -> b m (o l)', m=self.mul_out, l=_l_dims_out[0], o=len(_l_dims_out))
 
             out.append(feature)
             start += length
@@ -127,7 +128,7 @@ class SO3_LayerNorm(torch.nn.Module):
         Args:
             irreps (o3.Irreps): Input irreducible representations.
             bias (bool): Whether to include a bias term. Default is True.
-            normalization (Optional[str]): Normalization method, either 'norm' or 'component'. Default is None.
+            normalization (Optional[str]): Normalization method, either 'norm', 'component' or 'std'. Default is None.
             eps (float): A small value to avoid division by zero in normalization. Default is 1e-5.
 
         Attributes:
@@ -165,7 +166,7 @@ class SO3_LayerNorm(torch.nn.Module):
         l_dims = []
 
         if self.normalization == 'std':
-            self.register_buffer('balance_degree_weight', torch.zeros((max(irreps.ls) + 1) ** 2, 1))
+            self.register_buffer('balance_degree_weight', torch.zeros(sum([(2*l+1) for l in set(irreps.ls)]), 1))
         else:
             self.balance_degree_weight = None
 
@@ -222,7 +223,8 @@ class SO3_LayerNorm(torch.nn.Module):
                 feature_norm = torch.einsum('blc, la -> bac', feature_norm, balance_degree_weight) # [N, 1, C]
 
             feature_norm = torch.mean(feature_norm, dim=2, keepdim=True)    # [N, 1, 1]
-            feature_norm = (feature_norm + self.eps).pow(-0.5) * self.l_dim_norm
+            # Feattures whose feature_norm is < 1.e-3 are not normalized (thus they are let die)
+            feature_norm = torch.clamp_max_((feature_norm + self.eps).pow(-0.5) * self.l_dim_norm, 1.e-3)
             feature = feature * feature_norm
 
             feature = rearrange(feature, 'b l (m i) -> b m (i l)', m=self.mul, l=_l_dims[0], i=len(_l_dims))
