@@ -31,7 +31,6 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
-    'hybridization',
 }
 _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_VECTORS_KEY,
@@ -40,11 +39,9 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
     AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
+    AtomicDataDict.EDGE_CELL_SHIFT_KEY,
 }
-
-# register here custom fields, this kword defd here is what is going to be used in the this codebase to reference this "part" of the data
 _DEFAULT_GRAPH_FIELDS: Set[str] = {
-    'graph_labels',
 }
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
@@ -219,6 +216,8 @@ class AtomicData(Data):
                 assert self.node_types.dtype in _TORCH_INTEGER_DTYPES
             if AtomicDataDict.BATCH_KEY in self and self.batch is not None:
                 assert self.batch.dim() == 2 and self.batch.shape[0] == self.num_nodes
+            if AtomicDataDict.CELL_KEY in self and self.cell is not None:
+                assert self.cell.shape == (3, 3)
 
             # Validate irreps
             # __*__ is the only way to hide from torch_geometric

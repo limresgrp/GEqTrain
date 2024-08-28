@@ -6,6 +6,7 @@ from geqtrain.data import AtomicDataDict, AtomicDataset
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
+    NodewiseReduce,
     InteractionModule,
 )
 from geqtrain.nn import (
@@ -13,11 +14,10 @@ from geqtrain.nn import (
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     ReadoutModule,
-    # EmbeddingGraphAttrs,
 )
 
 
-def Model(
+def GraphModel(
     config, initialize: bool, dataset: Optional[AtomicDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
@@ -37,13 +37,15 @@ def Model(
         # check consistency
         assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
         config["irreps_edge_sh"] = irreps_edge_sh
+    
+    if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
+        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY].item()
 
     layers = {
         # -- Encode --
         "node_attrs":         EmbeddingNodeAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        # "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     layers.update(
@@ -58,19 +60,27 @@ def Model(
                     output_hidden_irreps=True,
                 ),
             ),
-            "pooling": (
+            "edge_pooling": (
                 EdgewiseReduce,
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    out_field=AtomicDataDict.NODE_FEATURES_KEY,
+                    out_field=AtomicDataDict.NODE_OUTPUT_KEY,
                     reduce=config.get("edge_reduce", "sum"),
+                ),
+            ),
+            "node_pooling": (
+                NodewiseReduce,
+                dict(
+                    field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
                 ),
             ),
             "head": (
                 ReadoutModule,
                 dict(
-                    field=AtomicDataDict.NODE_FEATURES_KEY,
-                    out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    field=AtomicDataDict.GRAPH_OUTPUT_KEY,
+                    out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
+                    has_bias=False,
                 ),
             ),
         }

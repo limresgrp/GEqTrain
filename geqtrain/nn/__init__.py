@@ -1,3 +1,5 @@
+from .kan import KAN
+from ._fc import ScalarMLPFunction
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
@@ -32,6 +34,8 @@ __all__ = [
     NodewiseReduce,
     EquivariantNormLayer,
     FiLMFunction,
+    KAN,
+    ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
 ]

@@ -2,7 +2,7 @@
 """
 
 import os
-os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
+# os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 import inspect
 import logging
 import wandb
@@ -18,7 +18,12 @@ import torch
 
 from torch.utils.data import ConcatDataset
 
-from geqtrain.data import DataLoader, AtomicData, AtomicDataDict
+from geqtrain.data import (
+    DataLoader,
+    AtomicData,
+    AtomicDataDict,
+    _EDGE_FIELDS,
+)
 from geqtrain.utils import (
     Output,
     Config,
@@ -396,6 +401,10 @@ class Trainer:
         returns self.as_dict
         '''
         return self.as_dict(state_dict=False, training_progress=False, kwargs=False)
+    
+    @property
+    def dataset_params(self):
+        return self.dataset_train.datasets[0].config
 
     def update_kwargs(self, config):
         self.kwargs.update(
@@ -747,6 +756,11 @@ class Trainer:
         chunk = already_computed_nodes is not None
         batch_chunk = deepcopy(batch)
         batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+        edge_fields_dict = {
+            edge_field: batch[edge_field]
+            for edge_field in _EDGE_FIELDS
+            if edge_field in batch
+        }
 
         if chunk:
             batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
@@ -777,13 +791,20 @@ class Trainer:
 
             chunk = True
             offset += 1
-            batch_chunk_index = batch_chunk_index[:, get_edge_filter(batch_chunk_index, offset)]
+            fltr = get_edge_filter(batch_chunk_index, offset)
+            batch_chunk_index = batch_chunk_index[:, fltr]
+            for k, v in edge_fields_dict.items():
+                edge_fields_dict[k] = v[fltr]
 
         # = ----------------------------------------- = #
 
         if chunk:
             batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
             batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
+            for k, v in edge_fields_dict.items():
+                batch[k] = v
+            if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
+                        batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
             for per_node_output_key, per_node_outputs_value in zip(per_node_outputs_keys, per_node_outputs_values):
                 chunk_per_node_outputs_value = per_node_outputs_value.clone()
                 mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
@@ -874,6 +895,8 @@ class Trainer:
                     not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
                     batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
                     batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
+                        batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
                     per_node_outputs_keys.append(key_clean)
 
         per_node_outputs_values = []

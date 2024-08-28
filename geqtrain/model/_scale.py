@@ -6,10 +6,10 @@ def PerTypeScale(model: GraphModuleMixin, config) -> PerTypeScaleModule:
     r"""Compute dipole moment.
 
     Args:
-        model: the energy model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
+        model: the model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
 
     Returns:
-        A ``ExponentialModule`` wrapping ``model``.
+        A ``PerTypeScaleModule`` wrapping ``model``.
     """
     
     return PerTypeScaleModule(

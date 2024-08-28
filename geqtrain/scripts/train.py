@@ -122,6 +122,9 @@ def fresh_start(config):
 
     # = Train/validation split =
     trainer.set_dataset(dataset, validation_dataset)
+    
+    # = Update config with dataset-related params = #
+    config.update(trainer.dataset_params)
 
     # = Build model =
     final_model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)

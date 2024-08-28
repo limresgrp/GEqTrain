@@ -1,6 +1,5 @@
 from typing import List, Optional
-from geqtrain.nn.allegro._fc import ScalarMLPFunction
-from geqtrain.utils._global_options import DTYPE
+from geqtrain.nn import ScalarMLPFunction
 
 
 class FiLMFunction(ScalarMLPFunction):

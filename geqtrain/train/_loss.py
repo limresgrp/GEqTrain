@@ -72,7 +72,7 @@ class SimpleLoss:
             if mean:
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else:
-                return loss.mean(dim=0)
+                return loss
 
     def prepare(
         self,

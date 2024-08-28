@@ -157,7 +157,9 @@ class Metrics:
                     }
                 elif per_label:
                     params = {
-                        "accumulate_by": torch.arange(ref[key].shape[-1], device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
+                        "accumulate_by": torch.cat([
+                            torch.arange(ref[key].shape[-1], device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
+                        ] * ref[key].shape[0])
                     }
                 if per_node:
                     if N is None:

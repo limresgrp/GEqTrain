@@ -63,8 +63,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
     in_features: int
     out_features: int
-    use_weight_norm: bool
     use_norm_layer: bool
+    use_weight_norm: bool
     dim_weight_norm: int
 
     def __init__(
@@ -113,8 +113,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.use_norm_layer = use_norm_layer
 
         sequential_dict = OrderedDict()
-        if self.use_norm_layer:
-            sequential_dict['layer_norm'] = torch.nn.LayerNorm(dimensions[0])
         
         if bias is not None:
             has_bias = True
@@ -136,12 +134,15 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 with torch.no_grad():
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
-                sequential_dict[f"{layer}_activated"] = torch.nn.Sequential(
-                    OrderedDict([
+                
+                layers = []
+                if self.use_norm_layer:
+                    layers.append('norm', torch.nn.LayerNorm(h_in))
+                layers.extend([
                         ("linear", lin_layer),
                         ("activation", non_lin_instance),
-                    ]),
-                )
+                ])
+                sequential_dict[f"{layer}_activated"] = torch.nn.Sequential(OrderedDict(layers))
 
             else:
                 with torch.no_grad():

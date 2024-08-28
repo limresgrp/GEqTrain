@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import List
+from typing import Dict
 import torch
 import torch.nn
 import math
@@ -18,33 +18,34 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
         embedding_dim (int): Dimension of the node attribute embedding tensor.
     """
 
-    graph_input_num_types: int
-
     def __init__(
         self,
-        graph_input_num_types: List[int],
-        embedding_dim: int = 8,
+        graph_attributes: Dict[str, Dict] = {},
         irreps_in=None,
     ):
         super().__init__()
-        self.graph_inputs: int = len(graph_input_num_types)
-        output_embedding_dim = 0
-        emb_dict = OrderedDict()
-        for idx, num in enumerate(graph_input_num_types):
-            embedding = torch.nn.Embedding(num, embedding_dim)
-            torch.nn.init.normal_(embedding.weight, mean=0, std=1/math.sqrt(embedding_dim))
-            emb_dict[f'{idx}_emb'] = embedding
-            output_embedding_dim += embedding_dim
-        self.embeddings = torch.nn.Sequential(emb_dict)
 
+        attributes_to_embed = {} # k: str field name, v: nn.Embedding layer name
+        output_embedding_dim = 0
+        for field, values in graph_attributes.items():
+            emb_layer_name = f"{field}_embedding"
+            attributes_to_embed[field] = emb_layer_name
+            n_types = values.get('num_types') + 1
+            embedding_dim = values['embedding_dimensionality']
+            setattr(self, emb_layer_name, torch.nn.Embedding(n_types, embedding_dim))
+            torch.nn.init.normal_(getattr(self, emb_layer_name).weight, mean=0, std=math.isqrt(embedding_dim))
+            output_embedding_dim += embedding_dim
+
+        self.attributes_to_embed = attributes_to_embed
         irreps_out = {AtomicDataDict.GRAPH_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])}
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if data.get(AtomicDataDict.GRAPH_ATTRS_KEY, None) is None:
-            graph_inputs = data.get(AtomicDataDict.GRAPH_INPUT_TYPE_KEY).reshape(-1, self.graph_inputs).T
-            graph_attrs = []
-            for embedding, graph_input in zip(self.embeddings, graph_inputs):
-                graph_attrs.append(embedding(graph_input))
-            data[AtomicDataDict.GRAPH_ATTRS_KEY] = torch.cat(graph_attrs, dim=1)
+        out = []
+        for attribute_name, emb_layer_name in self.attributes_to_embed.items():
+            x = data[attribute_name].squeeze()
+            x = getattr(self, emb_layer_name)(x)
+            out.append(x)
+
+        data[AtomicDataDict.GRAPH_ATTRS_KEY] = torch.cat(out, dim=-1)
         return data

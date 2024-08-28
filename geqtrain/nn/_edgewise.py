@@ -5,8 +5,7 @@ from einops import rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin
-from geqtrain.nn.allegro._fc import ScalarMLPFunction
+from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 

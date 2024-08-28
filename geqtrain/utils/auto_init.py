@@ -86,7 +86,7 @@ def instantiate(
         positional_args: the arguments used for input. These arguments have the top priority.
         optional_args: the second priority group to search for keys.
         all_args: the third priority group to search for keys.
-        remove_kwargs: if True, ignore the kwargs argument in the init funciton
+        remove_kwargs: if True, ignore the kwargs argument in the init function
             same definition as the one in Config.from_function
         return_args_only (bool): if True, do not instantiate, only return the arguments
     """
