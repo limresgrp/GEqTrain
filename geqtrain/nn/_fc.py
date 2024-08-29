@@ -122,9 +122,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
             is_last_layer = num_layers - 1 == layer
-            if is_last_layer and self.use_norm_layer:
+            if is_last_layer and self.use_layer_norm:
                   lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)
-            elif layer == 0 and self.use_norm_layer:
+            elif layer == 0 and self.use_layer_norm:
                 lin_layer = torch.nn.Linear(h_in, h_out, bias=False)
             else:
                 lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)

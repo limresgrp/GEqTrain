@@ -31,7 +31,6 @@ __all__ = [
     ReadoutModule,
     PerTypeScaleModule,
     NodewiseReduce,
-    EquivariantNormLayer,
     FiLMFunction,
     KAN,
     ScalarMLPFunction,
