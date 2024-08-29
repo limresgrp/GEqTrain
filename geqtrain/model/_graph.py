@@ -37,9 +37,6 @@ def GraphModel(
         # check consistency
         assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
         config["irreps_edge_sh"] = irreps_edge_sh
-    
-    if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
-        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY].item()
 
     layers = {
         # -- Encode --
@@ -80,7 +77,6 @@ def GraphModel(
                 dict(
                     field=AtomicDataDict.GRAPH_OUTPUT_KEY,
                     out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
-                    has_bias=False,
                 ),
             ),
         }
