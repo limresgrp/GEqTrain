@@ -169,6 +169,7 @@ class Trainer:
         train_idcs: Optional[Union[List, List[List]]] = None,
         val_idcs: Optional[Union[List, List[List]]] = None,
         train_val_split: str = "random",
+        skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
         init_callbacks: List = [],
@@ -855,6 +856,7 @@ class Trainer:
         input_data = {
             k: v.to(device)
             for k, v in batch_chunk.items()
+            if k not in per_node_outputs_keys
         }
 
         return input_data, batch_chunk, batch_chunk_center_nodes
@@ -910,16 +912,25 @@ class Trainer:
 
         while True:
 
-            input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
-                already_computed_nodes=already_computed_nodes,
-                batch=batch,
-                data=data,
-                per_node_outputs_keys=per_node_outputs_keys,
-                per_node_outputs_values=per_node_outputs_values,
-                batch_max_atoms=self.batch_max_atoms,
-                ignore_chunk_keys=self.ignore_chunk_keys,
-                device=self.torch_device,
-            )
+            if self.skip_chunking:
+                input_data = {
+                    k: v
+                    for k, v in batch.items()
+                    if k not in per_node_outputs_keys
+                }
+                batch_chunk = batch
+                batch_chunk_center_nodes = batch_index[0].unique()
+            else:
+                input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
+                    already_computed_nodes=already_computed_nodes,
+                    batch=batch,
+                    data=data,
+                    per_node_outputs_keys=per_node_outputs_keys,
+                    per_node_outputs_values=per_node_outputs_values,
+                    batch_max_atoms=self.batch_max_atoms,
+                    ignore_chunk_keys=self.ignore_chunk_keys,
+                    device=self.torch_device,
+                )
 
             if input_data is None:
                 return False
