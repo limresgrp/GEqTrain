@@ -37,9 +37,6 @@ def GlobalGraphModel(
         # check consistency
         assert config.get("irreps_edge_sh", irreps_edge_sh) == irreps_edge_sh
         config["irreps_edge_sh"] = irreps_edge_sh
-    
-    if initialize and AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY in dataset[0]:
-        config[AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY] = dataset[0][AtomicDataDict.GRAPH_INPUT_NUM_TYPES_KEY]
 
     layers = {
         # -- Encode --
@@ -75,7 +72,7 @@ def GlobalGraphModel(
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
                     out_field=AtomicDataDict.NODE_ATTRS_KEY,
-                    out_irreps=o3.Irreps(f"{config.get('embedding_dim', config.get('node_attrs_embedding_dim', 8))}x0e"),
+                    out_irreps=None,
                     resnet=True,
                 ),
             ),
