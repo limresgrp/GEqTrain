@@ -86,13 +86,14 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "silu": torch.nn.functional.silu,
             "ssp": ShiftedSoftPlusModule,
             "selu": torch.nn.functional.selu,
+            "relu": torch.nn.functional.relu,
         }[mlp_nonlinearity]
 
         nonlin_const = 1.0
         if nonlinearity is not None:
             if mlp_nonlinearity == "ssp":
                 nonlin_const = normalize2mom(ShiftedSoftPlus).cst
-            elif mlp_nonlinearity == "selu":
+            elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu":
                 nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
             else:
                 nonlin_const = normalize2mom(nonlinearity).cst
@@ -113,20 +114,25 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
         if bias is not None:
             has_bias = True
-        
+
         sequential_dict = OrderedDict()
 
         if self.use_layer_norm:
             sequential_dict['norm'] = torch.nn.LayerNorm(dimensions[0])
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
-            lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)
+            is_last_layer = num_layers - 1 == layer
+            if is_last_layer and self.use_norm_layer:
+                  lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)
+            elif layer == 0 and self.use_norm_layer:
+                lin_layer = torch.nn.Linear(h_in, h_out, bias=False)
+            else:
+                lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)
 
             # Apply weight normalization if specified
             if self.use_weight_norm:
                 lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
 
-            is_last_layer = num_layers - 1 == layer
             if (nonlinearity is not None) and (not is_last_layer):
                 if mlp_nonlinearity == 'ssp':
                     non_lin_instance = ShiftedSoftPlusModule()
@@ -134,13 +140,15 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     non_lin_instance = torch.nn.SiLU()
                 elif mlp_nonlinearity == "selu":
                     non_lin_instance = torch.nn.SELU()
+                elif mlp_nonlinearity == "relu":
+                    non_lin_instance = torch.nn.ReLU()
                 elif mlp_nonlinearity:
                     raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
 
                 with torch.no_grad():
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
-                
+
                 layers = [
                         ("linear", lin_layer),
                         ("activation", non_lin_instance),
@@ -152,7 +160,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, 1. / sqrt(float(h_in)))
                 sequential_dict[f"{layer}"] = lin_layer
-        
+
         last = -1
         if dropout is not None:
             assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"

@@ -111,14 +111,16 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             device=features.device
         )
 
-        if self.has_inv_out:
-            out_features[:, :self.n_scalars_out] += self.inv_readout(features[:, :self.n_scalars_in])
+        if self.has_inv_out: # invariant output may be present or not
+            out_features[:, :self.n_scalars_out] += self.inv_readout(features[:, :self.n_scalars_in]) # normal mlp on scalar component if present
 
+        # vectorial handling
         if self.has_eq_out and self.reshape_in is not None:
             eq_features = self.reshape_in(features[:, self.n_scalars_in:])
-            if self.eq_has_internal_weights:
+            if self.eq_has_internal_weights: # eq linear layer with its own inner weights
                 eq_features = self.eq_readout(eq_features)
             else:
+                # else the weights are computed va mlp on scalars
                 weights = self.weights_emb(features[:, :self.n_scalars_in])
                 eq_features = self.eq_readout(eq_features, weights)
             out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)

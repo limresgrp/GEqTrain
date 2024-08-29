@@ -301,11 +301,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
         self.register_buffer("_zero", torch.as_tensor(0.0))
 
-        self.irreps_out.update(
-            {
-                self.out_field: self.out_irreps
-            }
-        )
+        self.irreps_out.update({self.out_field: self.out_irreps})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
@@ -530,7 +526,7 @@ class InteractionLayer(torch.nn.Module):
             # this is because the 2 body latent is mixed in with the first layer
             # in terms of code
             generate_n_weights += env_weighter.weight_numel
-        
+
         # FiLM layer for conditioning on graph input features
         self.film = None
         self.graph_conditioning_field = graph_conditioning_field
@@ -728,7 +724,7 @@ class InteractionLayer(torch.nn.Module):
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
-        
+
         local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
 
