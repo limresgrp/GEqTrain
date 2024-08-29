@@ -1,8 +1,6 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-import os
-# os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 import inspect
 import logging
 import wandb
@@ -1259,7 +1257,14 @@ class Trainer:
                         self.n_train = [len(ds) - n_valid for ds, n_valid in zip(dataset.datasets, self.n_val)]
                     else:
                         logging.warn("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
-                        self.n_train = [int(0.8*len(ds)) for ds in dataset.datasets]
+                        n_total = np.array([len(ds) for ds in dataset.datasets])
+                        ones_mask = n_total == 1
+                        n_total[~ones_mask] = (0.8 * n_total[~ones_mask]).astype(int)
+                        num_ones = np.sum(ones_mask)
+                        ones = np.copy(n_total[ones_mask])
+                        ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
+                        n_total[ones_mask] = ones
+                        self.n_train = n_total
                 else:
                     self.n_train = [len(ds) for ds in dataset.datasets]
             if self.n_val is None:
