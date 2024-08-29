@@ -27,6 +27,8 @@ from .AtomicData import _process_dict
 
 
 def fix_batch_dim(arr):
+    if arr is None:
+        return None
     if len(arr.shape) == 0:
         return arr.reshape(1)
     return arr
@@ -475,7 +477,7 @@ def parse_attrs(
                     _input_type[mask] = 0
             else:
                 if val is None:
-                    _input_type = np.array([-1])
+                    val = np.array([-1])
                 _input_type = val + 1
                 mask = np.isnan(val)
                 _input_type[mask] = 0

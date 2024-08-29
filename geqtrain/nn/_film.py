@@ -36,7 +36,7 @@ class FiLMFunction(ScalarMLPFunction):
             mlp_latent_dimensions=mlp_latent_dimensions,
             mlp_output_dimension=mlp_output_dimension * 2, # weights + bias
             mlp_nonlinearity=mlp_nonlinearity,
-            use_norm_layer=True,
+            use_layer_norm=False,
             has_bias=True,
             zero_init_last_layer_weights=True,
         )

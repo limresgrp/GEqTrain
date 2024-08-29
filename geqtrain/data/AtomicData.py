@@ -36,12 +36,15 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_VECTORS_KEY,
     AtomicDataDict.EDGE_LENGTH_KEY,
     AtomicDataDict.EDGE_FEATURES_KEY,
+    AtomicDataDict.EDGE_ATTRS_KEY,
     AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
     AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
     AtomicDataDict.EDGE_CELL_SHIFT_KEY,
 }
 _DEFAULT_GRAPH_FIELDS: Set[str] = {
+    AtomicDataDict.GRAPH_ATTRS_KEY,
+    AtomicDataDict.GRAPH_OUTPUT_KEY,
 }
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)

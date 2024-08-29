@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from typing import Dict
 import torch
 import torch.nn

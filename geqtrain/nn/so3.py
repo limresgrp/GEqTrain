@@ -205,6 +205,10 @@ class SO3_LayerNorm(torch.nn.Module):
             torch.Tensor: Output tensor after linear transformation and optional bias addition.
         '''
 
+        orig_shape = x.shape
+        if len(orig_shape) == 2:
+            x = x.unsqueeze(-1)
+
         out = []
         start = 0
         l_start = 0
@@ -224,7 +228,7 @@ class SO3_LayerNorm(torch.nn.Module):
 
             feature_norm = torch.mean(feature_norm, dim=2, keepdim=True)    # [N, 1, 1]
             # Feattures whose feature_norm is < 1.e-3 are not normalized (thus they are let die)
-            feature_norm = torch.clamp_max_((feature_norm + self.eps).pow(-0.5) * self.l_dim_norm, 1.e-3)
+            feature_norm = (feature_norm + self.eps).pow(-0.5) * self.l_dim_norm
             feature = feature * feature_norm
 
             feature = rearrange(feature, 'b l (m i) -> b m (i l)', m=self.mul, l=_l_dims[0], i=len(_l_dims))
@@ -237,6 +241,8 @@ class SO3_LayerNorm(torch.nn.Module):
         if self.bias is not None:
             out[..., :sum(self.l_dims[0])] += self.bias.unsqueeze(0)
 
+        if out.shape != orig_shape:
+            out = out.reshape(*orig_shape)
         return out
 
     def __repr__(self):

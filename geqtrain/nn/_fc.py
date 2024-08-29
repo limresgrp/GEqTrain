@@ -2,8 +2,7 @@
 """
 
 import torch
-from torch import _weight_norm, norm_except_dim
-from torch import fx
+from torch.nn.utils import weight_norm
 from typing import List, Optional
 from math import sqrt
 from collections import OrderedDict
@@ -22,7 +21,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             out_features (int): The number of output features from the MLP.
             use_weight_norm (bool): Flag indicating whether weight normalization is used.
             dim_weight_norm (int): Dimension along which to apply weight normalization.
-            use_norm_layer (bool): Flag indicating whether normalization layers are used.
+            use_layer_norm (bool): Flag indicating whether normalization layers are used.
 
         Methods:
             __init__: Initializes the MLP with the specified parameters.
@@ -33,7 +32,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             mlp_latent_dimensions (List[int]): List of dimensions for the hidden layers.
             mlp_output_dimension (Optional[int]): Dimension of the output of the MLP.
             mlp_nonlinearity (Optional[str]): Type of non-linearity to use ('silu', 'ssp', 'selu', or None).
-            use_norm_layer (bool): Whether to use layer normalization.
+            use_layer_norm (bool): Whether to use layer normalization.
             use_weight_norm (bool): Whether to use weight normalization.
             dim_weight_norm (int): Dimension along which to apply weight normalization.
             has_bias (bool): Whether the linear layers have bias.
@@ -51,7 +50,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 mlp_latent_dimensions=[256, 256],
                 mlp_output_dimension=10,
                 mlp_nonlinearity='silu',
-                use_norm_layer=True,
+                use_layer_norm=True,
                 use_weight_norm=True,
                 dim_weight_norm=1,
                 has_bias=True,
@@ -63,7 +62,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
     in_features: int
     out_features: int
-    use_norm_layer: bool
+    use_layer_norm: bool
     use_weight_norm: bool
     dim_weight_norm: int
 
@@ -73,8 +72,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
         mlp_nonlinearity: Optional[str] = "silu",
-        use_norm_layer: bool = False,
-        use_weight_norm: bool = False,
+        use_layer_norm: bool = False,
+        use_weight_norm: bool = True,
         dim_weight_norm: int = 0,
         has_bias: bool = False,
         bias: Optional[List] = None,
@@ -110,15 +109,22 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.out_features = dimensions[-1]
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
-        self.use_norm_layer = use_norm_layer
+        self.use_layer_norm = use_layer_norm
 
-        sequential_dict = OrderedDict()
-        
         if bias is not None:
             has_bias = True
+        
+        sequential_dict = OrderedDict()
+
+        if self.use_layer_norm:
+            sequential_dict['norm'] = torch.nn.LayerNorm(dimensions[0])
 
         for layer, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
             lin_layer = torch.nn.Linear(h_in, h_out, bias=has_bias)
+
+            # Apply weight normalization if specified
+            if self.use_weight_norm:
+                lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
 
             is_last_layer = num_layers - 1 == layer
             if (nonlinearity is not None) and (not is_last_layer):
@@ -135,13 +141,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                     lin_layer.weight = lin_layer.weight.normal_(0, nonlin_const / sqrt(float(h_in)))
                 
-                layers = []
-                if self.use_norm_layer:
-                    layers.append('norm', torch.nn.LayerNorm(h_in))
-                layers.extend([
+                layers = [
                         ("linear", lin_layer),
                         ("activation", non_lin_instance),
-                ])
+                ]
                 sequential_dict[f"{layer}_activated"] = torch.nn.Sequential(OrderedDict(layers))
 
             else:
