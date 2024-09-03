@@ -6,19 +6,24 @@ import torch.nn.functional as F
 from typing import Optional, List, Tuple, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
-
 from einops import rearrange
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin, SO3_Linear, SO3_LayerNorm, ScalarMLPFunction
-from geqtrain.utils.tp_utils import tp_path_exists
+from geqtrain.nn import (
+    GraphModuleMixin,
+    SO3_LayerNorm,
+    ScalarMLPFunction,
+)
+from geqtrain.nn.allegro import (
+    Linear,
+    Contracter,
+    MakeWeightedChannels,
+)
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
 from geqtrain.utils._global_options import DTYPE
-
-from geqtrain.nn.allegro import Contracter, MakeWeightedChannels
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
 
@@ -455,10 +460,11 @@ class InteractionLayer(torch.nn.Module):
         self.env_norm = SO3_LayerNorm(
             env_embed_irreps,
         )
-        self.env_linear = SO3_Linear(
+        self.env_linear = Linear(
             env_embed_irreps,
             env_embed_irreps,
-            bias=True,
+            internal_weights=True,
+            shared_weights=True,
         )
 
         self.product, self.reshape_in_module = None, None
@@ -544,10 +550,11 @@ class InteractionLayer(torch.nn.Module):
         _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
         parent._features_n_scalar_outs.append(_features_n_scalar_outs)
 
-        self.linear = SO3_Linear(
+        self.linear = Linear(
             full_out_irreps,
             linear_out_irreps,
-            bias=True,
+            internal_weights=True,
+            shared_weights=True,
         )
 
         if self.layer_index == 0:
