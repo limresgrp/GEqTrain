@@ -15,6 +15,7 @@ from .config import Config
 from .output import Output
 from ._cuda_utils import clean_cuda
 from ._hooks import ForwardHookHandler, print_stats
+from .grokfast import gradfilter_ma, gradfilter_ema
 
 __all__ = [
     instantiate_from_cls_name,
@@ -31,4 +32,6 @@ __all__ = [
     clean_cuda,
     ForwardHookHandler,
     print_stats,
+    gradfilter_ma,
+    gradfilter_ema,
 ]
