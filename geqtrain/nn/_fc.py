@@ -12,17 +12,17 @@ from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
 
 
 def select_nonlinearity(nonlinearity):
-        if nonlinearity == 'ssp':
-            non_lin_instance = ShiftedSoftPlusModule()
-        elif nonlinearity == "silu":
-            non_lin_instance = torch.nn.SiLU()
-        elif nonlinearity == "selu":
-            non_lin_instance = torch.nn.SELU()
-        elif nonlinearity == "relu":
-            non_lin_instance = torch.nn.ReLU()
-        elif nonlinearity:
-            raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
-        return non_lin_instance
+    if nonlinearity == 'ssp':
+        non_lin_instance = ShiftedSoftPlusModule()
+    elif nonlinearity == "silu":
+        non_lin_instance = torch.nn.SiLU()
+    elif nonlinearity == "selu":
+        non_lin_instance = torch.nn.SELU()
+    elif nonlinearity == "relu":
+        non_lin_instance = torch.nn.ReLU()
+    elif nonlinearity:
+        raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
+    return non_lin_instance
 
 
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
@@ -95,7 +95,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         dropout: Optional[float] = None,
     ):
         super().__init__()
-        
+
         dimensions = (
             ([mlp_input_dimension] if mlp_input_dimension is not None else [])
             + mlp_latent_dimensions
@@ -150,7 +150,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                         (f"linear_{layer_index}", lin_layer),
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
-            
+
             with torch.no_grad():
                 if is_last_layer:
                     if has_bias and bias is not None:
@@ -160,10 +160,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                 lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
 
-            # Apply weight normalization if specified
+            # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:
                 lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
-            
+
             for module in modules:
                 module_name, mod = module
                 sequential_dict[module_name] = mod

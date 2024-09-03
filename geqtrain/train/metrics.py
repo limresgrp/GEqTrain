@@ -13,7 +13,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.train.utils import parse_dict
 from torch_runstats import RunningStats, Reduction
 
-from ._loss import find_loss_function
+from ._loss import instanciate_loss_function
 from ._key import ABBREV
 
 
@@ -88,7 +88,7 @@ class Metrics:
                     kwargs.pop("functional")
 
                     # by default, report a scalar that is mae and rmse over all component
-                    loss_func = find_loss_function(func, func_params)
+                    loss_func = instanciate_loss_function(func, func_params)
                     self.funcs[key][param_hash] = loss_func
                     reduction = getattr(loss_func, "reduction", Reduction.MEAN)
                     self.kwargs[key][param_hash] = dict(reduction=reduction)

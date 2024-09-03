@@ -13,7 +13,10 @@ from geqtrain.data import AtomicDataDict
 
 
 class SimpleLoss:
-    """wrapper to compute weighted loss function
+    """
+    wrapper to torch.nn loss function; computes weighted loss function
+
+    if "ignore_nan" not provided in yaml then NaNs will propagate as normal.
 
     Args:
 
@@ -34,21 +37,19 @@ class SimpleLoss:
         params: dict = {},
     ):
 
+        self.func_name = func_name
         for key, value in params.items():
             setattr(self, key, value)
 
-        func, _ = instantiate_from_cls_name(
+        # instanciates torch.nn loss func
+        self.func, _ = instantiate_from_cls_name(
             torch.nn,
             class_name=func_name,
             prefix="",
             positional_args=dict(reduction="none"),
             optional_args=params,
             all_args={},
-
         )
-
-        self.func_name = func_name
-        self.func = func
 
     def __call__(
         self,
@@ -164,18 +165,18 @@ class PerSpeciesLoss(SimpleLoss):
             return per_species_loss.mean()
 
 
-def find_loss_function(name: str, params):
+def instanciate_loss_function(name: str, params):
     """
-    Search for loss functions in this module     instanciates the loss obj
-
-    If the name starts with PerSpecies, rMSELosseturn the PerSpeciesLoss instance
+    Search for loss functions in this module
+    instanciates the loss obj
+    If the name starts with PerSpecies, MSELoss return the PerSpeciesLoss instance
     """
 
     wrapper_list = dict(
         perspecies=PerSpeciesLoss,
     )
 
-    if isinstance(name, str): #  name is funct
+    if isinstance(name, str): # name is function
         for key in wrapper_list:
             if name.lower().startswith(key):
                 logging.debug(f"create loss instance {wrapper_list[key]}")

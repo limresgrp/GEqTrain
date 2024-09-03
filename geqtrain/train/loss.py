@@ -1,10 +1,10 @@
 import re
-from typing import Union, List
+from typing import Union, List, Dict
 
 import torch.nn
 
 from geqtrain.train.utils import parse_dict
-from ._loss import find_loss_function
+from ._loss import instanciate_loss_function
 from ._key import ABBREV
 
 from torch_runstats import RunningStats, Reduction
@@ -35,7 +35,6 @@ class Loss:
         - takes "reduction=none" as init argument
         - uses prediction tensor and reference tensor for its call functions,
         - outputs a vector with the same shape as pred/ref
-
     """
 
     def __init__(
@@ -45,19 +44,24 @@ class Loss:
     ):
 
         self.coeff_schedule = coeff_schedule
-        self.coeffs = {}
-        self.funcs = {}
-        self.keys = []
+        self.coeffs: Dict  = {}
+        self.funcs: Dict = {} # call key-associated (custom) callable defined in _loss.py. Classes in _loss.py acts as wrapper of torch.nn loss func (to provide further options)
+        self.keys: List = [] # loss names
 
+        self._parse_losses_from_yaml(coeffs)
+
+        self.keys = list(self.coeffs.keys()) # casting to list is required for pickling
+
+    def _parse_losses_from_yaml(self, coeffs):
         if isinstance(coeffs, str):
-            self.register_coeffs(key=coeffs, coeff=1.0, func="MSELoss", func_params={})
+            self.register_coeffs_and_loss(key=coeffs, coeff=1.0, func="MSELoss", func_params={})
         elif isinstance(coeffs, list):
             for elem in coeffs:
                 if isinstance(elem, str):
-                    self.register_coeffs(key=elem, coeff=1.0, func="MSELoss", func_params={})
+                    self.register_coeffs_and_loss(key=elem, coeff=1.0, func="MSELoss", func_params={})
                 elif isinstance(elem, dict):
                     for key, coeff, func, func_params in parse_dict(elem):
-                        self.register_coeffs(key=key, coeff=coeff, func=func, func_params=func_params)
+                        self.register_coeffs_and_loss(key=key, coeff=coeff, func=func, func_params=func_params)
                 else:
                     raise NotImplementedError(
                         f"loss_coeffs can only a list of str or dict. got {type(coeffs)}"
@@ -70,30 +74,38 @@ class Loss:
                 f"loss_coeffs can only be str, list and dict. got {type(coeffs)}"
             )
 
-        for key, coeff in self.coeffs.items():
-            self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
-            self.keys += [key]
-
     def __call__(self, pred: dict, ref: dict):
-
+        '''
+        returns:
+        total loss for this batch
+        hash map of non-weighted contributions to loss in this batch
+        '''
         loss = 0.0
-        contrib = {}
-        for key in self.keys: # for k in losses keys that have to be evaluated
-            _loss = self.funcs[key]( # call its associated func
+        contrib = {} # hash map of non-weighted contributions to loss in this batch
+        for key in self.keys: # for k in "losses-keys" (i.e. the losses names as listed in yaml) that have to be evaluated
+            _loss = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
                 pred=pred,
                 ref=ref,
-                key= self.remove_suffix(key),
+                key=self.remove_suffix(key),
                 mean=True,
             )
             contrib[key] = _loss
-            loss = loss + self.coeffs[key] * _loss # total_loss += weight_i * loss_i
+            loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
 
         return loss, contrib
 
-    def register_coeffs(self, key: str, coeff: float, func: str, func_params: dict = {}):
+    def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = {}):
+        '''
+        given the loss-func-name given in yaml, it registers the associated loss-coeff in self.coeffs[key] dict
+        where key is the loss-func-name given in yaml
+        it also stores the associated callable loss function in self.funcs[key]
+
+        Args:
+        func_params: Dict dictionary of kwarded args to be passed
+        '''
         key = self.suffix_key(key)
-        self.coeffs[key] = coeff
-        self.funcs[key] = find_loss_function(func, func_params)
+        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
+        self.funcs[key] = instanciate_loss_function(func, func_params)
 
     def suffix_key(self, key):
         suffix_id = 0
@@ -119,7 +131,7 @@ class LossStat:
 
     Args:
 
-    keys (null): redundant argument
+    loss_instance: the instance of Loss instancitaed by the trainer
 
     """
 
@@ -129,6 +141,7 @@ class LossStat:
                 dim=tuple(), reduction=Reduction.MEAN, ignore_nan=False
             )
         }
+        # if the wrapper of the torch.nn does not have the "ignore_nan" field set (i.e. not provided in yaml then it is False)
         self.ignore_nan = {}
         if loss_instance is not None:
             for key, func in loss_instance.funcs.items():

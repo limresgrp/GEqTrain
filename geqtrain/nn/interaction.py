@@ -18,7 +18,7 @@ from geqtrain.utils.tp_utils import tp_path_exists
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
 from geqtrain.utils._global_options import DTYPE
 
-from geqtrain.nn.allegro import Contracter, MakeWeightedChannels
+from geqtrain.nn.allegro import Contracter, MakeWeightedChannels, Linear
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
 
@@ -455,10 +455,17 @@ class InteractionLayer(torch.nn.Module):
         self.env_norm = SO3_LayerNorm(
             env_embed_irreps,
         )
-        self.env_linear = SO3_Linear(
+        # self.env_linear = SO3_Linear(
+        #     env_embed_irreps,
+        #     env_embed_irreps,
+        #     bias=True,
+        # )
+
+        self.env_linear = Linear(
             env_embed_irreps,
             env_embed_irreps,
-            bias=True,
+            shared_weights=True,
+            internal_weights=True,
         )
 
         self.product, self.reshape_in_module = None, None
@@ -544,10 +551,18 @@ class InteractionLayer(torch.nn.Module):
         _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
         parent._features_n_scalar_outs.append(_features_n_scalar_outs)
 
-        self.linear = SO3_Linear(
+        # self.linear = SO3_Linear(
+        #     full_out_irreps,
+        #     linear_out_irreps,
+        #     bias=True,
+        # )
+
+        self.linear = Linear(
             full_out_irreps,
             linear_out_irreps,
-            bias=True,
+            shared_weights=True,
+            internal_weights=True,
+            pad_to_alignment=parent.pad_to_alignment,
         )
 
         if self.layer_index == 0:

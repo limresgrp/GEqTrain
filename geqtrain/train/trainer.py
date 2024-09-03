@@ -272,11 +272,10 @@ class Trainer:
             prefix="loss", # look in yaml for all things that begin with "loss_*"
             positional_args=dict(coeffs=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
             # and from these it creates loss funcs
-            all_args=self.kwargs, # self.kwargs are all the things in yaml... why...
+            all_args=self.kwargs, # self.kwargs are all the things in yaml...
         )
         self.loss_stat = LossStat(self.loss)
 
-        #! what do we train on?
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
             if set(train_on_keys) != set(self.train_on_keys):
@@ -303,7 +302,6 @@ class Trainer:
         - optimizer
         - scheduler
         - early stopping conditions
-
         '''
 
         # set up correctly wd
@@ -400,7 +398,7 @@ class Trainer:
         returns self.as_dict
         '''
         return self.as_dict(state_dict=False, training_progress=False, kwargs=False)
-    
+
     @property
     def dataset_params(self):
         return self.dataset_train.datasets[0].config
@@ -865,23 +863,7 @@ class Trainer:
         loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
         return out, loss, loss_contrib
 
-    def batch_step(self, data, validation=False):
-
-        # no need to have gradients from old steps taking up memory
-        self.optim.zero_grad(set_to_none=True)
-
-        cm = contextlib.nullcontext()
-        if validation:
-            self.model.eval()
-            if not self.model_requires_grads:
-                cm = torch.no_grad()
-        else:
-            self.model.train()
-
-        precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if self.mixed_precision else contextlib.nullcontext()
-
-        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
-
+    def remove_node_centers_for_NaN_targets(self, batch):
         # - Remove edges of atoms whose result is NaN - #
         per_node_outputs_keys = []
         for key in self.loss.coeffs:
@@ -904,6 +886,28 @@ class Trainer:
             if per_node_output_key in batch:
                 per_node_outputs_values.append(batch.get(per_node_output_key))
 
+        return batch, per_node_outputs_keys, per_node_outputs_values
+
+    def get_cm(self, validation):
+        if self.model_requires_grads or not validation:
+            return contextlib.nullcontext()
+        return torch.no_grad()
+
+    def batch_step(self, data, validation=False):
+
+        self.optim.zero_grad(set_to_none=True)
+
+        cm = self.get_cm(validation)
+        precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if self.mixed_precision else contextlib.nullcontext()
+
+        if validation:
+            self.model.eval()
+        else:
+            self.model.train()
+
+        # AtomicDataDict: dict taken as input from *all* frwds
+        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device))
+        batch, per_node_outputs_keys, per_node_outputs_values = self.remove_node_centers_for_NaN_targets(batch)
         batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
         num_batch_center_nodes = len(batch_index[0].unique())
         already_computed_nodes = None
@@ -965,12 +969,16 @@ class Trainer:
                 self.optim.step()
                 # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
 
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
+                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
                     self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
 
-            # evaluate ending condition
 
-            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+            # evaluate ending condition
+            if self.skip_chunking:
+                return True
+
+            # if chunking is active -> if whole struct has been processed then batch is over
+            if already_computed_nodes is None:
                 if len(batch_chunk_center_nodes) < num_batch_center_nodes:
                     already_computed_nodes = batch_chunk_center_nodes
             elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:

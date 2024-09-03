@@ -163,7 +163,8 @@ def _process_dict(kwargs, ignore_fields=[]):
             and v.shape[0] != kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
         ):
             raise ValueError(
-                f"{k} is a edge field but has the wrong dimension {v.shape}"
+                f"{k} is a edge field but has the wrong dimension {v.shape}, \
+                    (first dimension should be {kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]})"
             )
         elif k in _GRAPH_FIELDS:
             if num_frames > 1 and v.shape[0] != num_frames:
