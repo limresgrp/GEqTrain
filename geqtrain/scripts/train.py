@@ -4,6 +4,7 @@
 """ Train a network."""
 import logging
 import argparse
+import shutil
 import warnings
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
@@ -106,6 +107,8 @@ def fresh_start(config):
     else:
         from geqtrain.train import Trainer
         trainer = Trainer(model=None, **dict(config))
+    
+    shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
 
     # what is this? to update wandb data?
     config.update(trainer.params)
