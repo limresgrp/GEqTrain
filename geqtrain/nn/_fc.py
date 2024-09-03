@@ -12,17 +12,17 @@ from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
 
 
 def select_nonlinearity(nonlinearity):
-        if nonlinearity == 'ssp':
-            non_lin_instance = ShiftedSoftPlusModule()
-        elif nonlinearity == "silu":
-            non_lin_instance = torch.nn.SiLU()
-        elif nonlinearity == "selu":
-            non_lin_instance = torch.nn.SELU()
-        elif nonlinearity == "relu":
-            non_lin_instance = torch.nn.ReLU()
-        elif nonlinearity:
-            raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
-        return non_lin_instance
+    if nonlinearity == 'ssp':
+        non_lin_instance = ShiftedSoftPlusModule()
+    elif nonlinearity == "silu":
+        non_lin_instance = torch.nn.SiLU()
+    elif nonlinearity == "selu":
+        non_lin_instance = torch.nn.SELU()
+    elif nonlinearity == "relu":
+        non_lin_instance = torch.nn.ReLU()
+    elif nonlinearity:
+        raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
+    return non_lin_instance
 
 
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
