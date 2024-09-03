@@ -256,6 +256,10 @@ class AtomicInMemoryDataset(AtomicDataset):
                 )
             num_examples = next(iter(num_examples))
 
+            # Check that the number of frames is consistent for all node and edge fields
+            assert all([len(v) == num_examples for v in node_fields.values() if v is not None])
+            assert all([len(v) == num_examples for v in edge_fields.values() if v is not None])
+
             include_frames = self.include_frames
             if include_frames is None:
                 include_frames = range(num_examples)
@@ -436,7 +440,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
         edge_fields = {
             k: v for k, v in mapped.items() 
-            if (k in _EDGE_FIELDS) and (k not in fixed_fields.keys())
+            if (k in _EDGE_FIELDS.union([AtomicDataDict.EDGE_INDEX_KEY])) and (k not in fixed_fields.keys())
         }
 
         graph_fields = {
