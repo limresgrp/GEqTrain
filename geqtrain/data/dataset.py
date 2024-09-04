@@ -221,19 +221,21 @@ class AtomicInMemoryDataset(AtomicDataset):
             fixed_fields.update(self.extra_fixed_fields)
 
             # node fields
-            node_fields = parse_attrs(
+            node_fields,fixed_fields = parse_attrs(
                 _attributes=self.node_attributes,
-                _fields=node_fields,
+                _fields=node_fields ,
+                _fixed_fields=fixed_fields,
             )
 
             # edge fields
-            edge_fields = parse_attrs(
+            edge_fields,fixed_fields = parse_attrs(
                 _attributes=self.edge_attributes,
                 _fields=edge_fields,
+                _fixed_fields=fixed_fields,
             )
 
             # graph fields
-            graph_fields = parse_attrs(
+            graph_fields, _ = parse_attrs(
                 _attributes=self.graph_attributes,
                 _fields=graph_fields,
             )
@@ -410,12 +412,14 @@ class NpzDataset(AtomicInMemoryDataset):
 
     def get_data(self):
 
+        # loads npz and get all keys
+
         print(self.raw_dir + "/" + self.raw_file_names[0])
         data = np.load(self.raw_dir + "/" + self.raw_file_names[0], allow_pickle=True)
 
-        # only the keys explicitly mentioned in the yaml file will be parsed
+        # only the keys explicitly mentioned in the yaml file will be parsed (registered via register fields section)
         keys = set(list(self.key_mapping.keys()))
-        keys.update(_NODE_FIELDS)
+        keys.update(_NODE_FIELDS) # _*_FIELDS is a set of str that are registered in the code
         keys.update(_EDGE_FIELDS)
         keys.update(_GRAPH_FIELDS)
         keys.update(list(self.extra_fixed_fields.keys()))
@@ -432,14 +436,14 @@ class NpzDataset(AtomicInMemoryDataset):
             k: v for k, v in mapped.items() if self.node_attributes.get(k, {}).get('fixed', False)
         }
         fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_id)
-        
+
         node_fields = {
-            k: v for k, v in mapped.items() 
+            k: v for k, v in mapped.items()
             if (k in _NODE_FIELDS) and (k not in fixed_fields.keys())
         }
 
         edge_fields = {
-            k: v for k, v in mapped.items() 
+            k: v for k, v in mapped.items()
             if (k in _EDGE_FIELDS.union([AtomicDataDict.EDGE_INDEX_KEY])) and (k not in fixed_fields.keys())
         }
 
@@ -459,10 +463,16 @@ class NpzDataset(AtomicInMemoryDataset):
 def parse_attrs(
     _attributes: Dict,
     _fields: Dict,
+    _fixed_fields: Dict = {},
 ) -> Dict[str, Any]:
     for key, options in _attributes.items():
-        if key in _fields:
-            val: Optional[np.ndarray] = _fields[key]
+        if key in _fields or key in _fixed_fields:
+
+            if key in _fields:
+                val: Optional[np.ndarray] = _fields[key]
+            elif key in _fixed_fields:
+                val: Optional[np.ndarray] = _fixed_fields[key]
+
             num_types = int(options['num_types'])
             if 'min_value' in options or 'max_value' in options:
                 bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
@@ -486,6 +496,10 @@ def parse_attrs(
                 mask = np.isnan(val)
                 _input_type[mask] = 0
             # 'unkown' token has value 0, while defined tokens go from 1 to 'num_types' (inclusive)
-            _fields[key] = torch.from_numpy(_input_type).long()
-    
-    return _fields
+            if key in _fields:
+                _fields[key] = torch.from_numpy(_input_type).long()
+            elif key in _fixed_fields:
+                _fixed_fields[key] = torch.from_numpy(_input_type).long()
+
+
+    return _fields, _fixed_fields

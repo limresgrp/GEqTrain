@@ -24,6 +24,7 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
 
+        irreps_out = {}
         attributes_to_embed = {} # k: str field name, v: nn.Embedding layer name
         output_embedding_dim = 0
         for field, values in graph_attributes.items():
@@ -36,10 +37,12 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
             output_embedding_dim += embedding_dim
 
         self.attributes_to_embed = attributes_to_embed
-        irreps_out = {AtomicDataDict.GRAPH_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])}
+        if output_embedding_dim:
+            irreps_out = {AtomicDataDict.GRAPH_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])}
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        if not self.attributes_to_embed: return data
         out = []
         for attribute_name, emb_layer_name in self.attributes_to_embed.items():
             x = data[attribute_name].squeeze()
