@@ -156,7 +156,8 @@ def _process_dict(kwargs, ignore_fields=[]):
             and v.shape[0] != kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]
         ):
             raise ValueError(
-                f"{k} is a node field but has the wrong dimension {v.shape}"
+                f"{k} is a node field but has the wrong dimension {v.shape} \
+                  (first dimension should be {kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]})"
             )
         elif (
             k in _EDGE_FIELDS
@@ -169,7 +170,10 @@ def _process_dict(kwargs, ignore_fields=[]):
             )
         elif k in _GRAPH_FIELDS:
             if num_frames > 1 and v.shape[0] != num_frames:
-                raise ValueError(f"Wrong shape for graph property {k}")
+                str_msg = f"Wrong shape for graph property {k}"
+                if num_frames > 1: str_msg += "num_frames is greater 1, while it should not"
+                if v.shape[0] != num_frames: str_msg += f"{v.shape[0]} != {num_frames}, but they should be equal"
+                raise ValueError(str_msg)
 
 
 class AtomicData(Data):
