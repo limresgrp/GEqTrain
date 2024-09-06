@@ -57,7 +57,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.n_scalars_in = in_irreps.ls.count(0)
         assert self.n_scalars_in > 0
 
-        readout_latent_kwargs['zero_init_last_layer_weights'] = True
+        readout_latent_kwargs['use_layer_norm'] = True
         readout_latent_kwargs.pop('dropout', None)
         self.n_scalars_out = out_irreps.ls.count(0)
         if self.n_scalars_out > 0:

@@ -156,7 +156,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     if has_bias and bias is not None:
                         lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
                     if zero_init_last_layer_weights:
-                        norm_const = norm_const * 1.e-3
+                        norm_const = norm_const * 1.e-1
                 # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
                 lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
 
