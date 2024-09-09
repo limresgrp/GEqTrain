@@ -56,15 +56,6 @@ DEFAULT_CONFIG = dict(
     grad_anomaly_mode=False,
     fine_tune=False,
     append=False,
-    _jit_bailout_depth=2,  # avoid 20 iters of pain, see https://github.com/pytorch/pytorch/issues/52286
-    # Quote from eelison in PyTorch slack:
-    # https://pytorch.slack.com/archives/CDZD1FANA/p1644259272007529?thread_ts=1644064449.039479&cid=CDZD1FANA
-    # > Right now the default behavior is to specialize twice on static shapes and then on dynamic shapes.
-    # > To reduce warmup time you can do something like setFusionStrartegy({{FusionBehavior::DYNAMIC, 3}})
-    # > ... Although we would wouldn't really expect to recompile a dynamic shape fusion in a model,
-    # > provided broadcasting patterns remain fixed
-    # We default to DYNAMIC alone because the number of edges is always dynamic,
-    # even if the number of atoms is fixed:
     _jit_fusion_strategy=[("DYNAMIC", 3)],
 )
 

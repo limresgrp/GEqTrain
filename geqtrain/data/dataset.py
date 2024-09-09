@@ -151,7 +151,8 @@ class AtomicInMemoryDataset(AtomicDataset):
         super().__init__(root=root)
         if self.data is None:
             self.data, self.fixed_fields, include_frames = torch.load(
-                self.processed_paths[0]
+                self.processed_paths[0],
+                weights_only=False,
             )
             if not np.all(include_frames == self.include_frames):
                 raise ValueError(

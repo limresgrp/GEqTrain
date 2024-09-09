@@ -2,7 +2,7 @@
 """
 
 import torch
-from torch.nn.utils import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 from typing import List, Optional
 from math import sqrt
 from collections import OrderedDict
