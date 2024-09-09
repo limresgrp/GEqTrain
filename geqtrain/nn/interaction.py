@@ -404,13 +404,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         data[self.out_field] = out_features
         return data
 
-    def normalize_weights(self) -> None:
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                normalized_param = F.normalize(param, p=2, dim=0)
-                # Assign normalized parameter back to the model
-                param.data.copy_(normalized_param)
-
 
 @compile_mode("script")
 class InteractionLayer(torch.nn.Module):

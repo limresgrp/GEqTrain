@@ -164,7 +164,6 @@ def main(args=None):
     )
 
     # -- compile --
-    model.prod()
     model = _compile_for_deploy(model)
     logging.info("Compiled & optimized model.")
 

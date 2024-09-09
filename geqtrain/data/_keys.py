@@ -4,12 +4,7 @@ This is a seperate module to compensate for a TorchScript bug that can only reco
 """
 
 import sys
-from typing import List
-
-if sys.version_info[1] >= 8:
-    from typing import Final
-else:
-    from typing_extensions import Final
+from typing import List, Final
 
 """
      - Fixed field means that it is system-dependent and not batch-dependent.

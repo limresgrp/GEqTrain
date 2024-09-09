@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, DistributedSampler
 
 from geqtrain.data import (
     DataLoader,
@@ -72,6 +72,15 @@ def remove_node_centers_for_NaN_targets(batch, loss_func, keep_node_types):
             per_node_outputs_values.append(batch.get(per_node_output_key))
 
     return batch, per_node_outputs_keys, per_node_outputs_values
+
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def run_inference(
     model,
@@ -334,10 +343,9 @@ class Trainer:
 
     def __init__(
         self,
-        model,
-        model_builders: Optional[list] = [],
         model_requires_grads: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        is_master: bool = True,
         seed: Optional[int] = None,
         dataset_seed: Optional[int] = None,
         noise: Optional[float] = None,
@@ -391,21 +399,46 @@ class Trainer:
         **kwargs,
     ):
 
-        self.is_wandb_trainer = isinstance(self, TrainerWandB)
-
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
+        self.model = None
         logging.debug("* Initialize Trainer")
-
-        # set model (default None)
-        self.model = model
 
         # --- write all self.init_keys in self AND in _local_kwargs
         _local_kwargs = {}
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
+
+        # --- get I/O handler
+        output = Output.get_output(dict(**_local_kwargs, **kwargs))
+        self.output = output
+
+        self.logfile           = output.open_logfile("log", propagate=True)
+        self.epoch_log         = output.open_logfile("metrics_epoch.csv", propagate=False)
+        self.init_epoch_log    = output.open_logfile("metrics_initialization.csv", propagate=False)
+        self.batch_log = {
+            TRAIN:      output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+            VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
+        }
+
+        # add filenames if not defined
+        self.config_path       = output.generate_file("config.yaml")
+        self.best_model_path   = output.generate_file("best_model.pth")
+        self.last_model_path   = output.generate_file("last_model.pth")
+        self.trainer_save_path = output.generate_file("trainer.pth")
+
+        # --- handle randomness
+        if seed is not None:
+            set_seed(seed)
+
+        self.dataset_rng = torch.Generator()
+        if dataset_seed is not None:
+            self.dataset_rng.manual_seed(dataset_seed)
+
+        self.logger.info(f"Torch device: {self.device}")
+        self.torch_device = torch.device(self.device)
 
         # --- loss/logger printing info
         self.type_names = self.type_names or []
@@ -415,41 +448,6 @@ class Trainer:
             'type_names'   : self.type_names,
             'target_names' : self.target_names,
         }
-
-        # --- get I/O handler
-        output = Output.get_output(dict(**_local_kwargs, **kwargs))
-        self.output = output
-
-        self.logfile = output.open_logfile("log", propagate=True)
-        self.epoch_log = output.open_logfile("metrics_epoch.csv", propagate=False)
-        self.init_epoch_log = output.open_logfile("metrics_initialization.csv", propagate=False)
-        self.batch_log = {
-            TRAIN: output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
-            VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
-        }
-
-        # add filenames if not defined
-        self.best_model_path   = output.generate_file("best_model.pth")
-        self.last_model_path   = output.generate_file("last_model.pth")
-        self.trainer_save_path = output.generate_file("trainer.pth")
-        self.config_path       = self.output.generate_file("config.yaml")
-
-        # --- handle randomness
-        if seed is not None:
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.enabled = False
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-
-        self.dataset_rng = torch.Generator()
-        if dataset_seed is not None:
-            self.dataset_rng.manual_seed(dataset_seed)
-
-        self.logger.info(f"Torch device: {self.device}")
-        self.torch_device = torch.device(self.device)
 
         # --- filter node target to train on based on node type or type name
         if self.keep_type_names is not None:
@@ -479,6 +477,8 @@ class Trainer:
             all_args=self.kwargs, # self.kwargs are all the things in yaml...
         )
         self.loss_stat = LossStat(self.loss)
+        self.init_metrics()
+        self.norms = []
 
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
@@ -492,13 +492,11 @@ class Trainer:
 
         # --- load all callbacks
         self._init_callbacks         = [load_callable(callback) for callback in init_callbacks]
+        end_of_epoch_callbacks.append(load_callable(clean_cuda))
         self._end_of_epoch_callbacks = [load_callable(callback) for callback in end_of_epoch_callbacks]
-        end_of_batch_callbacks.append(load_callable(clean_cuda))
         self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
-
-        self.init() # initializes model, optimizer, scheduler, early stopping
 
     def init_objects(self):
         '''
@@ -508,21 +506,18 @@ class Trainer:
         - early stopping conditions
         '''
 
-        # set up correctly wd
-        # get all params that require grad
+        # initialize optimizer
 
+        # get all params that require grad
         param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
 
         # split them according to their shape (which implies wheter to apply wd on them or not)
-
         params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
         params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
         optim_groups = [
-            {'params': params_to_be_decayed, 'weight_decay': self.kwargs['optimizer_params']['weight_decay']},
-            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.0},
+            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.)},
+            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.},
         ]
-
-        # initialize optimizer
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -535,6 +530,7 @@ class Trainer:
         self.grads = None
 
         # initialize scheduler
+
         assert (
             self.lr_scheduler_name
             in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "none"]
@@ -685,6 +681,9 @@ class Trainer:
         filename (str): name of the file
         format (str): format of the file. yaml and json format will not save the weights.
         """
+
+        if not self.is_master:
+            return
 
         if filename is None:
             filename = self.trainer_save_path
@@ -847,12 +846,10 @@ class Trainer:
 
         return model, config
 
-    def init(self):
+    def init(self, model):
         """initialize optimizer"""
-        if self.model is None:
-            return
 
-        self.model.to(self.torch_device)
+        self.set_model(model=model)
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
         self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
@@ -889,6 +886,10 @@ class Trainer:
                 f"metrics_key may not start with {TRAIN} when report_init_validation=True"
             )
 
+    def set_model(self, model):
+        self.model = model
+        self.model.to(self.torch_device)
+
     def train(self):
 
         """Training"""
@@ -908,8 +909,6 @@ class Trainer:
             if self.iepoch == -1:
                 self.save()
 
-        self.init_metrics()
-
         hooks_handler = ForwardHookHandler(self, self.hooks)
 
         # actual train loop
@@ -922,10 +921,9 @@ class Trainer:
             callback(self)
 
         self.final_log()
-
-        hooks_handler.deregister_hooks()
-
+        
         self.save()
+        hooks_handler.deregister_hooks()
         finish_all_writes()
 
     def get_cm(self, validation):
@@ -934,15 +932,13 @@ class Trainer:
         return torch.no_grad()
 
     def batch_step(self, data, validation=False):
-
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
-
-        cm = self.get_cm(validation)
 
         if validation: self.model.eval()
         else: self.model.train()
 
+        cm = self.get_cm(validation)
         already_computed_nodes = None
         while True:
 
@@ -974,25 +970,20 @@ class Trainer:
                 loss.backward()
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-
-                # grad clipping: avoid "shocks" to the model (params) during optimization;
-                # returns norms; their expected trend is from high to low and stabilize
-                norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm)
-
-                if self.is_wandb_trainer:
-                    wandb.log({"Grad_norm": norm})
-
+                
                 if self.sanitize_gradients:
                     for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
 
+                # grad clipping: avoid "shocks" to the model (params) during optimization;
+                # returns norms; their expected trend is from high to low and stabilize
+                self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+
                 self.optim.step()
-                # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
 
                 if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
                     self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1038,13 +1029,12 @@ class Trainer:
         self.metrics.to(self.torch_device)
 
     def epoch_step(self):
-        self.model.prod(max(0, self.iepoch) % (self.prod_for + self.prod_every) < self.prod_every)
-
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
         dataloaders = [dataloaders[c] for c in categories]  # get the right dataloaders for the catagories we actually run
         self.metrics_dict = {}
         self.loss_dict = {}
+        self.norms = []
 
         for category, dataset in zip(categories, dataloaders):
             self.reset_metrics()
@@ -1135,6 +1125,9 @@ class Trainer:
         """
         save model and trainer details
         """
+        if not self.is_master:
+            return 
+
         with atomic_write_group():
             current_metrics = self.mae_dict[self.metrics_key]
             if current_metrics < self.best_metrics:
@@ -1162,12 +1155,17 @@ class Trainer:
             torch.save(self.model.state_dict(), write_to)
 
     def init_log(self):
+        if not self.is_master:
+            return
+
         if self.iepoch > 0:
             self.logger.info("! Restarting training ...")
         else:
             self.logger.info("! Starting training ...")
 
     def final_log(self):
+        if not self.is_master:
+            return
 
         self.logger.info(f"! Stop training: {self.stop_arg}")
         wall = perf_counter() - self.wall
@@ -1226,6 +1224,8 @@ class Trainer:
                     log_str[category] += f" {value:12.3g}"
                     log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
+        
+        self.norm_dict = dict(Grad_norm=self.norms)
 
         if self.iepoch == 0:
             self.init_epoch_logger.info(header)
@@ -1346,8 +1346,8 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val) == len(validation_dataset.datasets)
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
@@ -1361,6 +1361,7 @@ class Trainer:
             indexed_datasets_val.append(_dataset.index_select(val_idcs))
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
+    def set_dataloader(self, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1378,8 +1379,9 @@ class Trainer:
 
         self.dl_train = DataLoader(
             dataset=self.dataset_train,
-            shuffle=self.shuffle,  # training should shuffle
+            shuffle=(sampler is None) and self.shuffle,
             batch_size=self.batch_size,
+            sampler=sampler,
             **dl_kwargs,
         )
 
@@ -1388,6 +1390,7 @@ class Trainer:
         self.dl_val = DataLoader(
             dataset=self.dataset_val,
             batch_size=self.validation_batch_size,
+            sampler=validation_sampler,
             **dl_kwargs,
         )
 
@@ -1395,12 +1398,8 @@ class Trainer:
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
-    def end_of_epoch_log(self):
-        Trainer.end_of_epoch_log(self)
-        wandb.log(self.mae_dict)
-
-    def init(self):
-        super().init()
+    def init(self, *args, **kwargs):
+        super().init(*args, **kwargs)
 
         if not self._initialized:
             return
@@ -1411,3 +1410,37 @@ class TrainerWandB(Trainer):
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
+
+    def end_of_epoch_log(self):
+        Trainer.end_of_epoch_log(self)
+        wandb.log(self.mae_dict)
+        for k, v in self.norm_dict.items():
+            for norm in v:
+                wandb.log({k: norm})
+
+
+class DistributedTrainer(Trainer):
+
+    def init(self, rank: int, world_size: int, *args, **kwargs):
+        self.rank = rank
+        self.world_size = world_size
+
+        # Set the device for this process
+        torch.cuda.set_device(rank)
+        super().init(device=f'cuda:{rank}', is_master=rank==0, *args, **kwargs)
+    
+    def set_dataloader(self, sampler=None, validation_sampler=None):
+        sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
+        validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
+        super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
+    
+    def set_model(self, model):
+        super().set_model(model)
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        self.model = DDP(self.model, device_ids=[self.rank])
+
+
+class DistributedTrainerWandB(DistributedTrainer, TrainerWandB):
+
+    def init(self):
+        super().init()
