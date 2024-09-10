@@ -27,7 +27,6 @@ from geqtrain.utils import Config
 from geqtrain.utils._global_options import _set_global_options
 
 CONFIG_KEY: Final[str] = "config"
-NEQUIP_VERSION_KEY: Final[str] = "nequip_version"
 TORCH_VERSION_KEY: Final[str] = "torch_version"
 E3NN_VERSION_KEY: Final[str] = "e3nn_version"
 CODE_COMMITS_KEY: Final[str] = "code_commits"
@@ -40,7 +39,6 @@ TF32_KEY: Final[str] = "allow_tf32"
 
 _ALL_METADATA_KEYS = [
     CONFIG_KEY,
-    NEQUIP_VERSION_KEY,
     TORCH_VERSION_KEY,
     E3NN_VERSION_KEY,
     R_MAX_KEY,
@@ -80,12 +78,7 @@ def load_deployed_model(
         model = torch.jit.load(model_path, map_location=device, _extra_files=metadata)
     except RuntimeError as e:
         raise ValueError(
-            f"{model_path} does not seem to be a deployed NequIP model file. Did you forget to deploy it using `nequip-deploy`? \n\n(Underlying error: {e})"
-        )
-    # Confirm nequip made it
-    if metadata[NEQUIP_VERSION_KEY] == "":
-        raise ValueError(
-            f"{model_path} does not seem to be a deployed NequIP model file"
+            f"{model_path} does not seem to be a deployed model file. Did you forget to deploy it using `nequip-deploy`? \n\n(Underlying error: {e})"
         )
     # Confirm its TorchScript
     assert isinstance(model, torch.jit.ScriptModule)
@@ -109,15 +102,15 @@ def load_deployed_model(
             strategy = [e.split(",") for e in strategy.split(";")]
             strategy = [(e[0], int(e[1])) for e in strategy]
         else:
-            strategy = default_config[JIT_FUSION_STRATEGY]
-        global_config_dict["_jit_fusion_strategy"] = strategy
+            strategy = [("DYNAMIC", 3)]
+        global_config_dict[JIT_FUSION_STRATEGY] = strategy
         # JIT bailout
         # _set_global_options will check torch version
         jit_bailout: int = metadata.get(JIT_BAILOUT_KEY, "")
         if jit_bailout == "":
-            jit_bailout = default_config[JIT_BAILOUT_KEY]
+            jit_bailout = 2
         jit_bailout = int(jit_bailout)
-        global_config_dict["_jit_bailout_depth"] = jit_bailout
+        global_config_dict[JIT_BAILOUT_KEY] = jit_bailout
         # call to actually set the global options
         _set_global_options(
             global_config_dict,
@@ -150,7 +143,7 @@ def main(args=None):
         default="best_model.pth"
     )
     build_parser.add_argument(
-        "out_file",
+        "--out-file",
         help="Output file for deployed model.",
         type=pathlib.Path,
     )
@@ -171,7 +164,6 @@ def main(args=None):
     )
 
     # -- compile --
-    model.prod()
     model = _compile_for_deploy(model)
     logging.info("Compiled & optimized model.")
 

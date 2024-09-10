@@ -1,8 +1,6 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-import os
-os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 import inspect
 import logging
 import wandb
@@ -10,14 +8,20 @@ import contextlib
 from copy import deepcopy
 from os.path import isfile
 from time import perf_counter
-from typing import Callable, Optional, Union, Tuple, List
+from typing import Callable, Optional, Union, Tuple, List, Dict
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset
 
-from geqtrain.data import DataLoader, AtomicData, AtomicDataDict
+from torch.utils.data import ConcatDataset, DistributedSampler
+
+from geqtrain.data import (
+    DataLoader,
+    AtomicData,
+    AtomicDataDict,
+    _EDGE_FIELDS,
+)
 from geqtrain.utils import (
     Output,
     Config,
@@ -29,14 +33,229 @@ from geqtrain.utils import (
     atomic_write,
     finish_all_writes,
     atomic_write_group,
+    clean_cuda,
+    gradfilter_ma,
+    gradfilter_ema,
+    ForwardHookHandler,
 )
 from geqtrain.model import model_from_config
+from geqtrain.train.utils import find_matching_indices
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+
+def remove_node_centers_for_NaN_targets(batch, loss_func, keep_node_types):
+    # - Remove edges of atoms whose result is NaN - #
+    per_node_outputs_keys = []
+    if loss_func is not None:
+        for key in loss_func.coeffs:
+            if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
+                key_clean = loss_func.remove_suffix(key)
+                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
+                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+                    if keep_node_types is not None:
+                        batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_node_types)] = torch.nan
+
+                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
+                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
+                        batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    per_node_outputs_keys.append(key_clean)
+
+    per_node_outputs_values = []
+    for per_node_output_key in per_node_outputs_keys:
+        if per_node_output_key in batch:
+            per_node_outputs_values.append(batch.get(per_node_output_key))
+
+    return batch, per_node_outputs_keys, per_node_outputs_values
+
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def run_inference(
+    model,
+    data,
+    device,
+    already_computed_nodes = None,
+    loss_func: Optional[Loss] = None,
+    cm=contextlib.nullcontext(),
+    mixed_precision: bool = False,
+    keep_node_types: Optional[List[int]] = None,
+    skip_chunking: bool = False,
+    noise: Optional[float] = None,
+    batch_max_atoms: int = 1000,
+    ignore_chunk_keys: List[str] = [],
+):
+    precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
+    batch = AtomicData.to_AtomicDataDict(data.to(device)) # AtomicDataDict is the dstruct that is taken as input from each forward
+
+    batch, per_node_outputs_keys, per_node_outputs_values = remove_node_centers_for_NaN_targets(batch, loss_func, keep_node_types)
+
+    batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
+    num_batch_center_nodes = len(batch_index[0].unique())
+
+    if skip_chunking:
+        input_data = {
+            k: v
+            for k, v in batch.items()
+            if k not in per_node_outputs_keys
+        }
+        batch_chunk = batch
+        batch_chunk_center_nodes = batch_index[0].unique()
+    else:
+        input_data, batch_chunk, batch_chunk_center_nodes = prepare_chunked_input_data(
+            already_computed_nodes=already_computed_nodes,
+            batch=batch,
+            data=data,
+            per_node_outputs_keys=per_node_outputs_keys,
+            per_node_outputs_values=per_node_outputs_values,
+            batch_max_atoms=batch_max_atoms,
+            ignore_chunk_keys=ignore_chunk_keys,
+            device=device,
+        )
+
+    if input_data is None:
+        return False
+
+    if noise is not None:
+        input_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+
+    with cm, precision:
+        out = model(input_data)
+        del input_data
+
+    return out, batch_chunk, batch_chunk_center_nodes, num_batch_center_nodes
+
+def prepare_chunked_input_data(
+    already_computed_nodes: Optional[torch.Tensor],
+    batch: AtomicDataDict.Type,
+    data: AtomicDataDict.Type,
+    per_node_outputs_keys: List[str] = [],
+    per_node_outputs_values: List[torch.Tensor] = [],
+    batch_max_atoms: int = 1000,
+    ignore_chunk_keys: List[str] = [],
+    device = "cpu"
+):
+    # === Limit maximum batch size to avoid CUDA Out of Memory === #
+    # === ---------------------------------------------------- === #
+    # === ---------------------------------------------------- === #
+
+    chunk = already_computed_nodes is not None
+    batch_chunk = deepcopy(batch)
+    batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+    edge_fields_dict = {
+        edge_field: batch[edge_field]
+        for edge_field in _EDGE_FIELDS
+        if edge_field in batch
+    }
+
+    if chunk:
+        batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
+    batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
+    if len(batch_chunk_center_node_idcs) == 0:
+        return None, None, None
+
+    # = Iteratively remove edges from batch_chunk = #
+    # = ----------------------------------------- = #
+
+    offset = 0
+    while len(batch_chunk_index.unique()) > batch_max_atoms:
+
+        def get_node_center_idcs(batch_chunk_index: torch.Tensor, batch_max_atoms: int, offset: int):
+            unique_set = set()
+
+            for i, num in enumerate(batch_chunk_index[1]):
+                unique_set.add(num.item())
+
+                if len(unique_set) >= batch_max_atoms:
+                    return batch_chunk_index[0, :i+1].unique()[:-offset]
+            return batch_chunk_index[0].unique()[:-offset]
+
+        def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
+            node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
+            edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
+            return edge_filter
+
+        chunk = True
+        offset += 1
+        fltr = get_edge_filter(batch_chunk_index, offset)
+        batch_chunk_index = batch_chunk_index[:, fltr]
+        for k, v in edge_fields_dict.items():
+            edge_fields_dict[k] = v[fltr]
+
+    # = ----------------------------------------- = #
+
+    if chunk:
+        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
+        batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
+        for k, v in edge_fields_dict.items():
+            batch[k] = v
+        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
+                    batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
+        for per_node_output_key, per_node_outputs_value in zip(per_node_outputs_keys, per_node_outputs_values):
+            chunk_per_node_outputs_value = per_node_outputs_value.clone()
+            mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
+            mask[batch_chunk_index[0].unique()] = False
+            chunk_per_node_outputs_value[mask] = torch.nan
+            batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
+
+    # === ---------------------------------------------------- === #
+    # === ---------------------------------------------------- === #
+
+    if hasattr(data, "__slices__"):
+        for slices_key, slices in data.__slices__.items():
+            batch_chunk[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
+    batch_chunk["ptr"] = torch.nn.functional.pad(torch.bincount(batch_chunk.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
+
+    edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+    node_index = edge_index.unique(sorted=True)
+
+    for key in batch_chunk.keys():
+        if key in [
+            AtomicDataDict.BATCH_KEY,
+            AtomicDataDict.EDGE_INDEX_KEY,
+        ] + ignore_chunk_keys:
+            continue
+        dim = np.argwhere(np.array(batch_chunk[key].size()) == len(data[AtomicDataDict.BATCH_KEY])).flatten()
+        if len(dim) == 1:
+            if dim[0] == 0:
+                batch_chunk[key] = batch_chunk[key][node_index]
+            elif dim[0] == 1:
+                batch_chunk[key] = batch_chunk[key][:, node_index]
+            elif dim[0] == 2:
+                batch_chunk[key] = batch_chunk[key][:, :, node_index]
+            else:
+                raise Exception('Dimension not implemented')
+
+    last_idx = -1
+    updated_edge_index = edge_index.clone()
+    for idx in node_index:
+        if idx > last_idx + 1:
+            updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
+        last_idx = idx
+    batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
+    batch_chunk_center_nodes = edge_index[0].unique()
+
+    del edge_index
+    del node_index
+
+    input_data = {
+        k: v.to(device)
+        for k, v in batch_chunk.items()
+        if k not in per_node_outputs_keys
+    }
+
+    return input_data, batch_chunk, batch_chunk_center_nodes
 
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
@@ -124,9 +343,9 @@ class Trainer:
 
     def __init__(
         self,
-        model,
-        model_builders: Optional[list] = [],
+        model_requires_grads: bool = False,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        is_master: bool = True,
         seed: Optional[int] = None,
         dataset_seed: Optional[int] = None,
         noise: Optional[float] = None,
@@ -134,6 +353,7 @@ class Trainer:
         train_on_keys: Optional[List[str]] = None,
         type_names: Optional[List[str]] = None,
         keep_type_names: Optional[List[str]] = None,
+        keep_node_types: Optional[List[int]] = None,
         metrics_components: Optional[Union[dict, str]] = None,
         metrics_key: str = f"{VALIDATION}_" + ABBREV.get(LOSS_KEY, LOSS_KEY),
         early_stopping_conds: Optional[EarlyStopping] = None,
@@ -155,39 +375,70 @@ class Trainer:
         n_train: Optional[Union[List[int], int]] = None,
         n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[Union[list, list[list]]] = None,
-        val_idcs: Optional[Union[list, list[list]]] = None,
+        train_idcs: Optional[Union[List, List[List]]] = None,
+        val_idcs: Optional[Union[List, List[List]]] = None,
         train_val_split: str = "random",
+        skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
-        init_callbacks: list = [],
-        end_of_epoch_callbacks: list = [],
-        end_of_batch_callbacks: list = [],
-        end_of_train_callbacks: list = [],
-        final_callbacks: list = [],
+        init_callbacks: List = [],
+        end_of_epoch_callbacks: List = [],
+        end_of_batch_callbacks: List = [],
+        end_of_train_callbacks: List = [],
+        final_callbacks: List = [],
         log_batch_freq: int = 1,
         log_epoch_freq: int = 1,
         save_checkpoint_freq: int = -1,
         report_init_validation: bool = True,
         verbose="INFO",
         sanitize_gradients: bool = False,
-        target_names: list = None,
+        target_names: List = None,
+        mixed_precision: bool = False,
+        hooks: Dict = {},
+        use_grokfast: bool = False,
         **kwargs,
     ):
 
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
+        self.model = None
         logging.debug("* Initialize Trainer")
-
-        # set model (default None)
-        self.model = model
 
         # --- write all self.init_keys in self AND in _local_kwargs
         _local_kwargs = {}
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
+
+        # --- get I/O handler
+        output = Output.get_output(dict(**_local_kwargs, **kwargs))
+        self.output = output
+
+        self.logfile           = output.open_logfile("log", propagate=True)
+        self.epoch_log         = output.open_logfile("metrics_epoch.csv", propagate=False)
+        self.init_epoch_log    = output.open_logfile("metrics_initialization.csv", propagate=False)
+        self.batch_log = {
+            TRAIN:      output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+            VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
+        }
+
+        # add filenames if not defined
+        self.config_path       = output.generate_file("config.yaml")
+        self.best_model_path   = output.generate_file("best_model.pth")
+        self.last_model_path   = output.generate_file("last_model.pth")
+        self.trainer_save_path = output.generate_file("trainer.pth")
+
+        # --- handle randomness
+        if seed is not None:
+            set_seed(seed)
+
+        self.dataset_rng = torch.Generator()
+        if dataset_seed is not None:
+            self.dataset_rng.manual_seed(dataset_seed)
+
+        self.logger.info(f"Torch device: {self.device}")
+        self.torch_device = torch.device(self.device)
 
         # --- loss/logger printing info
         self.type_names = self.type_names or []
@@ -198,40 +449,11 @@ class Trainer:
             'target_names' : self.target_names,
         }
 
-        # --- get I/O handler
-        output = Output.get_output(dict(**_local_kwargs, **kwargs))
-        self.output = output
-
-        self.logfile = output.open_logfile("log", propagate=True)
-        self.epoch_log = output.open_logfile("metrics_epoch.csv", propagate=False)
-        self.init_epoch_log = output.open_logfile("metrics_initialization.csv", propagate=False)
-        self.batch_log = {
-            TRAIN: output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
-            VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
-        }
-
-        # add filenames if not defined
-        self.best_model_path   = output.generate_file("best_model.pth")
-        self.last_model_path   = output.generate_file("last_model.pth")
-        self.trainer_save_path = output.generate_file("trainer.pth")
-        self.config_path       = self.output.generate_file("config.yaml")
-
-        # --- handle randomness
-        if seed is not None:
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.enabled = False
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-
-        self.dataset_rng = torch.Generator()
-        if dataset_seed is not None:
-            self.dataset_rng.manual_seed(dataset_seed)
-
-        self.logger.info(f"Torch device: {self.device}")
-        self.torch_device = torch.device(self.device)
+        # --- filter node target to train on based on node type or type name
+        if self.keep_type_names is not None:
+            self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
+        if self.keep_node_types is not None:
+            self.keep_node_types = torch.tensor(self.keep_node_types, device=self.torch_device)
 
         # --- sort out all the other parameters
         # for samplers, optimizer and scheduler
@@ -252,11 +474,12 @@ class Trainer:
             prefix="loss", # look in yaml for all things that begin with "loss_*"
             positional_args=dict(coeffs=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
             # and from these it creates loss funcs
-            all_args=self.kwargs, # self.kwargs are all the things in yaml... why...
+            all_args=self.kwargs, # self.kwargs are all the things in yaml...
         )
         self.loss_stat = LossStat(self.loss)
+        self.init_metrics()
+        self.norms = []
 
-        #! what do we train on?
         self.train_on_keys = self.loss.keys
         if train_on_keys is not None:
             if set(train_on_keys) != set(self.train_on_keys):
@@ -269,12 +492,11 @@ class Trainer:
 
         # --- load all callbacks
         self._init_callbacks         = [load_callable(callback) for callback in init_callbacks]
+        end_of_epoch_callbacks.append(load_callable(clean_cuda))
         self._end_of_epoch_callbacks = [load_callable(callback) for callback in end_of_epoch_callbacks]
         self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
-
-        self.init() # initializes model, optimizer, scheduler, early stopping
 
     def init_objects(self):
         '''
@@ -282,25 +504,33 @@ class Trainer:
         - optimizer
         - scheduler
         - early stopping conditions
-
         '''
+
         # initialize optimizer
+
+        # get all params that require grad
+        param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
+
+        # split them according to their shape (which implies wheter to apply wd on them or not)
+        params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
+        params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
+        optim_groups = [
+            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.)},
+            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.},
+        ]
+
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
             class_name=self.optimizer_name,
             prefix="optimizer",
-            positional_args=dict(params=self.model.parameters(), lr=self.learning_rate),
+            positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
             optional_args=self.optimizer_kwargs,
         )
-
-        self.max_gradient_norm = (
-            float(self.max_gradient_norm)
-            if self.max_gradient_norm is not None
-            else float("inf")
-        )
+        self.grads = None
 
         # initialize scheduler
+
         assert (
             self.lr_scheduler_name
             in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "none"]
@@ -369,6 +599,10 @@ class Trainer:
         returns self.as_dict
         '''
         return self.as_dict(state_dict=False, training_progress=False, kwargs=False)
+
+    @property
+    def dataset_params(self):
+        return self.dataset_train.datasets[0].config
 
     def update_kwargs(self, config):
         self.kwargs.update(
@@ -439,15 +673,6 @@ class Trainer:
 
         return dictionary
 
-    def save_config(self, blocking: bool = True) -> None:
-        save_file(
-            item=self.as_dict(state_dict=False, training_progress=False),
-            supported_formats=dict(yaml=["yaml"]),
-            filename=self.config_path,
-            enforced_format=None,
-            blocking=blocking,
-        )
-
     def save(self, filename: Optional[str] = None, format=None, blocking: bool = True):
         """save the file as filename
 
@@ -456,6 +681,9 @@ class Trainer:
         filename (str): name of the file
         format (str): format of the file. yaml and json format will not save the weights.
         """
+
+        if not self.is_master:
+            return
 
         if filename is None:
             filename = self.trainer_save_path
@@ -618,12 +846,10 @@ class Trainer:
 
         return model, config
 
-    def init(self):
+    def init(self, model):
         """initialize optimizer"""
-        if self.model is None:
-            return
 
-        self.model.to(self.torch_device)
+        self.set_model(model=model)
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
         self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
@@ -660,6 +886,10 @@ class Trainer:
                 f"metrics_key may not start with {TRAIN} when report_init_validation=True"
             )
 
+    def set_model(self, model):
+        self.model = model
+        self.model.to(self.torch_device)
+
     def train(self):
 
         """Training"""
@@ -678,10 +908,8 @@ class Trainer:
         with atomic_write_group():
             if self.iepoch == -1:
                 self.save()
-            if self.iepoch in [-1, 0]:
-                self.save_config()
 
-        self.init_metrics()
+        hooks_handler = ForwardHookHandler(self, self.hooks)
 
         # actual train loop
         while not self.stop_cond:
@@ -693,176 +921,76 @@ class Trainer:
             callback(self)
 
         self.final_log()
-
+        
         self.save()
+        hooks_handler.deregister_hooks()
         finish_all_writes()
 
-    @classmethod
-    def prepare_chunked_input_data(
-        cls,
-        already_computed_nodes: Optional[torch.Tensor],
-        batch: AtomicDataDict.Type,
-        data: AtomicDataDict.Type,
-        per_node_outputs_keys: List[str] = [],
-        per_node_outputs_values: List[torch.Tensor] = [],
-        batch_max_atoms: int = 1000,
-        ignore_chunk_keys: List[str] = [],
-        device = "cpu"
-    ):
-        # === Limit maximum batch size to avoid CUDA Out of Memory === #
-        # === ---------------------------------------------------- === #
-        # === ---------------------------------------------------- === #
-
-        chunk = already_computed_nodes is not None
-        batch_chunk = deepcopy(batch)
-        batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
-
-        if chunk:
-            batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
-        batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
-        if len(batch_chunk_center_node_idcs) == 0:
-            return
-
-        # = Iteratively remove edges from batch_chunk = #
-        # = ----------------------------------------- = #
-
-        offset = 0
-        while len(batch_chunk_index.unique()) > batch_max_atoms:
-
-            def get_node_center_idcs(batch_chunk_index: torch.Tensor, batch_max_atoms: int, offset: int):
-                unique_set = set()
-
-                for i, num in enumerate(batch_chunk_index[1]):
-                    unique_set.add(num.item())
-
-                    if len(unique_set) >= batch_max_atoms:
-                        return batch_chunk_index[0, :i+1].unique()[:-offset]
-                return batch_chunk_index[0].unique()[:-offset]
-
-            def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
-                node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
-                edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
-                return edge_filter
-
-            chunk = True
-            offset += 1
-            batch_chunk_index = batch_chunk_index[:, get_edge_filter(batch_chunk_index, offset)]
-
-        # = ----------------------------------------- = #
-
-        if chunk:
-            batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
-            batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
-            for per_node_output_key, per_node_outputs_value in zip(per_node_outputs_keys, per_node_outputs_values):
-                chunk_per_node_outputs_value = per_node_outputs_value.clone()
-                mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
-                mask[batch_chunk_index[0].unique()] = False
-                chunk_per_node_outputs_value[mask] = torch.nan
-                batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
-
-        # === ---------------------------------------------------- === #
-        # === ---------------------------------------------------- === #
-
-        if hasattr(data, "__slices__"):
-            for slices_key, slices in data.__slices__.items():
-                batch_chunk[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
-        batch_chunk["ptr"] = torch.nn.functional.pad(torch.bincount(batch_chunk.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
-
-        edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
-        node_index = edge_index.unique(sorted=True)
-
-        for key in batch_chunk.keys():
-            if key in [
-                AtomicDataDict.BATCH_KEY,
-                AtomicDataDict.EDGE_INDEX_KEY,
-            ] + ignore_chunk_keys:
-                continue
-            dim = np.argwhere(np.array(batch_chunk[key].size()) == len(data[AtomicDataDict.BATCH_KEY])).flatten()
-            if len(dim) == 1:
-                if dim[0] == 0:
-                    batch_chunk[key] = batch_chunk[key][node_index]
-                elif dim[0] == 1:
-                    batch_chunk[key] = batch_chunk[key][:, node_index]
-                elif dim[0] == 2:
-                    batch_chunk[key] = batch_chunk[key][:, :, node_index]
-                else:
-                    raise Exception('Dimension not implemented')
-
-        last_idx = -1
-        updated_edge_index = edge_index.clone()
-        for idx in node_index:
-            if idx > last_idx + 1:
-                updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
-            last_idx = idx
-        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
-        batch_chunk_center_nodes = edge_index[0].unique()
-
-        del edge_index
-        del node_index
-
-        input_data = {
-            k: v.to(device)
-            for k, v in batch_chunk.items()
-        }
-
-        return input_data, batch_chunk, batch_chunk_center_nodes
+    def get_cm(self, validation):
+        if self.model_requires_grads or not validation:
+            return contextlib.nullcontext()
+        return torch.no_grad()
 
     def batch_step(self, data, validation=False):
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
-        if validation:
-            self.model.eval()
-            cm = torch.no_grad()
-        else:
-            self.model.train()
-            cm = contextlib.nullcontext()
+        if validation: self.model.eval()
+        else: self.model.train()
 
-        batch = AtomicData.to_AtomicDataDict(data.to(self.torch_device)) # AtomicDataDict is the dstruct that is taken as input from each forward
-
-        # - Remove edges of atoms whose result is NaN - #
-        per_node_outputs_keys = []
-        for key in self.loss.coeffs:
-            if hasattr(self.loss.funcs[key], "ignore_nan") and self.loss.funcs[key].ignore_nan:
-                key_clean = self.loss.remove_suffix(key)
-                batch[key_clean] = batch[key_clean].squeeze()
-                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
-                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
-                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-                    per_node_outputs_keys.append(key_clean)
-
-        per_node_outputs_values = []
-        for per_node_output_key in per_node_outputs_keys:
-            if per_node_output_key in batch:
-                per_node_outputs_values.append(batch.get(per_node_output_key))
-
-        batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-        num_batch_center_nodes = len(batch_index[0].unique())
+        cm = self.get_cm(validation)
         already_computed_nodes = None
-
         while True:
 
-            input_data, batch_chunk, batch_chunk_center_nodes = self.prepare_chunked_input_data(
-                already_computed_nodes=already_computed_nodes,
-                batch=batch,
+            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
+                model=self.model,
                 data=data,
-                per_node_outputs_keys=per_node_outputs_keys,
-                per_node_outputs_values=per_node_outputs_values,
+                device=self.torch_device,
+                already_computed_nodes=already_computed_nodes,
+                loss_func=self.loss,
+                cm=cm,
+                mixed_precision=self.mixed_precision,
+                keep_node_types=self.keep_node_types,
+                skip_chunking=self.skip_chunking,
+                noise=self.noise,
                 batch_max_atoms=self.batch_max_atoms,
                 ignore_chunk_keys=self.ignore_chunk_keys,
-                device=self.torch_device,
             )
 
-            if self.noise is not None:
-                input_data[AtomicDataDict.NOISE] = self.noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+            loss, loss_contrib = self.loss(pred=out, ref=ref_data)
 
-            with cm:
-                out = self.model(input_data) # forward of the model
-            del input_data
+            # update metrics
+            with torch.no_grad():
+                self.batch_losses = self.loss_stat(loss, loss_contrib)
+                self.batch_metrics = self.metrics(pred=out, ref=ref_data)
+            del ref_data
 
-            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+            if not validation:
+
+                loss.backward()
+                if self.use_grokfast:
+                    self.grads = gradfilter_ema(self.model, grads=self.grads)
+                
+                if self.sanitize_gradients:
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad[torch.isnan(param.grad)] = 0
+
+                # grad clipping: avoid "shocks" to the model (params) during optimization;
+                # returns norms; their expected trend is from high to low and stabilize
+                self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+
+                self.optim.step()
+
+                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+
+            # evaluate ending condition
+            if self.skip_chunking:
+                return True
+
+            # if chunking is active -> if whole struct has been processed then batch is over
+            if already_computed_nodes is None:
                 if len(batch_chunk_center_nodes) < num_batch_center_nodes:
                     already_computed_nodes = batch_chunk_center_nodes
             elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
@@ -871,40 +999,8 @@ class Trainer:
                 assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
                 already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
 
-            if not validation:
-                loss, loss_contrib = self.loss(pred=out, ref=batch_chunk) # compute loss
-
-                self.optim.zero_grad(set_to_none=True) # 0 grad
-
-                loss.backward() # compue grads
-
-                if self.max_gradient_norm < float("inf"): # grad clipping
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.max_gradient_norm
-                    )
-
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0 #! bad?
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
-
-                self.optim.step()
-                # self.model.normalize_weights() # scales parms by their norm (Not weight_norm)
-
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts": # lr scheduler step
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-
-            with torch.no_grad(): # val step if required and comp metrics for log
-                if validation:
-                    loss, loss_contrib = self.loss(pred=out, ref=batch_chunk)
-
-                self.batch_losses = self.loss_stat(loss, loss_contrib)
-                self.batch_metrics = self.metrics(pred=out, ref=batch_chunk)
-
-            del batch_chunk
-
             if already_computed_nodes is None:
-                return
+                return True
 
     @property
     def stop_cond(self):
@@ -933,27 +1029,27 @@ class Trainer:
         self.metrics.to(self.torch_device)
 
     def epoch_step(self):
-        self.model.prod(max(0, self.iepoch) % (self.prod_for + self.prod_every) < self.prod_every)
-
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
         dataloaders = [dataloaders[c] for c in categories]  # get the right dataloaders for the catagories we actually run
         self.metrics_dict = {}
         self.loss_dict = {}
+        self.norms = []
 
         for category, dataset in zip(categories, dataloaders):
             self.reset_metrics()
             self.n_batches = len(dataset)
             for self.ibatch, batch in enumerate(dataset):
-                self.batch_step(
+                success = self.batch_step(
                     data=batch,
                     validation=(category == VALIDATION),
                 )
 
-                self.end_of_batch_log(batch_type=category)
+                if success:
+                    self.end_of_batch_log(batch_type=category)
 
-                for callback in self._end_of_batch_callbacks:
-                    callback(self)
+                    for callback in self._end_of_batch_callbacks:
+                        callback(self)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
@@ -1029,6 +1125,9 @@ class Trainer:
         """
         save model and trainer details
         """
+        if not self.is_master:
+            return 
+
         with atomic_write_group():
             current_metrics = self.mae_dict[self.metrics_key]
             if current_metrics < self.best_metrics:
@@ -1056,12 +1155,17 @@ class Trainer:
             torch.save(self.model.state_dict(), write_to)
 
     def init_log(self):
+        if not self.is_master:
+            return
+
         if self.iepoch > 0:
             self.logger.info("! Restarting training ...")
         else:
             self.logger.info("! Starting training ...")
 
     def final_log(self):
+        if not self.is_master:
+            return
 
         self.logger.info(f"! Stop training: {self.stop_arg}")
         wall = perf_counter() - self.wall
@@ -1120,6 +1224,8 @@ class Trainer:
                     log_str[category] += f" {value:12.3g}"
                     log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
+        
+        self.norm_dict = dict(Grad_norm=self.norms)
 
         if self.iepoch == 0:
             self.init_epoch_logger.info(header)
@@ -1180,7 +1286,14 @@ class Trainer:
                         self.n_train = [len(ds) - n_valid for ds, n_valid in zip(dataset.datasets, self.n_val)]
                     else:
                         logging.warn("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
-                        self.n_train = [int(0.8*len(ds)) for ds in dataset.datasets]
+                        n_total = np.array([len(ds) for ds in dataset.datasets])
+                        ones_mask = n_total == 1
+                        n_total[~ones_mask] = (0.8 * n_total[~ones_mask]).astype(int)
+                        num_ones = np.sum(ones_mask)
+                        ones = np.copy(n_total[ones_mask])
+                        ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
+                        n_total[ones_mask] = ones
+                        self.n_train = n_total
                 else:
                     self.n_train = [len(ds) for ds in dataset.datasets]
             if self.n_val is None:
@@ -1233,8 +1346,8 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val) == len(validation_dataset.datasets)
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
@@ -1248,6 +1361,7 @@ class Trainer:
             indexed_datasets_val.append(_dataset.index_select(val_idcs))
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
+    def set_dataloader(self, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1258,15 +1372,16 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(10 if self.dataloader_num_workers > 0 else 0),
+            timeout=(30 if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )
 
         self.dl_train = DataLoader(
             dataset=self.dataset_train,
-            shuffle=self.shuffle,  # training should shuffle
+            shuffle=(sampler is None) and self.shuffle,
             batch_size=self.batch_size,
+            sampler=sampler,
             **dl_kwargs,
         )
 
@@ -1275,6 +1390,7 @@ class Trainer:
         self.dl_val = DataLoader(
             dataset=self.dataset_val,
             batch_size=self.validation_batch_size,
+            sampler=validation_sampler,
             **dl_kwargs,
         )
 
@@ -1282,26 +1398,49 @@ class Trainer:
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
-    def end_of_epoch_log(self):
-        Trainer.end_of_epoch_log(self)
-        wandb.log(self.mae_dict)
-
-    def init(self, experiment_description: str = ""):
-        super().init()
+    def init(self, *args, **kwargs):
+        super().init(*args, **kwargs)
 
         if not self._initialized:
             return
-
-        wandb.log({"Experiment Description": experiment_description})
 
         # upload some new fields to wandb
         wandb.config.update({"num_weights": self.num_weights})
 
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
-            wandb.watch(self.model, **wandb_watch_kwargs)
+            wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
+
+    def end_of_epoch_log(self):
+        Trainer.end_of_epoch_log(self)
+        wandb.log(self.mae_dict)
+        for k, v in self.norm_dict.items():
+            for norm in v:
+                wandb.log({k: norm})
 
 
+class DistributedTrainer(Trainer):
+
+    def init(self, rank: int, world_size: int, *args, **kwargs):
+        self.rank = rank
+        self.world_size = world_size
+
+        # Set the device for this process
+        torch.cuda.set_device(rank)
+        super().init(device=f'cuda:{rank}', is_master=rank==0, *args, **kwargs)
+    
+    def set_dataloader(self, sampler=None, validation_sampler=None):
+        sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
+        validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
+        super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
+    
+    def set_model(self, model):
+        super().set_model(model)
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        self.model = DDP(self.model, device_ids=[self.rank])
 
 
+class DistributedTrainerWandB(DistributedTrainer, TrainerWandB):
 
+    def init(self):
+        super().init()

@@ -1,19 +1,22 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from importlib import import_module
-import inspect
 import logging
-
+import inspect
 import torch.nn
-from torch_scatter import scatter, scatter_mean
 
-from geqtrain.data import AtomicDataDict
+from typing import Dict
+from importlib import import_module
+from torch_scatter import scatter, scatter_mean
 from geqtrain.utils import instantiate_from_cls_name
+from geqtrain.data import AtomicDataDict
 
 
 class SimpleLoss:
-    """wrapper to compute weighted loss function
+    """
+    wrapper to torch.nn loss function; computes weighted loss function
+
+    if "ignore_nan" not provided in yaml then NaNs will propagate as normal.
 
     Args:
 
@@ -28,25 +31,25 @@ class SimpleLoss:
     if mean is True, return a scalar; else return the error matrix of each entry
     """
 
-    def __init__(self,
-                 func_name: str,
-                 params: dict = {}):
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
 
+        self.func_name = func_name
         for key, value in params.items():
             setattr(self, key, value)
 
-        func, _ = instantiate_from_cls_name(
+        # instanciates torch.nn loss func
+        self.func, _ = instantiate_from_cls_name(
             torch.nn,
             class_name=func_name,
             prefix="",
             positional_args=dict(reduction="none"),
             optional_args=params,
             all_args={},
-
         )
-
-        self.func_name = func_name
-        self.func = func
 
     def __call__(
         self,
@@ -55,7 +58,7 @@ class SimpleLoss:
         key: str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
     ):
-        ref_key, pred_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
 
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
@@ -72,7 +75,12 @@ class SimpleLoss:
             else:
                 return loss
 
-    def prepare(self, pred, ref, key):
+    def prepare(
+        self,
+        pred: Dict,
+        ref:  Dict,
+        key:  str,
+    ):
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
         pred_key = pred.get(key, None)
@@ -89,30 +97,7 @@ class SimpleLoss:
         else:
             not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
         not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
-        return ref_key,pred_key,has_nan,not_zeroes
-
-class PerLabelLoss(SimpleLoss):
-
-    def __init__(self, func_name: str, params: dict = ...):
-        self.instanciated = True
-        super().__init__(func_name, params)
-
-
-    def __call__(
-        self,
-        pred: dict,
-        ref: dict,
-        key: str, # first row of each element listed under loss_coeffs:
-        mean: bool = True,
-    ):
-        loss = self.func(pred[key], ref[key])
-
-        if mean:
-            return loss.mean()
-        else:
-            return loss.mean(dim=0)
-
-
+        return pred_key, ref_key, has_nan, not_zeroes
 
 
 class PerSpeciesLoss(SimpleLoss):
@@ -180,18 +165,18 @@ class PerSpeciesLoss(SimpleLoss):
             return per_species_loss.mean()
 
 
-def find_loss_function(name: str, params):
+def instanciate_loss_function(name: str, params):
     """
-    Search for loss functions in this module     instanciates the loss obj
-
-    If the name starts with PerSpecies, rMSELosseturn the PerSpeciesLoss instance
+    Search for loss functions in this module
+    instanciates the loss obj
+    If the name starts with PerSpecies, MSELoss return the PerSpeciesLoss instance
     """
 
     wrapper_list = dict(
         perspecies=PerSpeciesLoss,
     )
 
-    if isinstance(name, str): #  name is funct
+    if isinstance(name, str): # name is function
         for key in wrapper_list:
             if name.lower().startswith(key):
                 logging.debug(f"create loss instance {wrapper_list[key]}")
@@ -199,7 +184,7 @@ def find_loss_function(name: str, params):
         try:
             module_name = ".".join(name.split(".")[:-1])
             class_name  = ".".join(name.split(".")[-1:])
-            functional = params.get("functional", "MSELoss")
+            functional = params.get("functional", "L1Loss")
             return getattr(import_module(module_name), class_name)(functional, params) # func_name, params of SimpleLoss ctor
         except Exception:
             return SimpleLoss(name, params)

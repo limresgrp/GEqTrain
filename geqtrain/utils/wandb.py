@@ -19,6 +19,19 @@ def make_archive(source, destination):
     shutil.move('%s.%s'%(name,format), destination)
 
 
+def upload_zipped_code_on_wandb(source, upload_name):
+        '''
+        upload_name must be without file ext
+        source must be str
+        '''
+        if isinstance(source, Path):
+            source = str(source)
+
+        dest = f"./{upload_name}.zip"
+        make_archive(source, dest)
+        wandb.save(dest, policy = "now")
+        # os.remove(dest) # can't remove since wandb.save call is async
+
 def init_n_update(config):
     conf_dict = dict(config)
     # wandb mangles keys (in terms of type) as well, but we can't easily correct that because there are many ambiguous edge cases. (E.g. string "-1" vs int -1 as keys, are they different config keys?)
@@ -34,17 +47,28 @@ def init_n_update(config):
         project=config.wandb_project,
         config=conf_dict,
         name=config.run_name,
+        notes=conf_dict.get('experiment_description', None),
         resume="allow",
         id=config.run_id,
     )
 
-    source = str(Path().resolve() / "geqtrain")
-    dest = "./source_code.zip"
-    make_archive(source, dest)
-    wandb.save(dest, policy = "now")
-    # os.remove(dest) # can't remove since wandb.save call is async
+    # save config as-is on wandb for experiment relaunching
 
-    # # download from wandb set up
+    wandb.save(Path(config.filepath).resolve(), policy = "now")
+
+    # upload geqtrain code
+
+    source = Path(__file__).parent.parent.resolve()
+    upload_zipped_code_on_wandb(source, 'geqtrain_source_code')
+
+    # upload ad-hoc code
+
+    if 'code_folder_name' in config:
+        source = Path().resolve() / config['code_folder_name']
+        upload_zipped_code_on_wandb(source, f'{config["code_folder_name"]}_source_code')
+
+    # download from wandb set up
+
     updated_parameters = dict(wandb.config)
     for k, v_new in updated_parameters.items():
         skip = False

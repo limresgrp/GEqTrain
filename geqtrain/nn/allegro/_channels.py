@@ -6,6 +6,7 @@ from math import ceil
 import torch
 
 from e3nn.util.jit import compile_mode
+from einops import rearrange
 
 
 @compile_mode("script")
@@ -43,16 +44,18 @@ class MakeWeightedChannels(torch.nn.Module):
         self.weight_numel = len(irreps_in) * multiplicity_out
 
     def forward(self, edge_attr, weights):
-        # weights are [z, u, i], tensor of scalars
-        # edge_attr are [z, i], geometric tensor
-        # i runs over all irreps, which is why the weights need
-        # to be indexed in order to go from [num_i] to [i]
+        # weights are [e, m, d], tensor of scalars
+        # edge_attr are [e, d], geometric tensor
+        # d runs over all irreps, which is why the weights need
+        # to be indexed in order to go from [num_d] to [d]
+
         return torch.einsum(
-            "zi,zui->zui",
+            "ed,emd->emd",
             edge_attr,
-            weights.view(
-                -1,
-                self.multiplicity_out,
-                self._num_irreps,
-            )[:, :, self._w_index],
+            rearrange(
+                weights,
+                'e (m d) -> e m d',
+                m=self.multiplicity_out,
+                d=self._num_irreps
+            )[..., self._w_index],
         )

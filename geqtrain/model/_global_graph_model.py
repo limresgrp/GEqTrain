@@ -1,24 +1,24 @@
-from typing import Optional
 import logging
 
 from e3nn import o3
-from geqtrain.data import AtomicDataDict, AtomicDataset
+from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
+    NodewiseReduce,
     InteractionModule,
-)
-from geqtrain.nn import (
     EmbeddingNodeAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
+    EmbeddingGraphAttrs,
     ReadoutModule,
-    # EmbeddingGraphAttrs,
 )
 
 
-def Model(
-    config, initialize: bool, dataset: Optional[AtomicDataset] = None
+def GlobalGraphModel(
+    config,
+    dataset,
+    initialize: bool,
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -43,22 +43,23 @@ def Model(
         "node_attrs":         EmbeddingNodeAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        # "graph_attrs":        EmbeddingGraphAttrs,
+        # -- Optional -- "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     layers.update(
         {
-            "interaction": (
+            "local_interaction": (
             InteractionModule,
                 dict(
                     node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
                     edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    output_hidden_irreps=True,
+                    out_irreps=None,
+                    output_ls=[0],
                 ),
             ),
-            "pooling": (
+            "local_pooling": (
                 EdgewiseReduce,
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -66,11 +67,45 @@ def Model(
                     reduce=config.get("edge_reduce", "sum"),
                 ),
             ),
-            "head": (
+            "update": (
                 ReadoutModule,
                 dict(
                     field=AtomicDataDict.NODE_FEATURES_KEY,
+                    out_field=AtomicDataDict.NODE_ATTRS_KEY,
+                    out_irreps=None,
+                    resnet=True,
+                ),
+            ),
+            "context_aware_interaction": (
+            InteractionModule,
+                dict(
+                    node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
+                    edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
+                    edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+                    out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+                    output_mul="hidden",
+                ),
+            ),
+            "global_edge_pooling": (
+                EdgewiseReduce,
+                dict(
+                    field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    reduce=config.get("edge_reduce", "sum"),
+                ),
+            ),
+            "global_node_pooling": (
+                NodewiseReduce,
+                dict(
+                    field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
+                ),
+            ),
+            "head": (
+                ReadoutModule,
+                dict(
+                    field=AtomicDataDict.GRAPH_OUTPUT_KEY,
+                    out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
                 ),
             ),
         }

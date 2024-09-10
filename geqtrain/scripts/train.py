@@ -4,6 +4,7 @@
 """ Train a network."""
 import logging
 import argparse
+import shutil
 import warnings
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
@@ -102,10 +103,12 @@ def fresh_start(config):
         from geqtrain.utils.wandb import init_n_update
         from geqtrain.train import TrainerWandB
         config = init_n_update(config)
-        trainer = TrainerWandB(model=None, **dict(config))
+        trainer = TrainerWandB(**dict(config))
     else:
         from geqtrain.train import Trainer
-        trainer = Trainer(model=None, **dict(config))
+        trainer = Trainer(**dict(config))
+    
+    shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
 
     # what is this? to update wandb data?
     config.update(trainer.params)
@@ -122,9 +125,13 @@ def fresh_start(config):
 
     # = Train/validation split =
     trainer.set_dataset(dataset, validation_dataset)
+    trainer.set_dataloader()
+    
+    # = Update config with dataset-related params = #
+    config.update(trainer.dataset_params)
 
     # = Build model =
-    final_model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+    model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
     logging.info("Successfully built the network...")
 
     # by doing this here we check also any keys custom builders may have added
@@ -132,11 +139,11 @@ def fresh_start(config):
 
     # Equivar test
     if config.equivariance_test:
-        final_model.eval()
+        model.eval()
         errstr = assert_AtomicData_equivariant(
-            final_model, trainer.dataset_train[0]
+            model, trainer.dataset_train[0]
         )
-        final_model.train()
+        model.train()
         logging.info(
             "Equivariance test passed; equivariance errors:\n"
             f"{errstr}"
@@ -144,7 +151,7 @@ def fresh_start(config):
         del errstr
 
     # Set the trainer
-    trainer.model = final_model
+    trainer.init(model=model)
 
     # Store any updated config information in the trainer
     trainer.update_kwargs(config)
@@ -221,6 +228,7 @@ def fine_tune(config):
         validation_dataset = None
 
     trainer.set_dataset(dataset, validation_dataset)
+    trainer.set_dataloader()
 
     # reset scheduler
     trainer.lr_sched._reset()
@@ -240,7 +248,7 @@ def restart(config):
     # compare dictionary to config and update stop condition related arguments
     for k in config.keys():
         if config[k] != dictionary.get(k, ""):
-            if k in ["max_epochs", "loss_coeffs", "learning_rate",
+            if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
                      "metrics_components", "noise"]:
                 dictionary[k] = config[k]
                 logging.info(f'Update "{k}" to {dictionary[k]}')
@@ -285,6 +293,7 @@ def restart(config):
         validation_dataset = None
 
     trainer.set_dataset(dataset, validation_dataset)
+    trainer.set_dataloader()
 
     return trainer
 

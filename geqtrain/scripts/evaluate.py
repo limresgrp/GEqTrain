@@ -1,20 +1,33 @@
-from typing import List
+import contextlib
+import copy
+import os
+import sys
+import argparse
+from typing import List, Optional
 import logging
 from pathlib import Path
+
+from tqdm import tqdm
+
 from geqtrain.data import AtomicDataDict
 
 import torch
-
-# from geqtrain.data import AtomicData, Collater, dataset_from_config, register_fields
-# from geqtrain.scripts._logger import set_up_script_logger
+from torch.utils.data import ConcatDataset
+from geqtrain.data._build import dataset_from_config
+from geqtrain.data.dataloader import Collater, DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, R_MAX_KEY
 from geqtrain.train import Trainer
+from geqtrain.train.loss import Loss
+from geqtrain.train.metrics import Metrics
+from geqtrain.train.trainer import run_inference
 from geqtrain.utils._global_options import _set_global_options
 from geqtrain.utils import Config
+from geqtrain.utils.auto_init import instantiate
+from geqtrain.utils.savenload import load_file
 
-"""
+
 def main(args=None, running_as_script: bool = True):
-    # in results dir, do: nequip-deploy build --train-dir . deployed.pth
+    # in results dir, do: geqtrain-deploy build --train-dir . deployed.pth
     parser = argparse.ArgumentParser(
     )
     parser.add_argument(
@@ -25,25 +38,20 @@ def main(args=None, running_as_script: bool = True):
     )
     parser.add_argument(
         "--model",
-        help="A deployed or pickled NequIP model to load. If omitted, defaults to `best_model.pth` in `train_dir`.",
+        help="A deployed or pickled GEqTrain model to load. If omitted, defaults to `best_model.pth` in `train_dir`.",
         type=Path,
         default=None,
     )
     parser.add_argument(
-        "--dataset-config",
+        "--config",
         help="A YAML config file specifying the dataset to load test data from. If omitted, `config.yaml` in `train_dir` will be used",
         type=Path,
         default=None,
     )
     parser.add_argument(
-        "--metrics-config",
-        help="A YAML config file specifying the metrics to compute. If omitted, `config.yaml` in `train_dir` will be used. If the config does not specify `metrics_components`, the default is to logging.debug MAEs and RMSEs for all fields given in the loss function. If the literal string `None`, no metrics will be computed.",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
         "--test-indexes",
-        help="Path to a file containing the indexes in the dataset that make up the test set. If omitted, all data frames *not* used as training or validation data in the training session `train_dir` will be used.",
+        help="Path to a file containing the indexes in the dataset that make up the test set. "
+             "If omitted, all data frames *not* used as training or validation data in the training session `train_dir` will be used.",
         type=Path,
         default=None,
     )
@@ -55,20 +63,20 @@ def main(args=None, running_as_script: bool = True):
     )
     parser.add_argument(
         "--batch-size",
-        help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 50.",
+        help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=50,
+        default=16,
     )
-    parser.add_argument(
-        "--repeat",
-        help=(
-            "Number of times to repeat evaluating the test dataset. "
-            "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
-            "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
-        ),
-        type=int,
-        default=1,
-    )
+    # parser.add_argument(
+    #     "--repeat",
+    #     help=(
+    #         "Number of times to repeat evaluating the test dataset. "
+    #         "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
+    #         "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
+    #     ),
+    #     type=int,
+    #     default=1,
+    # )
     parser.add_argument(
         "--use-deterministic-algorithms",
         help="Try to have PyTorch use deterministic algorithms. Will probably fail on GPU/CUDA.",
@@ -79,48 +87,45 @@ def main(args=None, running_as_script: bool = True):
         "--device",
         help="Device to run the model on. If not provided, defaults to CUDA if available and CPU otherwise.",
         type=str,
-        default=None,
+        default='cpu',
     )
-    parser.add_argument(
-        "--output",
-        help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
-        type=Path,
-        default=None,
-    )
-    parser.add_argument(
-        "--output-fields",
-        help="Extra fields (names[:field] comma separated with no spaces) to write to the `--output`.\n"
-             "Field options are: [node, edge, graph, long].\n"
-             "If [:field] is omitted, the field with that name is assumed to be already registered by default.",
-        type=str,
-        default="",
-    )
+    # parser.add_argument(
+    #     "--output",
+    #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
+    #     type=Path,
+    #     default=None,
+    # )
+    # parser.add_argument(
+    #     "--output-fields",
+    #     help="Extra fields (names[:field] comma separated with no spaces) to write to the `--output`.\n"
+    #          "Field options are: [node, edge, graph, long].\n"
+    #          "If [:field] is omitted, the field with that name is assumed to be already registered by default.",
+    #     type=str,
+    #     default="",
+    # )
     parser.add_argument(
         "--log",
         help="log file to store all the metrics and screen logging.debug",
         type=Path,
         default=None,
     )
-    # Something has to be provided
-    # See https://stackoverflow.com/questions/22368458/how-to-make-argparse-logging.debug-usage-when-no-option-is-given-to-the-code
+
     if len(sys.argv) == 1:
         parser.print_help()
         parser.exit()
-    # Parse the args
+    # Parse args
     args = parser.parse_args(args=args)
 
     # Do the defaults:
     dataset_is_from_training: bool = False
     if args.train_dir:
-        if args.dataset_config is None:
-            args.dataset_config = args.train_dir / "config.yaml"
+        if args.config is None:
+            args.config = args.train_dir / "config.yaml"
             dataset_is_from_training = True
-        if args.metrics_config is None:
-            args.metrics_config = args.train_dir / "config.yaml"
         if args.model is None:
             args.model = args.train_dir / "best_model.pth"
-        if args.test_indexes is None:
-            # Find the remaining indexes that arent train or val
+        if args.test_indexes is None and dataset_is_from_training:
+            # Find the remaining indexes that aren't train or val
             trainer = torch.load(
                 str(args.train_dir / "trainer.pth"), map_location="cpu"
             )
@@ -138,41 +143,22 @@ def main(args=None, running_as_script: bool = True):
             val_idcs = set(val_idcs)
         else:
             train_idcs = val_idcs = None
-    # update
-    if args.metrics_config == "None":
-        args.metrics_config = None
-    elif args.metrics_config is not None:
-        args.metrics_config = Path(args.metrics_config)
-    do_metrics = args.metrics_config is not None
+
     # validate
-    if args.dataset_config is None:
-        raise ValueError("--dataset-config or --train-dir must be provided")
-    if args.metrics_config is None and args.output is None:
-        raise ValueError(
-            "Nothing to do! Must provide at least one of --metrics-config, --train-dir (to use training config for metrics), or --output"
-        )
+    if args.config is None:
+        raise ValueError("--config or --train-dir must be provided")
+
     if args.model is None:
         raise ValueError("--model or --train-dir must be provided")
-    output_type: Optional[str] = None
-    if args.output is not None:
-        if args.output.suffix != ".xyz":
-            raise ValueError("Only .xyz format for `--output` is supported.")
-        args.output_fields = [register_field(e) for e in args.output_fields.split(",") if e != ""] + [
-            ORIGINAL_DATASET_INDEX_KEY
-        ]
-        output_type = "xyz"
-    else:
-        assert args.output_fields == ""
-        args.output_fields = []
 
+    # device
     if args.device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(args.device)
 
-    if running_as_script:
-        set_up_script_logger(args.log)
-    logger = logging.getLogger("nequip-evaluate")
+    # logger
+    logger = logging.getLogger("geqtrain-evaluate")
     logger.setLevel(logging.INFO)
 
     logger.info(f"Using device: {device}")
@@ -187,88 +173,42 @@ def main(args=None, running_as_script: bool = True):
         )
         torch.use_deterministic_algorithms(True)
 
-    # Load model:
-    loaded_deployed_model, model_r_max, model, model_config, model_root = load_model(args, device, logger)
+    # Load model
+    model, config = load_model(args.model, device=args.device)
 
-    # Load a config file
+    # Load config file
     logger.info(
-        f"Loading {'original ' if dataset_is_from_training else ''}dataset...",
+        f"Loading {'training' if dataset_is_from_training else 'test'} dataset...",
     )
-    defaults = {"r_max": model_r_max}
-    if not loaded_deployed_model:
-        defaults.update({
-            "root": model_root
-        })
-    dataset_config = Config.from_file(
-        str(args.dataset_config), defaults=defaults
-    )
-    if dataset_config["r_max"] != model_r_max:
-        raise RuntimeError(
-            f"Dataset config has r_max={dataset_config['r_max']}, but model has r_max={model_r_max}!"
-        )
-
+    
+    evaluate_config = Config.from_file(str(args.config), defaults={})
+    config.update(evaluate_config)
+    
     dataset_is_test: bool = False
     dataset_is_validation: bool = False
     try:
         # Try to get test dataset
-        dataset, _ = dataset_from_config(dataset_config, prefix="test_dataset")
+        dataset = dataset_from_config(config, prefix="test_dataset")
         dataset_is_test = True
     except KeyError:
         pass
     if not dataset_is_test:
         try:
             # Try to get validation dataset
-            dataset, _ = dataset_from_config(dataset_config, prefix="validation_dataset")
+            dataset = dataset_from_config(config, prefix="validation_dataset")
             dataset_is_validation = True
         except KeyError:
             pass
 
     if not (dataset_is_test or dataset_is_validation):
-        # Get shared train + validation dataset
-        # prefix `dataset`
-        dataset, _ = dataset_from_config(dataset_config)
+        raise Exception("Either test or validation dataset must be provided.")
     logger.info(
-        f"Loaded {'test_' if dataset_is_test else 'validation_' if dataset_is_validation else ''}dataset specified in {args.dataset_config.name}.",
+        f"Loaded {'test_' if dataset_is_test else 'validation_' if dataset_is_validation else ''}dataset specified in {args.config.name}.",
     )
 
-    c = Collater.for_dataset(dataset, exclude_keys=[])
-
-    # Determine the test set
-    # this makes no sense if a dataset is given seperately
-    if (
-        args.test_indexes is None
-        and dataset_is_from_training
-        and train_idcs is not None
-    ):
-        if dataset_is_test:
-            test_idcs = torch.arange(len(dataset))
-            logger.info(
-                f"Using all frames from original test dataset, yielding a test set size of {len(test_idcs)} frames.",
-            )
-        else:
-            # we know the train and val, get the rest
-            all_idcs = set(range(len(dataset)))
-            # set operations
-            if dataset_is_validation:
-                test_idcs = list(all_idcs - val_idcs)
-                logger.info(
-                    f"Using origial validation dataset ({len(dataset)} frames) minus validation set frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
-                )
-            else:
-                test_idcs = list(all_idcs - train_idcs - val_idcs)
-                assert set(test_idcs).isdisjoint(train_idcs)
-                logger.info(
-                    f"Using origial training dataset ({len(dataset)} frames) minus training ({len(train_idcs)} frames) and validation frames ({len(val_idcs)} frames), yielding a test set size of {len(test_idcs)} frames.",
-                )
-            # No matter what it should be disjoint from validation:
-            assert set(test_idcs).isdisjoint(val_idcs)
-            if not do_metrics:
-                logger.info(
-                    "WARNING: using the automatic test set ^^^ but not computing metrics, is this really what you wanted to do?",
-                )
-    elif args.test_indexes is None:
+    if args.test_indexes is None:
         # Default to all frames
-        test_idcs = torch.arange(len(dataset))
+        test_idcs = [torch.arange(len(ds)) for ds in dataset.datasets]
         logger.info(
             f"Using all frames from the specified test dataset with stride {args.stride}, yielding a test set size of {len(test_idcs)} frames.",
         )
@@ -284,195 +224,93 @@ def main(args=None, running_as_script: bool = True):
             f"Using provided test set indexes, yielding a test set size of {len(test_idcs)} frames.",
         )
     test_idcs = torch.as_tensor(test_idcs, dtype=torch.long)[::args.stride]
-    test_idcs = test_idcs.tile((args.repeat,))
+    # test_idcs = test_idcs.tile((args.repeat,))
 
     # Figure out what metrics we're actually computing
-    if do_metrics:
-        metrics_config = Config.from_file(str(args.metrics_config))
-        metrics_components = metrics_config.get("metrics_components", None)
-        # See trainer.py: init() and init_metrics()
-        # Default to loss functions if no metrics specified:
-        if metrics_components is None:
-            loss, _ = instantiate(
-                builder=Loss,
-                prefix="loss",
-                positional_args=dict(coeffs=metrics_config.loss_coeffs),
-                all_args=metrics_config,
-            )
-            metrics_components = []
-            for key, func in loss.funcs.items():
-                params = {
-                    "PerSpecies": type(func).__name__.startswith("PerSpecies"),
-                }
-                metrics_components.append((key, "mae", params))
-                metrics_components.append((key, "rmse", params))
-
+    try:
+        metrics_components = config.get("metrics_components", None)
         metrics, _ = instantiate(
             builder=Metrics,
             prefix="metrics",
             positional_args=dict(components=metrics_components),
-            all_args=metrics_config,
+            all_args=config,
         )
         metrics.to(device=device)
+        metrics_metadata = {
+            'type_names'   : config["type_names"],
+            'target_names' : config['target_names'],
+        }
+    except:
+        raise Exception("Failed to load Metrics.")
 
-    batch_i: int = 0
-    batch_size: int = args.batch_size
-    stop = False
-    already_computed_nodes = None
+    # dataloader
+    _indexed_datasets = []
+    for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
+        _indexed_datasets.append(_dataset.index_select(_test_idcs))
+    dataset_test = ConcatDataset(_indexed_datasets)
 
+    dataloader = DataLoader(
+        dataset=dataset_test,
+        shuffle=False,
+        batch_size=args.batch_size,
+    )
+
+    # run inference
     logger.info("Starting...")
-    context_stack = contextlib.ExitStack()
-    with contextlib.ExitStack() as context_stack:
-        # "None" checks if in a TTY and disables if not
-        prog = context_stack.enter_context(tqdm(total=len(test_idcs), disable=None))
-        if do_metrics:
-            display_bar = context_stack.enter_context(
-                tqdm(
-                    bar_format=""
-                    if prog.disable  # prog.ncols doesn't exist if disabled
-                    else ("{desc:." + str(prog.ncols) + "}"),
-                    disable=None,
-                )
+
+    pbar = tqdm(dataloader)
+    for data in pbar:
+
+        already_computed_nodes = None
+        while True:
+            
+            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
+                model=model,
+                data=data,
+                device=device,
+                cm=torch.no_grad(),
+                already_computed_nodes=already_computed_nodes,
+                skip_chunking=True,
             )
 
-        if output_type is not None:
-            output = []
-            output_target = []
-            dataset_idx_to_idx = dict()
-            for idx, ds in enumerate(dataset.datasets):
-                ds_filename = ".".join(os.path.split(ds.file_name)[-1].split(".")[:-1])
-                path, out_filename = os.path.split(args.output)
-                out_filename_split = out_filename.split(".")
-                dataset_idx_to_idx[ds.dataset_idx] = idx
-                output_filename = ".".join([f"ds_{ds.dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1])] + out_filename_split[-1:])
-                output.append(context_stack.enter_context(open(os.path.join(path, output_filename), "w")))
-                output_target_filename = ".".join([f"ds_{ds.dataset_idx}__{ds_filename}__" + ".".join(out_filename_split[:-1]) + "_target"] + out_filename_split[-1:])
-                output_target.append(context_stack.enter_context(open(os.path.join(path, output_target_filename), "w")))
-        else:
-            output = None
-            output_target = None
+            # accumulate metrics
+            batch_metrics = metrics(pred=out, ref=ref_data)
 
-        while True:
-            complete_out = None
-            torch.cuda.empty_cache()
-            while True:
-                this_batch_test_indexes = test_idcs[
-                    batch_i * batch_size : (batch_i + 1) * batch_size
-                ]
-                try:
-                    datas = [dataset[int(idex)] for idex in this_batch_test_indexes]
-                except ValueError: # Most probably an atom in pdb that is missing in model
-                    batch_i += 1
-                    prog.update(len(this_batch_test_indexes))
-                    continue
-                if len(datas) == 0:
-                    stop = True
-                    break
-
-                out, batch, already_computed_nodes = evaluate(c, datas, device, model, already_computed_nodes, model_config)
-                if complete_out is None:
-                    complete_out = copy.deepcopy(batch)
-                    if AtomicDataDict.PER_ATOM_ENERGY_KEY in out:
-                        complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY] = torch.zeros(
-                            (len(batch[AtomicDataDict.POSITIONS_KEY]), *out[AtomicDataDict.PER_ATOM_ENERGY_KEY].shape[1:]),
-                            dtype=torch.get_default_dtype(),
-                            device=out[AtomicDataDict.PER_ATOM_ENERGY_KEY].device
-                        )
-                    if AtomicDataDict.TOTAL_ENERGY_KEY in out:
-                        complete_out[AtomicDataDict.TOTAL_ENERGY_KEY] = torch.zeros_like(
-                            out[AtomicDataDict.TOTAL_ENERGY_KEY]
-                        )
-                if AtomicDataDict.PER_ATOM_ENERGY_KEY in complete_out:
-                    original_nodes = out[AtomicDataDict.ORIG_EDGE_INDEX_KEY][0].unique()
-                    nodes = out[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-                    complete_out[AtomicDataDict.PER_ATOM_ENERGY_KEY][original_nodes] = out[AtomicDataDict.PER_ATOM_ENERGY_KEY][nodes].detach()
-
-                if AtomicDataDict.FORCE_KEY in complete_out:
-                    complete_out[AtomicDataDict.FORCE_KEY][original_nodes] = out[AtomicDataDict.FORCE_KEY][nodes].detach()
-
-                if AtomicDataDict.TOTAL_ENERGY_KEY in complete_out:
-                    complete_out[AtomicDataDict.TOTAL_ENERGY_KEY] += out[AtomicDataDict.TOTAL_ENERGY_KEY].detach()
-                del out
-
-                if already_computed_nodes is None:
-                    break
-            if stop:
-                break
-
-            with torch.no_grad():
-                # Write output
-                if output_type == "xyz":
-                    # add test frame to the output:
-                    complete_out[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
-                        this_batch_test_indexes
-                    )
-                    batch[ORIGINAL_DATASET_INDEX_KEY] = torch.LongTensor(
-                        this_batch_test_indexes
-                    )
-                    # append to the file
-                    for dataset_idx in torch.unique(complete_out['dataset_idx']).to('cpu').tolist():
-                        idx = dataset_idx_to_idx[dataset_idx]
-                        ase.io.write(
-                            output[idx],
-                            AtomicData.from_AtomicDataDict(complete_out)
-                            .to(device="cpu")
-                            .to_ase(
-                                type_mapper=dataset.datasets[idx].type_mapper,
-                                extra_fields=args.output_fields,
-                                filter_idcs=(complete_out['dataset_idx'] == dataset_idx).to('cpu'),
-                            ),
-                            format="extxyz",
-                            append=True,
-                        )
-                        ase.io.write(
-                            output_target[idx],
-                            AtomicData.from_AtomicDataDict(batch)
-                            .to(device="cpu")
-                            .to_ase(
-                                type_mapper=dataset.datasets[idx].type_mapper,
-                                filter_idcs=(complete_out['dataset_idx'] == dataset_idx).to('cpu'),
-                            ),
-                            format="extxyz",
-                            append=True,
-                        )
-
-            # Accumulate metrics
-            if do_metrics:
-                try:
-                    metrics(complete_out, batch)
-                    display_bar.set_description_str(
-                        " | ".join(
-                            f"{k} = {v:4.4f}"
-                            for k, v in metrics.flatten_metrics(
-                                metrics.current_result(),
-                                type_names=dataset.datasets[0].type_mapper.type_names,
-                            )[0].items()
-                        )
-                    )
-                except:
-                    display_bar.set_description_str(
-                        "No metrics available for this dataset. Ground truth may be missing."
-                    )
-
-            batch_i += 1
-            prog.update(len(batch['ptr'] - 1))
-
-        prog.close()
-        if do_metrics:
-            display_bar.close()
-
-    if do_metrics:
-        logger.info("\n--- Final result: ---")
-        logger.critical(
-            "\n".join(
-                f"{k:>20s} = {v:< 20f}"
+            desc = '\t'.join(
+                f'{k:>20s} = {v:< 20f}'
                 for k, v in metrics.flatten_metrics(
-                    metrics.current_result(),
-                    type_names=dataset.datasets[0].type_mapper.type_names,
+                    batch_metrics,
+                    metrics_metadata=metrics_metadata,
                 )[0].items()
             )
+            pbar.set_description(f"Metrics: {desc}")
+            del out, ref_data
+
+            # evaluate ending condition
+            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
+                    already_computed_nodes = batch_chunk_center_nodes
+            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
+                already_computed_nodes = None
+            else:
+                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
+                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
+
+            if already_computed_nodes is None:
+                break
+
+    logger.info("\n--- Final result: ---")
+    
+    logger.critical(
+        "\n".join(
+            f"{k:>20s} = {v:< 20f}"
+            for k, v in metrics.flatten_metrics(
+                metrics.current_result(),
+                metrics_metadata=metrics_metadata,
+            )[0].items()
         )
-"""
+    )
+
 
 def load_model(model: Path, device="cpu"):
     logger = logging.getLogger("geqtrain-evaluate")
@@ -495,10 +333,10 @@ def load_model(model: Path, device="cpu"):
     except ValueError:  # its not a deployed model
         pass
 
-    global_config = model.parent / "config.yaml"
-    global_config = Config.from_file(str(global_config))
-    _set_global_options(global_config)
-    del global_config
+    # global_config = model.parent / "config.yaml"
+    # global_config = Config.from_file(str(global_config))
+    # _set_global_options(global_config)
+    # del global_config
 
     # load a training session model
     model, model_config = Trainer.load_model_from_training_session(
@@ -509,66 +347,5 @@ def load_model(model: Path, device="cpu"):
 
     return model, model_config
 
-def evaluate(model, batch, node_out_keys: List[str] = [], extra_out_keys: List[str] = [], batch_max_atoms: int = 1000):
-    device = next(model.parameters()).device
-    batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-    num_batch_center_nodes = len(batch_index[0].unique())
-
-    results = {}
-    already_computed_nodes = None
-    while True:
-
-        input_data, _, batch_chunk_center_nodes = Trainer.prepare_chunked_input_data(
-            already_computed_nodes=already_computed_nodes,
-            batch=batch,
-            data=batch,
-            batch_max_atoms=batch_max_atoms,
-            device=device,
-        )
-
-        with torch.no_grad():
-            out = model(input_data)
-        del input_data
-
-        for node_out_key in node_out_keys:
-            chunk_node_out = out[node_out_key]
-            if node_out_key not in results:
-                results[node_out_key] = torch.zeros(
-                    (num_batch_center_nodes, chunk_node_out.shape[-1]),
-                    dtype=torch.get_default_dtype(),
-                    device=chunk_node_out.device
-                )
-            results[node_out_key][batch_chunk_center_nodes] = chunk_node_out[out[AtomicDataDict.EDGE_INDEX_KEY][0].unique()]
-
-        for extra_out_key in extra_out_keys:
-            chunk_extra_out = out[extra_out_key]
-            if extra_out_key not in results:
-                results[extra_out_key] = chunk_extra_out
-            else:
-                fltr = torch.argwhere(~torch.isnan(chunk_extra_out[:, 0])).flatten()
-                results[extra_out_key][fltr] = chunk_extra_out[fltr]
-
-        # from e3nn import o3
-        # R = o3.Irreps('1o').D_from_angles(*[torch.tensor(x) for x in [0, 90, 0]]).to(batch_['pos'].device)
-        # batch_['pos'] = torch.einsum("ij,zj->zi", R, batch_['pos'])
-        # out2 = model(batch_)
-        # R2 = o3.Irreps('1o').D_from_angles(*[torch.tensor(x) for x in [0, -90, 0]]).to(batch_['pos'].device)
-        # o1 = out['forces']
-        # o2 = torch.einsum("ij,zj->zi", R2, out2['forces'])
-
-        if already_computed_nodes is None:
-            if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                already_computed_nodes = batch_chunk_center_nodes
-            else:
-                assert len(batch_chunk_center_nodes) == num_batch_center_nodes
-                return results
-        elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-            return results
-        else:
-            assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-            already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-
 if __name__ == "__main__":
-    pass
-    # main(running_as_script=True)
+    main(running_as_script=True)

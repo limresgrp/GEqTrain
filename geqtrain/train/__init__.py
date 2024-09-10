@@ -1,8 +1,8 @@
-from .trainer import Trainer, TrainerWandB
-from ._loss import PerLabelLoss
+from .trainer import Trainer, TrainerWandB, DistributedTrainer, DistributedTrainerWandB
 
 __all__ = [
     Trainer,
     TrainerWandB,
-    PerLabelLoss,
+    DistributedTrainer,
+    DistributedTrainerWandB,
 ]

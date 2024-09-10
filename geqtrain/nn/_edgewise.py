@@ -1,13 +1,11 @@
 import torch
 import math
 from typing import Optional
+from einops import rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
-
-from e3nn import o3
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin
-from geqtrain.nn.allegro._fc import ScalarMLPFunction
+from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
@@ -29,6 +27,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         head_dim: int = 32,
         use_attention: bool = True,
         irreps_in={},
+        avg_num_neighbors: Optional[float] = 5.0,
     ):
         """Sum edges into nodes."""
         super().__init__()
@@ -60,37 +59,44 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
             if 'mlp_latent_dimensions' not in readout_latent_kwargs:
                 readout_latent_kwargs['mlp_latent_dimensions'] = [64, 64]
+            if 'zero_init_last_layer_weights' not in readout_latent_kwargs:
+                readout_latent_kwargs['zero_init_last_layer_weights'] = True
 
             self.head_dim = head_dim
             self.isqrtd = math.isqrt(head_dim)
 
-            self.K_in_dim = self.irreps_mul * self.n_l[0]//2
-            out_irreps = o3.Irreps([(mul - mul//2, ir) if ir.l == 0 else (mul, ir) for mul, ir in irreps])
-            self.K_out_dim = out_irreps[0].mul
+            self.n_scalars = self.irreps_mul * self.n_l[0]
 
             self.reshape_in = reshape_irreps(irreps)
 
-            self.edge_feat_to_key = readout_latent(
-                mlp_input_dimension=self.K_in_dim,
-                mlp_output_dimension= self.K_out_dim * self.head_dim,
-                **readout_latent_kwargs,
-            )
-
             self.node_attr_to_query = readout_latent(
                 mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
-                mlp_output_dimension=self.K_out_dim * self.head_dim,
+                mlp_output_dimension=self.n_scalars * self.head_dim,
                 **readout_latent_kwargs,
             )
 
-            self.reshape_out = inverse_reshape_irreps(out_irreps)
+            self.edge_feat_to_key = readout_latent(
+                mlp_input_dimension=self.n_scalars,
+                mlp_output_dimension= self.n_scalars * self.head_dim,
+                **readout_latent_kwargs,
+            )
+
+            self.reshape_out = inverse_reshape_irreps(irreps)
 
             self.irreps_out.update(
                 {
-                    self.out_field: out_irreps
+                    self.out_field: irreps
                 }
             )
         else:
             self.node_attr_to_query = None
+            self.edge_feat_to_key = None
+
+        if not self.use_attention:
+            self.register_buffer(
+                "env_sum_normalization",
+                torch.as_tensor([avg_num_neighbors]).rsqrt(),
+            )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -98,19 +104,24 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
-        
+
         if self.use_attention and self.node_attr_to_query is not None:
-            Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY])
-            Q = Q.reshape(-1, self.K_out_dim, self.head_dim)[edge_center]
+            Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])
+            Q = rearrange(Q, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
-            K = self.edge_feat_to_key(edge_feat[:, :self.K_in_dim])
-            K = K.reshape(-1, self.K_out_dim, self.head_dim)
+            K = self.edge_feat_to_key(edge_feat[..., :self.n_scalars])
+            K = rearrange(K, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
-            A = torch.einsum('ijk,ijk -> ij', Q, K) * self.isqrtd
+            W = torch.einsum('ecd,ecd -> ec', Q, K) * self.isqrtd
 
             edge_feat = self.reshape_in(edge_feat)
-            edge_feat = torch.einsum('emd,em->emd', edge_feat[:, self.K_in_dim:], scatter_softmax(A, edge_center, dim=0))
+            edge_feat = torch.einsum('emd,em->emd', edge_feat, scatter_softmax(W, edge_center, dim=0))
             edge_feat = self.reshape_out(edge_feat)
 
+        # aggregation step
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
+
+        if not self.use_attention:
+            data[self.out_field] *= self.env_sum_normalization
+
         return data

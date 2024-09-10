@@ -3,7 +3,7 @@
 
 from copy import deepcopy
 from hashlib import sha1
-from typing import Union, Sequence, Tuple
+from typing import Dict, List, Union, Sequence, Tuple
 
 import yaml
 
@@ -13,7 +13,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.train.utils import parse_dict
 from torch_runstats import RunningStats, Reduction
 
-from ._loss import find_loss_function
+from ._loss import instanciate_loss_function
 from ._key import ABBREV
 
 
@@ -88,7 +88,7 @@ class Metrics:
                     kwargs.pop("functional")
 
                     # by default, report a scalar that is mae and rmse over all component
-                    loss_func = find_loss_function(func, func_params)
+                    loss_func = instanciate_loss_function(func, func_params)
                     self.funcs[key][param_hash] = loss_func
                     reduction = getattr(loss_func, "reduction", Reduction.MEAN)
                     self.kwargs[key][param_hash] = dict(reduction=reduction)
@@ -157,7 +157,9 @@ class Metrics:
                     }
                 elif per_label:
                     params = {
-                        "accumulate_by": torch.arange(12, device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
+                        "accumulate_by": torch.cat([
+                            torch.arange(ref[key].shape[-1], device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
+                        ] * ref[key].shape[0])
                     }
                 if per_node:
                     if N is None:
@@ -197,7 +199,7 @@ class Metrics:
                 metrics[(key, reduction)] = stat.current_result()
         return metrics
 
-    def flatten_metrics(self, metrics, metrics_metadata: dict[str,list[str]]=None):
+    def flatten_metrics(self, metrics, metrics_metadata: Dict[str, List[str]]=None):
 
         type_names = metrics_metadata.get('type_names', [])
         target_names = metrics_metadata.get('target_names', [])
@@ -248,8 +250,6 @@ class Metrics:
                             flat_dict[f"{target_names[id_ele]}"] = v.item()
                         else:
                             flat_dict[f"{id_ele}_{item_name}"] = v.item()
-
-                    flat_dict[f"psavg_{item_name}"] = value.mean().item()
                 else:
                     for id_ele, vec in enumerate(value):
                         ele = type_names[id_ele]

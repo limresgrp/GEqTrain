@@ -5,6 +5,8 @@ from typing import Optional, Union, List
 import inspect
 import logging
 
+from geqtrain.utils.savenload import load_callable
+
 from .config import Config
 
 
@@ -84,7 +86,7 @@ def instantiate(
         positional_args: the arguments used for input. These arguments have the top priority.
         optional_args: the second priority group to search for keys.
         all_args: the third priority group to search for keys.
-        remove_kwargs: if True, ignore the kwargs argument in the init funciton
+        remove_kwargs: if True, ignore the kwargs argument in the init function
             same definition as the one in Config.from_function
         return_args_only (bool): if True, do not instantiate, only return the arguments
     """
@@ -164,7 +166,9 @@ def instantiate(
             continue
 
         if not (callable(sub_builder) or inspect.isclass(sub_builder)):
-            raise ValueError(f"Builder for submodule `{key}` must be a callable or a class, got `{sub_builder!r}` instead.")
+            if isinstance(sub_builder, str):
+                sub_builder = load_callable(sub_builder, prefix=prefix)
+                final_optional_args[key] = sub_builder
 
         # add double check to avoid cycle
         # only overwrite the optional argument, not the positional ones

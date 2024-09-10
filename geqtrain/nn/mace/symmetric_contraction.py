@@ -160,7 +160,7 @@ class Contraction(torch.nn.Module):
                 # Parameters for the product basis
                 w = torch.nn.Parameter(
                     torch.randn((num_elements, num_params, self.num_features))
-                    / sqrt(self.num_features)
+                    / sqrt(num_elements * self.num_features)
                 )
                 self.weights_max = w
             else:

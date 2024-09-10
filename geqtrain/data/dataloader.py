@@ -2,6 +2,7 @@
 """
 
 from typing import List
+from functools import reduce
 
 import torch
 
@@ -37,7 +38,7 @@ class Collater(object):
         All kwargs besides ``fixed_fields`` are passed through to the constructor.
         """
         return cls(
-            fixed_fields=list(getattr(dataset, "fixed_fields", {}).keys()),
+            fixed_fields=list(reduce(lambda acc, d: acc | set(getattr(d, "fixed_fields", {}).keys()), dataset.datasets, set())),
             exclude_keys=exclude_keys,
         )
 

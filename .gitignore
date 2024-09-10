@@ -2,6 +2,9 @@ config/
 results/
 deployed/
 
+# zipped files
+*.zip
+
 # VSCode
 .vscode/
 

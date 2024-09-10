@@ -12,6 +12,9 @@ from geqtrain.data import register_fields
 from .auto_init import instantiate
 
 
+DTYPE = torch.get_default_dtype()
+
+
 # for multiprocessing, we need to keep track of our latest global options so
 # that we can reload/reset them in worker processes. While we could be more careful here,
 # to keep only relevant keys, configs should have only small values (no big objects)
@@ -76,6 +79,8 @@ def _set_global_options(config, warn_on_override: bool = False) -> None:
             "float32": torch.float32,
             "float64": torch.float64
         }[config["default_dtype"]])
+        global DTYPE
+        DTYPE = torch.get_default_dtype()
     if config.get("grad_anomaly_mode", False):
         torch.autograd.set_detect_anomaly(True)
 
