@@ -356,7 +356,6 @@ class Trainer:
         keep_node_types: Optional[List[int]] = None,
         metrics_components: Optional[Union[dict, str]] = None,
         metrics_key: str = f"{VALIDATION}_" + ABBREV.get(LOSS_KEY, LOSS_KEY),
-        early_stopping_conds: Optional[EarlyStopping] = None,
         early_stopping: Optional[Callable] = None,
         early_stopping_kwargs: Optional[dict] = None,
         max_epochs: int = 10000,
@@ -895,8 +894,6 @@ class Trainer:
         """Training"""
         if getattr(self, "dl_train", None) is None:
             raise RuntimeError("You must call `set_dataset()` before calling `train()`")
-        if not self._initialized:
-            self.init()
 
         for callback in self._init_callbacks:
             callback(self)
@@ -909,11 +906,10 @@ class Trainer:
             if self.iepoch == -1:
                 self.save()
 
-        hooks_handler = ForwardHookHandler(self, self.hooks)
+        # hooks_handler = ForwardHookHandler(self, self.hooks)
 
         # actual train loop
         while not self.stop_cond:
-
             self.epoch_step()
             self.end_of_epoch_save()
 
@@ -923,7 +919,7 @@ class Trainer:
         self.final_log()
         
         self.save()
-        hooks_handler.deregister_hooks()
+        # hooks_handler.deregister_hooks()
         finish_all_writes()
 
     def get_cm(self, validation):
@@ -1227,6 +1223,9 @@ class Trainer:
         
         self.norm_dict = dict(Grad_norm=self.norms)
 
+        if not self.is_master:
+            return
+
         if self.iepoch == 0:
             self.init_epoch_logger.info(header)
             self.init_epoch_logger.info(mat_str)
@@ -1398,10 +1397,13 @@ class Trainer:
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
-    def init(self, *args, **kwargs):
-        super().init(*args, **kwargs)
+    def init(self, **kwargs):
+        super().init(**kwargs)
 
         if not self._initialized:
+            return
+
+        if not self.is_master:
             return
 
         # upload some new fields to wandb
@@ -1412,6 +1414,9 @@ class TrainerWandB(Trainer):
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
     def end_of_epoch_log(self):
+        if not self.is_master:
+            return
+        
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
@@ -1421,13 +1426,16 @@ class TrainerWandB(Trainer):
 
 class DistributedTrainer(Trainer):
 
-    def init(self, rank: int, world_size: int, *args, **kwargs):
+    def __init__(self, rank: int, world_size: int, *args, **kwargs):
+        kwargs["device"] = rank
+        super().__init__(is_master=rank==0, *args, **kwargs)
         self.rank = rank
         self.world_size = world_size
 
+    def init(self, **kwargs):
         # Set the device for this process
-        torch.cuda.set_device(rank)
-        super().init(device=f'cuda:{rank}', is_master=rank==0, *args, **kwargs)
+        torch.cuda.set_device(self.rank)
+        super().init(**kwargs)
     
     def set_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
@@ -1440,7 +1448,7 @@ class DistributedTrainer(Trainer):
         self.model = DDP(self.model, device_ids=[self.rank])
 
 
-class DistributedTrainerWandB(DistributedTrainer, TrainerWandB):
+class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
 
-    def init(self):
-        super().init()
+    def init(self, **kwargs):
+        super().init(self, **kwargs)

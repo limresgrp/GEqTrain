@@ -33,7 +33,6 @@ CODE_COMMITS_KEY: Final[str] = "code_commits"
 R_MAX_KEY: Final[str] = "r_max"
 N_SPECIES_KEY: Final[str] = "n_species"
 TYPE_NAMES_KEY: Final[str] = "type_names"
-JIT_BAILOUT_KEY: Final[str] = "_jit_bailout_depth"
 JIT_FUSION_STRATEGY: Final[str] = "_jit_fusion_strategy"
 TF32_KEY: Final[str] = "allow_tf32"
 
@@ -44,7 +43,6 @@ _ALL_METADATA_KEYS = [
     R_MAX_KEY,
     N_SPECIES_KEY,
     TYPE_NAMES_KEY,
-    JIT_BAILOUT_KEY,
     JIT_FUSION_STRATEGY,
     TF32_KEY,
 ]
@@ -102,7 +100,7 @@ def load_deployed_model(
             strategy = [e.split(",") for e in strategy.split(";")]
             strategy = [(e[0], int(e[1])) for e in strategy]
         else:
-            strategy = [("DYNAMIC", 3)]
+            strategy = [("STATIC", 2)]
         global_config_dict[JIT_FUSION_STRATEGY] = strategy
         # JIT bailout
         # _set_global_options will check torch version

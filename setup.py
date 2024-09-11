@@ -29,7 +29,6 @@ setup(
         "numpy",
         "einops",
         "tqdm",
-        "torch>=1.10.0",
         "wandb>=0.13",
         "e3nn>=0.4.4",
         "pyyaml",

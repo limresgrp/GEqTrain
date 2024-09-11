@@ -2,9 +2,11 @@ import math
 import torch
 
 from e3nn import o3
+from e3nn.util.jit import compile_mode
 from einops import rearrange
 
 
+@compile_mode("script")
 class SO3_Linear(torch.nn.Module):
     def __init__(
             self,
@@ -114,6 +116,7 @@ class SO3_Linear(torch.nn.Module):
                f"bias={self.bias is not None})"
 
 
+@compile_mode("script")
 class SO3_LayerNorm(torch.nn.Module):
     def __init__(
             self,
