@@ -299,6 +299,7 @@ class Config(object):
         c = Config(defaults)
         c.update(dictionary)
         c.parse_node_types()
+        c.parse_attributes()
         c.parse_targets_metadata()
         return c
 
@@ -383,7 +384,13 @@ class Config(object):
             num_types = 1
             self["type_names"] = ["type_0"]
         self["num_types"] = num_types
-
+    
+    def parse_attributes(self):
+        if "node_attributes" in self and "node_types" in self["node_attributes"]:
+            if "num_types" in self["node_attributes"]["node_types"]:
+                assert self["node_attributes"]["node_types"]["num_types"] == self["num_types"]
+            else:
+                self["node_attributes"]["node_types"]["num_types"] = self["num_types"]
 
     def parse_targets_metadata(self):
         '''
