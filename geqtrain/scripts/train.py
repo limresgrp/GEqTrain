@@ -4,12 +4,13 @@
 """ Train a network."""
 import logging
 import argparse
+import os
 import shutil
-import warnings
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
 import numpy as np  # noqa: F401
+import torch.distributed as dist
 
 from os.path import isdir
 from pathlib import Path
@@ -21,9 +22,19 @@ from geqtrain.utils._global_options import _set_global_options
 from geqtrain.scripts._logger import set_up_script_logger
 from geqtrain.utils.test import assert_AtomicData_equivariant
 
+import warnings
+warnings.filterwarnings("ignore")
+
+
+def setup_process(rank, world_size):
+    # Initialize the process group for distributed training
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 def main(args=None, running_as_script: bool = True):
-    config = parse_command_line(args)
+    args, config = parse_command_line(args)
 
     if running_as_script:
         set_up_script_logger(config.get("log", None), config.verbose)
@@ -35,17 +46,31 @@ def main(args=None, running_as_script: bool = True):
             "either set append to True or use a different root or runname"
         )
 
-    # for fresh new train
     if not found_restart_file:
-        trainer = fresh_start(config)
+        func = fresh_start
     elif config.fine_tune:
-        trainer = fine_tune(config)
+        if config.use_dt:
+            raise NotImplementedError("Could not fine tune in Distributed Training yet.")
+        func = fine_tune
     else:
-        trainer = restart(config)
-
-    # Train
-    trainer.save()
-    trainer.train()
+        if config.use_dt:
+            raise NotImplementedError("Could not restart training in Distributed Training yet.")
+        func = restart
+    
+    if config.use_dt:
+        # Manually set the environment variables for multi-GPU setup
+        world_size = args.world_size
+        os.environ['WORLD_SIZE'] = str(world_size)  # Number of GPUs/processes to use
+        if args.master_addr:
+            os.environ['MASTER_ADDR'] = str(args.master_addr)
+        if args.master_port:
+            os.environ['MASTER_PORT'] = str(args.master_port)
+        
+        # Spawn one process per GPU
+        import torch.multiprocessing as mp
+        mp.spawn(func, args=(world_size, config.as_dict(),), nprocs=world_size, join=True)
+    else:
+        func(None, None, config.as_dict())
 
     return
 
@@ -58,18 +83,19 @@ def parse_command_line(args=None):
         "config", help="YAML file configuring the model, dataset, and other options"
     )
     parser.add_argument(
+        "-d",
+        "--device",
+        help="Device on which to run the training. could be either 'cpu' or 'cuda[:n]'",
+        default=None,
+    )
+    parser.add_argument(
         "--equivariance-test",
         help="test the model's equivariance before training on first frame of the validation dataset",
         action="store_true",
     )
     parser.add_argument(
-        "--model-debug-mode",
-        help="enable model debug mode, which can sometimes give much more useful error messages at the cost of some speed. Do not use for production training!",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--grad-anomaly-mode",
-        help="enable PyTorch autograd anomaly mode to debug NaN gradients. Do not use for production training!",
+        "--fine-tune",
+        help="enable the fine-tuning mode. The configuration file should contain the dataset on which to perform fine-tuning",
         action="store_true",
     )
     parser.add_argument(
@@ -79,87 +105,133 @@ def parse_command_line(args=None):
         default=None,
     )
     parser.add_argument(
-        "--fine-tune",
-        help="enable the fine-tuning mode. The configuration file should contain the dataset on which to perform fine-tuning",
+        "--grad-anomaly-mode",
+        help="enable PyTorch autograd anomaly mode to debug NaN gradients. Do not use for production training!",
         action="store_true",
+    )
+    parser.add_argument(
+        "-ws",
+        "--world-size",
+        help="Number of available GPUs for Distributed Training",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
+        "-ma",
+        "--master-addr",
+        help="set MASTER_ADDR environment variable for Distributed Training",
+        default=None,
+    )
+    parser.add_argument(
+        "-mp",
+        "--master-port",
+        help="set MASTER_PORT environment variable for Distributed Training",
+        default=None,
     )
     args = parser.parse_args(args=args)
 
+    # Check consistency
+    if args.world_size is not None:
+        if args.device is not None:
+            raise argparse.ArgumentError("Cannot specify device when using Distributed Training")
+        if args.equivariance_test:
+            raise argparse.ArgumentError("You can run Equivariance Test on single CPU/GPU only")
+
     config = Config.from_file(args.config)
-    for flag in ("model_debug_mode", "equivariance_test", "grad_anomaly_mode", "fine_tune"):
-        config[flag] = getattr(args, flag) or config[flag]
 
-    return config
+    flags = ("device", "equivariance_test", "fine_tune", "grad_anomaly_mode")
+    config.update({flag: getattr(args, flag) for flag in flags if getattr(args, flag) is not None})
+    config.update({"use_dt": args.world_size is not None})
+
+    return args, config
 
 
-def fresh_start(config):
-    # we use add_to_config cause it's a fresh start and need to record it
-    _set_global_options(config)
-
-    # = Make the trainer =
-    if config.wandb:
-        import wandb  # noqa: F401
-        # download parameters from wandb in case of sweeping
-        from geqtrain.utils.wandb import init_n_update
-        from geqtrain.train import TrainerWandB
-        config = init_n_update(config)
-        trainer = TrainerWandB(**dict(config))
-    else:
-        from geqtrain.train import Trainer
-        trainer = Trainer(**dict(config))
-    
-    shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
-
-    # what is this? to update wandb data?
-    config.update(trainer.params)
-
-    # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset") # ConcatDataset of many NpzDatasets
-    logging.info(f"Successfully loaded the data set of type {dataset}...")
+def fresh_start(rank, world_size, config):
     try:
-        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-        logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
-    except KeyError:
-        # It couldn't be found
-        validation_dataset = None
+        config = Config.from_dict(config)
+        # we use add_to_config cause it's a fresh start and need to record it
+        _set_global_options(config)
 
-    # = Train/validation split =
-    trainer.set_dataset(dataset, validation_dataset)
-    trainer.set_dataloader()
-    
-    # = Update config with dataset-related params = #
-    config.update(trainer.dataset_params)
+        if config.use_dt:
+            # Setup the process for distributed training
+            setup_process(rank, world_size)
 
-    # = Build model =
-    model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
-    logging.info("Successfully built the network...")
+        # = Make the trainer =
+        if config.wandb:
+            import wandb  # noqa: F401
+            # download parameters from wandb in case of sweeping
+            from geqtrain.utils.wandb import init_n_update
+            if rank == 0:
+                config = init_n_update(config)
+            if config.use_dt:
+                from geqtrain.train import DistributedTrainerWandB
+                trainer = DistributedTrainerWandB(rank=rank, world_size=world_size, **dict(config))
+            else:
+                from geqtrain.train import TrainerWandB
+                trainer = TrainerWandB(**dict(config))
+        else:
+            if config.use_dt:
+                from geqtrain.train import DistributedTrainer
+                trainer = DistributedTrainer(rank=rank, world_size=world_size, **dict(config))
+            else:
+                from geqtrain.train import Trainer
+                trainer = Trainer(**dict(config))
+        
+        shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
 
-    # by doing this here we check also any keys custom builders may have added
-    _check_old_keys(config)
+        config.update(trainer.params)
 
-    # Equivar test
-    if config.equivariance_test:
-        model.eval()
-        errstr = assert_AtomicData_equivariant(
-            model, trainer.dataset_train[0]
-        )
-        model.train()
-        logging.info(
-            "Equivariance test passed; equivariance errors:\n"
-            f"{errstr}"
-        )
-        del errstr
+        # = Load the dataset =
+        dataset = dataset_from_config(config, prefix="dataset") # ConcatDataset of many NpzDatasets
+        logging.info(f"Successfully loaded the data set of type {dataset}...")
+        try:
+            validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+            logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
+        except KeyError:
+            # It couldn't be found
+            validation_dataset = None
 
-    # Set the trainer
-    trainer.init(model=model)
+        # = Train/validation split =
+        trainer.set_dataset(dataset, validation_dataset)
+        trainer.set_dataloader()
+        
+        # = Update config with dataset-related params = #
+        config.update(trainer.dataset_params)
 
-    # Store any updated config information in the trainer
-    trainer.update_kwargs(config)
+        # = Build model =
+        model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+        logging.info("Successfully built the network...")
 
-    return trainer
+        # Equivar test
+        if config.equivariance_test:
+            model.eval()
+            errstr = assert_AtomicData_equivariant(
+                model, trainer.dataset_train[0]
+            )
+            model.train()
+            logging.info(
+                "Equivariance test passed; equivariance errors:\n"
+                f"{errstr}"
+            )
+            del errstr
+
+        # Set the trainer
+        trainer.init(model=model)
+
+        # Store any updated config information in the trainer
+        trainer.update_kwargs(config)
+
+        # Train
+        trainer.save()
+        trainer.train()
+    finally:
+        if config.use_dt:
+            cleanup()
+
+    return
 
 
-def fine_tune(config):
+def fine_tune(rank, world_size, config):
 
     # load the dictionary
     restart_file = f"{config.root}/{config.run_name}/trainer.pth"
@@ -233,10 +305,14 @@ def fine_tune(config):
     # reset scheduler
     trainer.lr_sched._reset()
 
-    return trainer
+    # Train
+    trainer.save()
+    trainer.train()
+
+    return
 
 
-def restart(config):
+def restart(rank, world_size, config):
     # load the dictionary
     restart_file = f"{config.root}/{config.run_name}/trainer.pth"
     dictionary = load_file(
@@ -295,18 +371,11 @@ def restart(config):
     trainer.set_dataset(dataset, validation_dataset)
     trainer.set_dataloader()
 
-    return trainer
+    # Train
+    trainer.save()
+    trainer.train()
 
-
-def _check_old_keys(config) -> None:
-    """check ``config`` for old/depricated keys and emit corresponding errors/warnings"""
-    # compile_model
-    k = "compile_model"
-    if k in config:
-        if config[k]:
-            raise ValueError("the `compile_model` option has been removed")
-        else:
-            warnings.warn("the `compile_model` option has been removed")
+    return
 
 
 if __name__ == "__main__":
