@@ -30,7 +30,8 @@ def setup_process(rank, world_size):
     # Initialize the process group for distributed training
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def cleanup():
+def cleanup(rank):
+    logging.info(f"Rank: {rank} | Destroying process group")
     dist.destroy_process_group()
 
 def main(args=None, running_as_script: bool = True):
@@ -224,9 +225,13 @@ def fresh_start(rank, world_size, config):
         # Train
         trainer.save()
         trainer.train()
+    except KeyboardInterrupt:
+        logging.info("Process manually stopped!")
+    except Exception as e:
+        logging.error(e)
     finally:
         if config.use_dt:
-            cleanup()
+            cleanup(rank)
 
     return
 
