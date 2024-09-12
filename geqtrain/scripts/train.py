@@ -71,7 +71,7 @@ def main(args=None, running_as_script: bool = True):
         import torch.multiprocessing as mp
         mp.spawn(func, args=(world_size, config.as_dict(),), nprocs=world_size, join=True)
     else:
-        func(None, None, config.as_dict())
+        func(0, 1, config.as_dict())
 
     return
 
@@ -229,6 +229,7 @@ def fresh_start(rank, world_size, config):
         logging.info("Process manually stopped!")
     except Exception as e:
         logging.error(e)
+        raise e
     finally:
         if config.use_dt:
             cleanup(rank)
