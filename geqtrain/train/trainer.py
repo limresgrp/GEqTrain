@@ -47,31 +47,34 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
-def remove_node_centers_for_NaN_targets(batch, loss_func, keep_node_types):
+def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
+    data = dataset.data
+    if AtomicDataDict.NODE_TYPE_KEY in data:
+        node_types = data[AtomicDataDict.NODE_TYPE_KEY]
+    else:
+        node_types = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
     # - Remove edges of atoms whose result is NaN - #
     per_node_outputs_keys = []
     if loss_func is not None:
         for key in loss_func.coeffs:
             if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
                 key_clean = loss_func.remove_suffix(key)
-                if key_clean in batch and len(batch[key_clean]) == len(batch[AtomicDataDict.BATCH_KEY]):
-                    val = batch[key_clean].reshape(len(batch[key_clean]), -1)
+                if key_clean in data:
+                    val = data[key_clean].reshape(len(data[key_clean]), -1)
                     if keep_node_types is not None:
-                        batch[key_clean][~torch.isin(batch[AtomicDataDict.NODE_TYPE_KEY].flatten(), keep_node_types)] = torch.nan
+                        data[key_clean][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
 
-                    not_nan_edge_filter = torch.isin(batch[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-                    batch[AtomicDataDict.EDGE_INDEX_KEY] = batch[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    batch[AtomicDataDict.BATCH_KEY] = batch[AtomicDataDict.BATCH_KEY][batch[AtomicDataDict.EDGE_INDEX_KEY].unique()]
-                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
-                        batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                    data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
+                    data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1] = data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1]
+                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+                        data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
                     per_node_outputs_keys.append(key_clean)
 
-    per_node_outputs_values = []
-    for per_node_output_key in per_node_outputs_keys:
-        if per_node_output_key in batch:
-            per_node_outputs_values.append(batch.get(per_node_output_key))
-
-    return batch, per_node_outputs_keys, per_node_outputs_values
+    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
+        return None, per_node_outputs_keys
+    dataset.data = data
+    return dataset, per_node_outputs_keys
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -87,10 +90,9 @@ def run_inference(
     data,
     device,
     already_computed_nodes = None,
-    loss_func: Optional[Loss] = None,
+    per_node_outputs_keys: List[str] = [],
     cm=contextlib.nullcontext(),
     mixed_precision: bool = False,
-    keep_node_types: Optional[List[int]] = None,
     skip_chunking: bool = False,
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
@@ -98,8 +100,6 @@ def run_inference(
 ):
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
     batch = AtomicData.to_AtomicDataDict(data.to(device)) # AtomicDataDict is the dstruct that is taken as input from each forward
-
-    batch, per_node_outputs_keys, per_node_outputs_values = remove_node_centers_for_NaN_targets(batch, loss_func, keep_node_types)
 
     batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
     num_batch_center_nodes = len(batch_index[0].unique())
@@ -118,7 +118,6 @@ def run_inference(
             batch=batch,
             data=data,
             per_node_outputs_keys=per_node_outputs_keys,
-            per_node_outputs_values=per_node_outputs_values,
             batch_max_atoms=batch_max_atoms,
             ignore_chunk_keys=ignore_chunk_keys,
             device=device,
@@ -141,7 +140,6 @@ def prepare_chunked_input_data(
     batch: AtomicDataDict.Type,
     data: AtomicDataDict.Type,
     per_node_outputs_keys: List[str] = [],
-    per_node_outputs_values: List[torch.Tensor] = [],
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
     device = "cpu"
@@ -201,9 +199,9 @@ def prepare_chunked_input_data(
         for k, v in edge_fields_dict.items():
             batch[k] = v
         if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
-                    batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
-        for per_node_output_key, per_node_outputs_value in zip(per_node_outputs_keys, per_node_outputs_values):
-            chunk_per_node_outputs_value = per_node_outputs_value.clone()
+            batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
+        for per_node_output_key in per_node_outputs_keys:
+            chunk_per_node_outputs_value = batch[per_node_output_key].clone()
             mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
             mask[batch_chunk_index[0].unique()] = False
             chunk_per_node_outputs_value[mask] = torch.nan
@@ -422,7 +420,7 @@ class Trainer:
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
 
-        # add filenames if not defined
+        # --- add filenames if not defined
         self.config_path       = output.generate_file("config.yaml")
         self.best_model_path   = output.generate_file("best_model.pth")
         self.last_model_path   = output.generate_file("last_model.pth")
@@ -463,6 +461,7 @@ class Trainer:
         self.early_stopping_conds = None
 
         # --- initialize training states
+        self.per_node_outputs_keys = None
         self.best_metrics = float("inf")
         self.best_epoch = 0
         self.iepoch = -1 if self.report_init_validation else 0
@@ -943,10 +942,9 @@ class Trainer:
                 data=data,
                 device=self.torch_device,
                 already_computed_nodes=already_computed_nodes,
-                loss_func=self.loss,
+                per_node_outputs_keys=self.per_node_outputs_keys,
                 cm=cm,
                 mixed_precision=self.mixed_precision,
-                keep_node_types=self.keep_node_types,
                 skip_chunking=self.skip_chunking,
                 noise=self.noise,
                 batch_max_atoms=self.batch_max_atoms,
@@ -1352,12 +1350,20 @@ class Trainer:
         # torch_geometric datasets inherantly support subsets using `index_select`
         indexed_datasets_train = []
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
-            indexed_datasets_train.append(_dataset.index_select(train_idcs))
+            _dataset = _dataset.index_select(train_idcs)
+            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            if self.per_node_outputs_keys is None:
+                self.per_node_outputs_keys = per_node_outputs_keys
+            if _dataset is not None:
+                indexed_datasets_train.append(_dataset)
         self.dataset_train = ConcatDataset(indexed_datasets_train)
 
         indexed_datasets_val = []
         for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
-            indexed_datasets_val.append(_dataset.index_select(val_idcs))
+            _dataset = _dataset.index_select(val_idcs)
+            _dataset, _ = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            if _dataset is not None:
+                indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
     def set_dataloader(self, sampler=None, validation_sampler=None):
