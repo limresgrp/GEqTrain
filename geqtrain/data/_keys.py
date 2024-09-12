@@ -15,6 +15,7 @@ from typing import List, Final
 
 ### == Define allowed keys as constants == ###
 
+R_MAX_KEY: Final[str] = "r_max"
 # The positions of the nodes in the system
 POSITIONS_KEY: Final[str] = "pos"
 # [2, n_edge] index tensor giving center -> neighbor relations

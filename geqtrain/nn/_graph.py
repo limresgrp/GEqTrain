@@ -28,6 +28,8 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
         attributes_to_embed = {} # k: str field name, v: nn.Embedding layer name
         output_embedding_dim = 0
         for field, values in graph_attributes.items():
+            if 'embedding_dimensionality' not in values: # this means the attr is not used as embedding
+                continue
             emb_layer_name = f"{field}_embedding"
             attributes_to_embed[field] = emb_layer_name
             n_types = values.get('num_types') + 1
