@@ -1070,6 +1070,8 @@ class Trainer:
         """
         store all the loss/mae of each batch
         """
+        if not self.is_master:
+            return
 
         mat_str = f"{self.iepoch+1:5d}, {self.ibatch+1:5d}"
         log_str = f"  {self.iepoch+1:5d} {self.ibatch+1:5d}"
