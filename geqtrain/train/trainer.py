@@ -20,6 +20,7 @@ from geqtrain.data import (
     DataLoader,
     AtomicData,
     AtomicDataDict,
+    _NODE_FIELDS,
     _EDGE_FIELDS,
 )
 from geqtrain.utils import (
@@ -59,12 +60,16 @@ def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
         for key in loss_func.coeffs:
             if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
                 key_clean = loss_func.remove_suffix(key)
+                if key_clean not in _NODE_FIELDS:
+                    continue
                 if key_clean in data:
-                    val = data[key_clean].reshape(len(data[key_clean]), -1)
+                    val = data[key_clean]
+                    if val.dim() == 1:
+                        val = val.reshape(len(val), -1)
                     if keep_node_types is not None:
                         data[key_clean][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
 
-                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
+                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
                     data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
                     data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1] = data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1]
                     if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
@@ -110,10 +115,10 @@ def run_inference(
             for k, v in batch.items()
             if k not in per_node_outputs_keys
         }
-        batch_chunk = batch
-        batch_chunk_center_nodes = batch_index[0].unique()
+        ref_data = batch
+        batch_center_nodes = batch_index[0].unique()
     else:
-        input_data, batch_chunk, batch_chunk_center_nodes = prepare_chunked_input_data(
+        input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
             already_computed_nodes=already_computed_nodes,
             batch=batch,
             data=data,
@@ -123,8 +128,11 @@ def run_inference(
             device=device,
         )
 
-    if input_data is None:
-        return False
+    if hasattr(data, "__slices__"):
+        for slices_key, slices in data.__slices__.items():
+            val = torch.tensor(slices, dtype=int, device=device)
+            input_data[f"{slices_key}_slices"] = val
+            ref_data[f"{slices_key}_slices"] = val
 
     if noise is not None:
         input_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
@@ -133,7 +141,7 @@ def run_inference(
         out = model(input_data)
         del input_data
 
-    return out, batch_chunk, batch_chunk_center_nodes, num_batch_center_nodes
+    return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
@@ -210,9 +218,6 @@ def prepare_chunked_input_data(
     # === ---------------------------------------------------- === #
     # === ---------------------------------------------------- === #
 
-    if hasattr(data, "__slices__"):
-        for slices_key, slices in data.__slices__.items():
-            batch_chunk[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
     batch_chunk["ptr"] = torch.nn.functional.pad(torch.bincount(batch_chunk.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
 
     edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
