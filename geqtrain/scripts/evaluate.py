@@ -223,7 +223,8 @@ def main(args=None, running_as_script: bool = True):
         logger.info(
             f"Using provided test set indexes, yielding a test set size of {len(test_idcs)} frames.",
         )
-    test_idcs = torch.as_tensor(test_idcs, dtype=torch.long)[::args.stride]
+
+    test_idcs = [torch.as_tensor(idcs, dtype=torch.long)[::args.stride] for idcs in test_idcs]
     # test_idcs = test_idcs.tile((args.repeat,))
 
     # Figure out what metrics we're actually computing
