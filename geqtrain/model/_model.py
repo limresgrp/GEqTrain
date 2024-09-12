@@ -55,7 +55,7 @@ def Model(
                     edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-                    output_hidden_irreps=True,
+                    output_mul="hidden",
                 ),
             ),
             "pooling": (
