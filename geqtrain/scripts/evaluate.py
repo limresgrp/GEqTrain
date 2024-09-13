@@ -31,41 +31,39 @@ def main(args=None, running_as_script: bool = True):
     parser = argparse.ArgumentParser(
     )
     parser.add_argument(
+        "-td",
         "--train-dir",
         help="Path to a working directory from a training session.",
         type=Path,
         default=None,
     )
     parser.add_argument(
+        "-m",
         "--model",
         help="A deployed or pickled GEqTrain model to load. If omitted, defaults to `best_model.pth` in `train_dir`.",
         type=Path,
         default=None,
     )
     parser.add_argument(
+        "-c",
         "--config",
         help="A YAML config file specifying the dataset to load test data from. If omitted, `config.yaml` in `train_dir` will be used",
         type=Path,
         default=None,
     )
     parser.add_argument(
-        "--test-indexes",
-        help="Path to a file containing the indexes in the dataset that make up the test set. "
-             "If omitted, all data frames *not* used as training or validation data in the training session `train_dir` will be used.",
-        type=Path,
-        default=None,
-    )
-    parser.add_argument(
-        "--stride",
-        help="If dataset config is provided and test indexes are not provided, take all dataset idcs with this stride",
+        "-bs",
+        "--batch-size",
+        help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
         default=1,
     )
     parser.add_argument(
-        "--batch-size",
-        help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
-        type=int,
-        default=16,
+        "-d",
+        "--device",
+        help="Device to run the model on. If not provided, defaults to CUDA if available and CPU otherwise.",
+        type=str,
+        default='cpu',
     )
     # parser.add_argument(
     #     "--repeat",
@@ -78,16 +76,24 @@ def main(args=None, running_as_script: bool = True):
     #     default=1,
     # )
     parser.add_argument(
+        "--test-indexes",
+        help="Path to a file containing the indexes in the dataset that make up the test set. "
+             "If omitted, all data frames *not* used as training or validation data in the training session `train_dir` will be used.",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
+        "-s",
+        "--stride",
+        help="If dataset config is provided and test indexes are not provided, take all dataset idcs with this stride",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--use-deterministic-algorithms",
         help="Try to have PyTorch use deterministic algorithms. Will probably fail on GPU/CUDA.",
         type=bool,
         default=False,
-    )
-    parser.add_argument(
-        "--device",
-        help="Device to run the model on. If not provided, defaults to CUDA if available and CPU otherwise.",
-        type=str,
-        default='cpu',
     )
     # parser.add_argument(
     #     "--output",
@@ -302,7 +308,7 @@ def main(args=None, running_as_script: bool = True):
 
     logger.info("\n--- Final result: ---")
     
-    logger.critical(
+    logger.info(
         "\n".join(
             f"{k:>20s} = {v:< 20f}"
             for k, v in metrics.flatten_metrics(
