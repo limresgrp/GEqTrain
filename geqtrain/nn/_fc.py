@@ -2,7 +2,9 @@
 """
 
 import torch
-from torch.nn.utils.parametrizations import weight_norm
+# from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils import weight_norm
+
 from typing import List, Optional
 from math import sqrt
 from collections import OrderedDict
@@ -87,7 +89,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         mlp_output_dimension: Optional[int],
         mlp_nonlinearity: Optional[str] = "silu",
         use_layer_norm: bool = False,
-        use_weight_norm: bool = True,
+        use_weight_norm: bool = False,
         dim_weight_norm: int = 0,
         has_bias: bool = False,
         bias: Optional[List] = None,
@@ -151,14 +153,22 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
 
+            # initialize weights
             with torch.no_grad():
-                if is_last_layer:
-                    if has_bias and bias is not None:
-                        lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
-                    if zero_init_last_layer_weights:
-                        norm_const = norm_const * 1.e-1
-                # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
-                lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
+                # 1) kaiming
+                # torch.nn.init.kaiming_normal_(lin_layer.weight)
+
+                # 2) xavier
+                # torch.nn.init.xavier_normal_(lin_layer.weight, gain=norm_const)
+
+                # 3) orthogonal
+                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
+
+
+                if lin_layer.bias is not None:
+                    torch.nn.init.zeros_(lin_layer.bias)
+                if is_last_layer and has_bias and bias is not None:
+                    lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
 
             # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:

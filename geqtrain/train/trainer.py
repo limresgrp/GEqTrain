@@ -47,6 +47,36 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
+def apply_grad_norm(norm_type: str, model):
+
+    if norm_type == "do_not":
+        return
+
+    with torch.no_grad():
+
+        for n, p in model.named_parameters():
+
+            if p.grad is not None and p.dim() > 1:
+
+                if norm_type == 'rms':
+                    # Gradient Centralization
+                    p.grad = p.grad - p.grad.mean(dim=tuple(range(1, p.dim())), keepdim=True)
+                    # Gradient Scaling
+                    p.grad = p.grad * torch.sqrt(torch.mean(p.grad**2) + 1e-8)
+                elif norm_type == "sign_consistent":
+                    # save signs
+                    mask = torch.where(p.grad > 0)
+                    # normalized
+                    p.grad = (p.grad - torch.mean(p.grad)) / (torch.std(p.grad) + 1e-8)
+                    # sign selector
+                    signs = torch.ones_like(p.grad)
+                    signs[mask] = -1.
+                    p.grad = p.grad * signs
+                else:
+                    p.grad = (p.grad - torch.mean(p.grad)) / (torch.std(p.grad) + 1e-8)
+
+
+
 def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
@@ -916,7 +946,7 @@ class Trainer:
             callback(self)
 
         self.final_log()
-        
+
         self.save()
         # hooks_handler.deregister_hooks()
         finish_all_writes()
@@ -962,13 +992,16 @@ class Trainer:
             if not validation:
 
                 loss.backward()
+
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-                
+
                 if self.sanitize_gradients:
                     for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
+
+                apply_grad_norm("rms", self.model)
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
@@ -1122,7 +1155,7 @@ class Trainer:
         save model and trainer details
         """
         if not self.is_master:
-            return 
+            return
 
         with atomic_write_group():
             current_metrics = self.mae_dict[self.metrics_key]
@@ -1220,7 +1253,7 @@ class Trainer:
                     log_str[category] += f" {value:12.3g}"
                     log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
-        
+
         self.norm_dict = dict(Grad_norm=self.norms)
 
         if not self.is_master:
@@ -1424,7 +1457,7 @@ class TrainerWandB(Trainer):
     def end_of_epoch_log(self):
         if not self.is_master:
             return
-        
+
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
@@ -1444,12 +1477,12 @@ class DistributedTrainer(Trainer):
         # Set the device for this process
         torch.cuda.set_device(self.rank)
         super().init(**kwargs)
-    
+
     def set_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
         validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
         super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
-    
+
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
