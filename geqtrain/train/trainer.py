@@ -48,7 +48,6 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
-
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
         for param in param_group['params']:
@@ -1223,6 +1222,11 @@ class Trainer:
 
                 # if self.use_grokfast:
                 #     self.grads = gradfilter_ema(self.model, grads=self.grads)
+
+                if self.sanitize_gradients:
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad[torch.isnan(param.grad)] = 0
 
                 if self.sanitize_gradients:
                     for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
