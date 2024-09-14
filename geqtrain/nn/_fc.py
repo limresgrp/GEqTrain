@@ -2,6 +2,12 @@
 """
 
 import torch
+<<<<<<< HEAD
+=======
+# from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils import weight_norm
+
+>>>>>>> d7e3ac2 (initial commit before exp)
 from typing import List, Optional
 from collections import OrderedDict
 from e3nn.math import normalize2mom
@@ -150,10 +156,11 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                         (f"linear_{layer_index}", lin_layer),
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
-            
+
             if zero_init_last_layer_weights:
                 norm_const = norm_const * 1.e-1
 
+            # initialize weights
             with torch.no_grad():
                 torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
                 if lin_layer.bias is not None:

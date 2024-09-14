@@ -1131,6 +1131,11 @@ class Trainer:
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
+                if self.sanitize_gradients:
+                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad[torch.isnan(param.grad)] = 0
+
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
@@ -1154,14 +1159,6 @@ class Trainer:
             # if chunking is active -> if whole struct has been processed then batch is over
             if already_computed_nodes is None:
                 if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-            if already_computed_nodes is None:
                 return True
 
     @property
