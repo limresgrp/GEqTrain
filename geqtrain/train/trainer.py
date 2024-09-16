@@ -74,6 +74,7 @@ def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
                     data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1] = data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1]
                     if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
                         data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                        data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY][1] = len(data[AtomicDataDict.EDGE_CELL_SHIFT_KEY])
                     per_node_outputs_keys.append(key_clean)
 
     if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
