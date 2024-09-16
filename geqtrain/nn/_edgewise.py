@@ -22,12 +22,12 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         self,
         field: str,
         out_field: Optional[str] = None,
+        use_attention: bool = False,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
         head_dim: int = 32,
-        use_attention: bool = True,
-        irreps_in={},
         avg_num_neighbors: Optional[float] = 5.0,
+        irreps_in={},
     ):
         """Sum edges into nodes."""
         super().__init__()
