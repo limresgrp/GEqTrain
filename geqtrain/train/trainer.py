@@ -1091,6 +1091,33 @@ class Trainer:
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
+    def _log_updates(self):
+        update_log = logging.getLogger(self.log_updates)
+        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
+
+        if not hasattr(self, 'titles'):
+            self.titles = [param_name for param_name, param in self.model.named_parameters() if param.grad is not None and param.dim() > 1]
+            _titles = ""
+            for t in self.titles:
+                _titles += f"{t}, "
+            _titles = _titles.strip().rstrip(',')
+            update_log.info(_titles)
+            grad_to_weight_ratio_log.info(_titles)
+
+        lr = self.optim.param_groups[0]['lr'] # the idxing [0] is due to the fact that 'params_to_be_decayed' group is the 0th group in optim
+        update_speed = ""
+        grad_ratio = ""
+        for param_name, param in self.model.named_parameters():
+            if param.grad is not None and param.dim() > 1:
+                update = ((lr*param.grad).std()/param.std()).log10().item()
+                grad_to_weight_ratio = param.grad.std()/param.std()
+                update_speed += f"{update:.5}, "
+                grad_ratio += f"{grad_to_weight_ratio:.5}, "
+
+        update_log.info(update_speed.strip().rstrip(','))
+        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
+
+
     def batch_step(self, data, validation=False):
 
         self.optim.zero_grad(set_to_none=True)
@@ -1145,9 +1172,6 @@ class Trainer:
                     self._log_updates()
 
                 self.optim.step()
-
-                if self.use_warmup and not self._is_warmup_period_over():
-                    with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
                         pass
                 else:
                     self._batch_lvl_lrscheduler_step()
