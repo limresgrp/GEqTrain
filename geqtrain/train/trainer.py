@@ -1338,9 +1338,8 @@ class Trainer:
         if not self.use_warmup:
             self._epoch_lvl_lrscheduler_step()
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
-        """
-        store all the loss/mae of each batch
-        """
+            self._epoch_lvl_lrscheduler_step()
+
         if not self.is_master:
             return
 
