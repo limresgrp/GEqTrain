@@ -155,16 +155,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
             # initialize weights
             with torch.no_grad():
-                # 1) kaiming
-                # torch.nn.init.kaiming_normal_(lin_layer.weight)
-
-                # 2) xavier
-                # torch.nn.init.xavier_normal_(lin_layer.weight, gain=norm_const)
-
-                # 3) orthogonal
                 torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
-
-
                 if lin_layer.bias is not None:
                     torch.nn.init.zeros_(lin_layer.bias)
                 if is_last_layer and has_bias and bias is not None:
