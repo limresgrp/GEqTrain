@@ -49,6 +49,7 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
+<<<<<<< HEAD
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
         for param in param_group['params']:
@@ -61,6 +62,9 @@ def remove_node_centers_for_NaN_targets(
     loss_func: Loss,
     keep_node_types: Optional[List[str]] = None,
 ):
+=======
+def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
+>>>>>>> 2209202 (remove apply_grad_norm)
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
         node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
@@ -1164,6 +1168,10 @@ class Trainer:
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 2209202 (remove apply_grad_norm)
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
