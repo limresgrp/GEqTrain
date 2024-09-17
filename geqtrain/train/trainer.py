@@ -1107,12 +1107,13 @@ class Trainer:
         lr = self.optim.param_groups[0]['lr'] # the idxing [0] is due to the fact that 'params_to_be_decayed' group is the 0th group in optim
         update_speed = ""
         grad_ratio = ""
-        for param_name, param in self.model.named_parameters():
-            if param.grad is not None and param.dim() > 1:
-                update = ((lr*param.grad).std()/param.std()).log10().item()
-                grad_to_weight_ratio = param.grad.std()/param.std()
-                update_speed += f"{update:.5}, "
-                grad_ratio += f"{grad_to_weight_ratio:.5}, "
+        with torch.no_grad():
+            for param_name, param in self.model.named_parameters():
+                if param.grad is not None and param.dim() > 1:
+                    update = ((lr*param.grad).std()/param.std()).log10().item()
+                    grad_to_weight_ratio = param.grad.std()/param.std()
+                    update_speed += f"{update:.5}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.5}, "
 
         update_log.info(update_speed.strip().rstrip(','))
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
