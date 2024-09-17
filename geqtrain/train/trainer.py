@@ -450,6 +450,9 @@ class Trainer:
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
 
+        self.log_updates           = output.open_logfile("log_updates", propagate=False)
+        self.log_ratio             = output.open_logfile("log_ratio", propagate=False)
+
         # --- add filenames if not defined
         self.config_path       = output.generate_file("config.yaml")
         self.best_model_path   = output.generate_file("best_model.pth")
@@ -956,6 +959,33 @@ class Trainer:
             return contextlib.nullcontext()
         return torch.no_grad()
 
+    def _log_updates(self):
+        update_log = logging.getLogger(self.log_updates)
+        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
+
+        if not hasattr(self, 'titles'):
+            self.titles = [param_name for param_name, param in self.model.named_parameters() if param.grad is not None and param.dim() > 1]
+            _titles = ""
+            for t in self.titles:
+                _titles += f"{t}, "
+            _titles = _titles.strip().rstrip(',')
+            update_log.info(_titles)
+            grad_to_weight_ratio_log.info(_titles)
+
+        lr = self.optim.param_groups[0]['lr'] # the idxing [0] is due to the fact that 'params_to_be_decayed' group is the 0th group in optim
+        update_speed = ""
+        grad_ratio = ""
+        for param_name, param in self.model.named_parameters():
+            if param.grad is not None and param.dim() > 1:
+                update = ((lr*param.grad).std()/param.std()).log10().item()
+                grad_to_weight_ratio = param.grad.std()/param.std()
+                update_speed += f"{update:.5}, "
+                grad_ratio += f"{grad_to_weight_ratio:.5}, "
+
+        update_log.info(update_speed.strip().rstrip(','))
+        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
+
+
     def batch_step(self, data, validation=False):
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
@@ -1006,6 +1036,8 @@ class Trainer:
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+
+                self._log_updates()
 
                 self.optim.step()
 
