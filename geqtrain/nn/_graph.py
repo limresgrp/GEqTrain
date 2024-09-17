@@ -32,7 +32,7 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
                 continue
             emb_layer_name = f"{field}_embedding"
             attributes_to_embed[field] = emb_layer_name
-            n_types = values.get('num_types') + 1
+            n_types = values.get('actual_num_types')
             embedding_dim = values['embedding_dimensionality']
             setattr(self, emb_layer_name, torch.nn.Embedding(n_types, embedding_dim))
             torch.nn.init.normal_(getattr(self, emb_layer_name).weight, mean=0, std=math.isqrt(embedding_dim))
