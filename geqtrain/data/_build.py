@@ -98,8 +98,8 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             arg_dicts=_config
         )
 
-        _config[prefixed_eff_key]["r_max"] = get_w_prefix(
-            "r_max",
+        _config[prefixed_eff_key][AtomicDataDict.R_MAX_KEY] = get_w_prefix(
+            AtomicDataDict.R_MAX_KEY,
             prefix=prefix,
             arg_dicts=[_config[prefixed_eff_key], _config],
         )

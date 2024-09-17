@@ -47,10 +47,12 @@ _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.GRAPH_OUTPUT_KEY,
     AtomicDataDict.CELL_KEY,
 }
+_DEFAULT_EXTRA_FIELDS: Set[str] = {}
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
 _EDGE_FIELDS:  Set[str] = set(_DEFAULT_EDGE_FIELDS)
 _GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
+_EXTRA_FIELDS: Set[str] = set(_DEFAULT_EXTRA_FIELDS)
 _LONG_FIELDS:  Set[str] = set(_DEFAULT_LONG_FIELDS)
 
 
@@ -58,6 +60,7 @@ def register_fields(
     node_fields:  Sequence[str] = [],
     edge_fields:  Sequence[str] = [],
     graph_fields: Sequence[str] = [],
+    extra_fields: Sequence[str] = [],
     long_fields:  Sequence[str] = [],
 ) -> None:
     r"""
@@ -67,6 +70,7 @@ def register_fields(
     - _NODE_FIELDS
     - _EDGE_FIELDS
     - _GRAPH_FIELDS
+    - _EXTRA_FIELDS
     - _LONG_FIELDS
     that are used to parse the yaml and thus the data from source.
 
@@ -77,20 +81,23 @@ def register_fields(
         - node_fields
         - edge_fields
         - graph_fields
+        - extra_fields
         - long_fields
     """
     node_fields:  set = set(node_fields)
     edge_fields:  set = set(edge_fields)
     graph_fields: set = set(graph_fields)
-    allfields = node_fields.union(edge_fields, graph_fields)
-    assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields)
+    extra_fields: set = set(extra_fields)
+    allfields = node_fields.union(edge_fields, graph_fields, extra_fields)
+    assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields)
 
     _NODE_FIELDS.update(node_fields)
     _EDGE_FIELDS.update(edge_fields)
     _GRAPH_FIELDS.update(graph_fields)
+    _EXTRA_FIELDS.update(extra_fields)
     _LONG_FIELDS.update(long_fields)
-    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS)):
-        raise ValueError("At least one key was registered as more than one of node, edge, or graph!")
+    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _EXTRA_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS) + len(_EXTRA_FIELDS)):
+        raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
 
 
 def _process_dict(kwargs, ignore_fields=[]):

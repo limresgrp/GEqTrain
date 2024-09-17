@@ -4,6 +4,7 @@ from .AtomicData import (
     _NODE_FIELDS,
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
+    _EXTRA_FIELDS,
 )
 from .dataset import AtomicDataset, AtomicInMemoryDataset, NpzDataset
 from .dataloader import DataLoader, Collater
@@ -21,4 +22,5 @@ __all__ = [
     _NODE_FIELDS,
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
+    _EXTRA_FIELDS,
 ]

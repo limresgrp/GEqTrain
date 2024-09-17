@@ -102,13 +102,7 @@ def load_deployed_model(
         else:
             strategy = [("STATIC", 2)]
         global_config_dict[JIT_FUSION_STRATEGY] = strategy
-        # JIT bailout
-        # _set_global_options will check torch version
-        jit_bailout: int = metadata.get(JIT_BAILOUT_KEY, "")
-        if jit_bailout == "":
-            jit_bailout = 2
-        jit_bailout = int(jit_bailout)
-        global_config_dict[JIT_BAILOUT_KEY] = jit_bailout
+        
         # call to actually set the global options
         _set_global_options(
             global_config_dict,
@@ -169,7 +163,6 @@ def main(args=None):
     metadata: dict = {}
 
     metadata[R_MAX_KEY] = str(float(config["r_max"]))
-    metadata[JIT_BAILOUT_KEY] = str(config[JIT_BAILOUT_KEY])
     
     if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
         metadata[JIT_FUSION_STRATEGY] = ";".join(
