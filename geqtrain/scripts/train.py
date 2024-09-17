@@ -54,7 +54,7 @@ def main(args=None, running_as_script: bool = True):
         if config.use_dt:
             raise NotImplementedError("Could not restart training in Distributed Training yet.")
         func = restart
-    
+
     if config.use_dt:
         # Manually set the environment variables for multi-GPU setup
         world_size = args.world_size
@@ -63,7 +63,7 @@ def main(args=None, running_as_script: bool = True):
             os.environ['MASTER_ADDR'] = str(args.master_addr)
         if args.master_port:
             os.environ['MASTER_PORT'] = str(args.master_port)
-        
+
         # Spawn one process per GPU
         import torch.multiprocessing as mp
         mp.spawn(func, args=(world_size, config.as_dict(),), nprocs=world_size, join=True)
@@ -154,7 +154,7 @@ def fresh_start(rank, world_size, config):
 
         trainer.set_dataset(*load_dataset(config))
         trainer.set_dataloader()
-        
+
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
