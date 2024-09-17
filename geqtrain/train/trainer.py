@@ -48,36 +48,6 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
-def apply_grad_norm(norm_type: str, model):
-
-    if norm_type == "do_not":
-        return
-
-    with torch.no_grad():
-
-        for n, p in model.named_parameters():
-
-            if p.grad is not None and p.dim() > 1:
-
-                if norm_type == 'rms':
-                    # Gradient Centralization
-                    p.grad = p.grad - p.grad.mean(dim=tuple(range(1, p.dim())), keepdim=True)
-                    # Gradient Scaling
-                    p.grad = p.grad * torch.sqrt(torch.mean(p.grad**2) + 1e-8)
-                elif norm_type == "sign_consistent":
-                    # save signs
-                    mask = torch.where(p.grad > 0)
-                    # normalized
-                    p.grad = (p.grad - torch.mean(p.grad)) / (torch.std(p.grad) + 1e-8)
-                    # sign selector
-                    signs = torch.ones_like(p.grad)
-                    signs[mask] = -1.
-                    p.grad = p.grad * signs
-                else:
-                    p.grad = (p.grad - torch.mean(p.grad)) / (torch.std(p.grad) + 1e-8)
-
-
-
 def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
@@ -1038,7 +1008,6 @@ class Trainer:
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
 
-                apply_grad_norm("rms", self.model)
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
