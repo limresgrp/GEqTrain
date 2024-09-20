@@ -2,7 +2,6 @@
 """
 
 import torch
-from torch.nn.utils.parametrizations import weight_norm
 from typing import List, Optional
 from math import sqrt
 from collections import OrderedDict
@@ -93,6 +92,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
+        dampen: bool = False,
     ):
         super().__init__()
 
@@ -150,18 +150,24 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                         (f"linear_{layer_index}", lin_layer),
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
+            
+            if zero_init_last_layer_weights:
+                norm_const = norm_const * 1.e-1
 
             with torch.no_grad():
-                if is_last_layer:
-                    if has_bias and bias is not None:
+                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
+                if lin_layer.bias is not None:
+                    if is_last_layer and bias is not None:
                         lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
-                    if zero_init_last_layer_weights:
-                        norm_const = norm_const * 1.e-1
-                # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
-                lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
+                    else:
+                        torch.nn.init.zeros_(lin_layer.bias)
 
             # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:
+                if int(torch.__version__.split('.')[0]) >= 2:
+                    from torch.nn.utils.parametrizations import weight_norm
+                else:
+                    from torch.nn.utils import weight_norm
                 lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
 
             for module in modules:
@@ -173,6 +179,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             sequential_dict["dropout"] = torch.nn.Dropout(dropout)
 
         self.sequential = torch.nn.Sequential(sequential_dict)
+
+        if dampen:
+            for p in self.parameters():
+                p.tag = 'dampen'
 
     def forward(self, x):
         return self.sequential(x)

@@ -516,10 +516,13 @@ class Trainer:
         param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
 
         # split them according to their shape (which implies wheter to apply wd on them or not)
-        params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
-        params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
+        params_to_be_damped      = [p for p in param_dict.values() if getattr(p, 'tag', None) == 'dampen']
+        params_to_be_decayed     = [p for p in param_dict.values() if (p not in params_to_be_damped) and p.dim()>=2]
+        params_NOT_to_be_decayed = [p for p in param_dict.values() if (p not in params_to_be_damped) and p.dim()<2]
+
         optim_groups = [
-            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.)},
+            {'params': params_to_be_damped, 'lr': self.learning_rate * 1.e-1},
+            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.),},
             {'params': params_NOT_to_be_decayed, 'weight_decay': 0.},
         ]
 
@@ -894,6 +897,18 @@ class Trainer:
         self.model = model
         self.model.to(self.torch_device)
 
+        # register hook to clamp gradients
+        for p in self.model.parameters():
+            
+            if self.sanitize_gradients:
+
+                def sanitize_fn(grad):
+                    # Replace NaN values in the gradient with zero
+                    grad[torch.isnan(grad)] = 0
+                    return grad
+
+                p.register_hook(sanitize_fn)
+
     def train(self):
 
         """Training"""
@@ -970,11 +985,6 @@ class Trainer:
                 loss.backward()
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-                
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
