@@ -3,11 +3,11 @@
 
 import torch
 from typing import List, Optional
-from math import sqrt
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
+from geqtrain.utils import add_tags_to_parameters
 
 
 def select_nonlinearity(nonlinearity):
@@ -181,8 +181,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.sequential = torch.nn.Sequential(sequential_dict)
 
         if dampen:
-            for p in self.parameters():
-                p.tag = 'dampen'
+            add_tags_to_parameters(self, 'dampen')
 
     def forward(self, x):
         return self.sequential(x)
