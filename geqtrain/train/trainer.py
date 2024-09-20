@@ -532,7 +532,8 @@ class Trainer:
             # Try to find an existing group with the same keys
             for optim_group in optim_groups:
                 if optim_group.keys() == group.keys():
-                    optim_group['params'].extend(group['params'])  # Append params if found
+                    if all([optim_group[key] == group[key] for key in optim_group.keys() if key != 'params']):
+                        optim_group['params'].extend(group['params'])  # Append params if found
                     return
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
