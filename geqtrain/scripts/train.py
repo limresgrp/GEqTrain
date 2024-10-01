@@ -320,7 +320,7 @@ def fine_tune(rank, world_size, config):
 
 def restart(rank, world_size, config):
     # load the dictionary
-    restart_file = f"{config.root}/{config.run_name}/trainer.pth"
+    restart_file = f"{config['root']}/{config['run_name']}/trainer.pth"
     dictionary = load_file(
         supported_formats=dict(torch=["pt", "pth"]),
         filename=restart_file,

@@ -7,6 +7,7 @@ from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.utils._global_options import DTYPE
+from geqtrain.utils import add_tags_to_parameters
 
 
 @compile_mode("script")
@@ -21,6 +22,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         readout_latent_kwargs={},
         eq_has_internal_weights: bool = False,
         resnet: bool = False,
+        dampen: bool = False,
         irreps_in=None,
     ):
         super().__init__()
@@ -102,6 +104,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             assert irreps_in[self.out_field] == out_irreps
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
         self.out_irreps_dim = self.out_irreps.dim
+
+        if dampen:
+            add_tags_to_parameters(self, 'dampen')
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]

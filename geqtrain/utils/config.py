@@ -395,7 +395,7 @@ class Config(object):
             if attr not in self:
                 continue
             for key, field in self[attr].items():
-                num_types = int(field.get("num_types"))
+                num_types = int(field.get("num_types", 0))
                 can_be_undefined = field.get("can_be_undefined", False)
                 self[attr][key].update({
                     "actual_num_types": num_types + int(can_be_undefined)

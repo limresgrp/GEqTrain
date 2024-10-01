@@ -518,7 +518,7 @@ class Trainer:
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
             'dampen': {'lr': self.learning_rate * 1.e-1},
-            'nowd':   {'weight_decay': 0.}
+            'nowd':   {'weight_decay': 0.},
         }
 
         def merge_groups(param, param_groups):
