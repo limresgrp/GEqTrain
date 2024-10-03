@@ -517,14 +517,41 @@ class Trainer:
 
         # get all params that require grad
         param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
+        # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
+        # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
+        param_groups_dict = {
+            'dampen': {'lr': self.learning_rate * 1.e-1},
+            'nowd':   {'weight_decay': 0.},
+        }
 
-        # split them according to their shape (which implies wheter to apply wd on them or not)
-        params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
-        params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
-        optim_groups = [
-            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.)},
-            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.},
-        ]
+        def merge_groups(param, param_groups):
+            merged_kwargs = {}
+            for param_group in param_groups:
+                merged_kwargs.update(param_groups_dict[param_group])
+            return {'params': [param], **merged_kwargs}
+
+        # Function to merge a parameter with an existing group or create a new one
+        def merge_or_create_group(optim_groups: List[Dict], group: Dict):
+            # Try to find an existing group with the same keys
+            for optim_group in optim_groups:
+                if optim_group.keys() == group.keys():
+                    if all([optim_group[key] == group[key] for key in optim_group.keys() if key != 'params']):
+                        optim_group['params'].extend(group['params'])  # Append params if found
+                    return
+            # If no group with the same keys is found, add the new group
+            optim_groups.append(group)
+
+        optim_groups = []
+        for p in param_dict.values():
+            param_groups = []
+            if getattr(p, 'tags', None) is not None:
+                for tag in getattr(p, 'tags'):
+                    param_groups.append(tag)
+            if p.dim()<2:
+                param_groups.append('nowd')
+
+            group = merge_groups(p, param_groups)
+            merge_or_create_group(optim_groups, group)
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -897,6 +924,18 @@ class Trainer:
         self.model = model
         self.model.to(self.torch_device)
 
+        # register hook to clamp gradients
+        for p in self.model.parameters():
+
+            if self.sanitize_gradients:
+
+                def sanitize_fn(grad):
+                    # Replace NaN values in the gradient with zero
+                    grad[torch.isnan(grad)] = 0
+                    return grad
+
+                p.register_hook(sanitize_fn)
+
     def train(self):
 
         """Training"""
@@ -1002,11 +1041,6 @@ class Trainer:
 
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
 
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;

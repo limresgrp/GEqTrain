@@ -1,7 +1,6 @@
 import math
 import functools
 import torch
-import torch.nn.functional as F
 
 from typing import Optional, List, Tuple, Union
 from torch_scatter import scatter
@@ -276,21 +275,28 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Equivariant out features
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
 
-        # Invariant out features
-        self.final_latent_mlp = latent(
-            mlp_input_dimension=(
-                # the embedded latent invariants from the previous layer(s)
-                self.latent_dim
-                # and the invariants extracted from the last layer's TP:
-                + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]
-            ),
-            mlp_output_dimension=self.latent_dim,
-        )
+        if self._features_n_scalar_outs[layer_index] > 0:
+            self.has_scalar_output = True
 
-        self.final_readout_mlp = latent(
-            mlp_input_dimension=self.latent_dim,
-            mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_index],
-        )
+            # Invariant out features
+            self.final_latent_mlp = latent(
+                mlp_input_dimension=(
+                    # the embedded latent invariants from the previous layer(s)
+                    self.latent_dim
+                    # and the invariants extracted from the last layer's TP:
+                    + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]
+                ),
+                mlp_output_dimension=self.latent_dim,
+            )
+
+            self.final_readout_mlp = latent(
+                mlp_input_dimension=self.latent_dim,
+                mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_index],
+            )
+        else:
+            self.has_scalar_output = False
+            self.final_latent_mlp = None
+            self.final_readout_mlp = None
 
         # - End build modules - #
 
@@ -382,24 +388,26 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_features[..., features_n_scalars:] = eq_features[..., features_n_scalars:]
         out_features = self.reshape_back_features(out_features)
 
-        # - Output invariant values - #
-        cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
+        if self.has_scalar_output:
 
-        # - Compute latents - #
-        new_latents = self.final_latent_mlp(inv_latent_cat)
-        # Apply cutoff, which propagates through to everything else
-        new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
+            # - Output invariant values - #
+            cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
 
-        coefficient_old = torch.rsqrt(layer_update_coefficients[layer_index].square() + 1)
-        coefficient_new = layer_update_coefficients[layer_index] * coefficient_old
-        latents = torch.index_add(
-            coefficient_old * latents,
-            0,
-            active_edges,
-            coefficient_new * new_latents,
-        )
+            # - Compute latents - #
+            new_latents = self.final_latent_mlp(inv_latent_cat)
+            # Apply cutoff, which propagates through to everything else
+            new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
 
-        out_features[..., :self.out_multiplicity * features_n_scalars] = self.final_readout_mlp(latents)
+            coefficient_old = torch.rsqrt(layer_update_coefficients[layer_index].square() + 1)
+            coefficient_new = layer_update_coefficients[layer_index] * coefficient_old
+            latents = torch.index_add(
+                coefficient_old * latents,
+                0,
+                active_edges,
+                coefficient_new * new_latents,
+            )
+
+            out_features[..., :self.out_multiplicity * features_n_scalars] = self.final_readout_mlp(latents)
 
         data[self.out_field] = out_features
         return data

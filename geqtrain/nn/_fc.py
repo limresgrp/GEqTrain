@@ -2,15 +2,12 @@
 """
 
 import torch
-# from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils import weight_norm
-
 from typing import List, Optional
-from math import sqrt
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
+from geqtrain.utils import add_tags_to_parameters
 
 
 def select_nonlinearity(nonlinearity):
@@ -95,6 +92,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
+        dampen: bool = False,
     ):
         super().__init__()
 
@@ -153,6 +151,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
 
+            if zero_init_last_layer_weights:
+                norm_const = norm_const * 1.e-1
+
             # initialize weights
             with torch.no_grad():
                 torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
@@ -163,6 +164,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
             # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:
+                if int(torch.__version__.split('.')[0]) >= 2:
+                    from torch.nn.utils.parametrizations import weight_norm
+                else:
+                    from torch.nn.utils import weight_norm
                 lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
 
             for module in modules:
@@ -174,6 +179,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             sequential_dict["dropout"] = torch.nn.Dropout(dropout)
 
         self.sequential = torch.nn.Sequential(sequential_dict)
+
+        if dampen:
+            add_tags_to_parameters(self, 'dampen')
 
     def forward(self, x):
         return self.sequential(x)
