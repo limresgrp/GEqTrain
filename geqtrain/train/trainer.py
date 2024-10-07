@@ -1545,6 +1545,8 @@ class Trainer:
             sampler=validation_sampler,
             **dl_kwargs,
         )
+        self.logger.info(f"Train n.obs-in-dset: {len(self.dataset_train)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_train)}")
+        self.logger.info(f"Validation n.obs-in-dset: {len(self.dataset_val)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_val)}")
 
 
 class TrainerWandB(Trainer):
@@ -1564,6 +1566,8 @@ class TrainerWandB(Trainer):
 
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
+            if "log" not in wandb_watch_kwargs:
+                wandb_watch_kwargs["log"] = None
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
     def end_of_epoch_log(self):
