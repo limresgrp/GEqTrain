@@ -2,6 +2,9 @@ config/
 results/
 deployed/
 
+*.png
+*.csv
+
 # zipped files
 *.zip
 
