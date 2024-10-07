@@ -48,6 +48,13 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
+def get_latest_lr(optimizer, model, param_name: str) -> float:
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            if param_name == [name for name, p in model.named_parameters() if p is param][0]:
+                return param_group['lr']
+    raise ValueError(f"Parameter {param_name} not found in optimizer.")
+
 def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
@@ -426,6 +433,7 @@ class Trainer:
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
 
+        # logs for weights update and gradient
         self.log_updates           = output.open_logfile("log_updates", propagate=False)
         self.log_ratio             = output.open_logfile("log_ratio", propagate=False)
 
@@ -525,6 +533,7 @@ class Trainer:
         }
 
         def merge_groups(param, param_groups):
+            # overrides default dict for optim
             merged_kwargs = {}
             for param_group in param_groups:
                 merged_kwargs.update(param_groups_dict[param_group])
@@ -541,6 +550,8 @@ class Trainer:
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
+        # parsing params to build optim groups
+        # atm only ['nowd', 'dampen'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
@@ -567,13 +578,27 @@ class Trainer:
 
         assert (
             self.lr_scheduler_name
-            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "none"]
+            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "CosineAnnealingLR", "none"]
         ) or (
             (len(self.end_of_epoch_callbacks) + len(self.end_of_batch_callbacks)) > 0
         ), f"{self.lr_scheduler_name} cannot be used unless callback functions are defined"
+
         self.lr_sched = None
         self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
+
+            if self.lr_scheduler_name == "CosineAnnealingLR":
+                steps_per_epoch = len(self.dl_train)
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
+
+            self.warmup = self.kwargs.get("lrWarmup", False)
+            if self.warmup:
+                import pytorch_warmup as warmup
+                steps_per_epoch = len(self.dl_train)
+                self.warmup_steps = self.kwargs.get("warmupSteps", 1+steps_per_epoch*4) # defautl: at beginning of 4 epoch
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
+
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
                 class_name=self.lr_scheduler_name,
@@ -975,28 +1000,45 @@ class Trainer:
         return torch.no_grad()
 
     def _log_updates(self):
+
         update_log = logging.getLogger(self.log_updates)
         grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
 
-        if not hasattr(self, 'titles'):
-            self.titles = [param_name for param_name, param in self.model.named_parameters() if param.grad is not None and param.dim() > 1]
+        # build titles for logging file(s)
+        # done only once
+        if not hasattr(self, 'update_logging_titles'):
+            self.update_logging_titles = [
+                param_name
+                for param_name, param in self.model.named_parameters()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                )
+            ]
             _titles = ""
-            for t in self.titles:
+            for t in self.update_logging_titles:
                 _titles += f"{t}, "
             _titles = _titles.strip().rstrip(',')
             update_log.info(_titles)
             grad_to_weight_ratio_log.info(_titles)
 
-        lr = self.optim.param_groups[0]['lr'] # the idxing [0] is due to the fact that 'params_to_be_decayed' group is the 0th group in optim
-        update_speed = ""
-        grad_ratio = ""
+        # log the values
+        update_speed, grad_ratio = "", ""
         with torch.no_grad():
             for param_name, param in self.model.named_parameters():
-                if param.grad is not None and param.dim() > 1:
-                    update = ((lr*param.grad).std()/param.std()).log10().item()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                ):
+                    lr = get_latest_lr(self.optim, self.model, param_name)
+                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
                     grad_to_weight_ratio = param.grad.std()/param.std()
-                    update_speed += f"{update:.5}, "
-                    grad_ratio += f"{grad_to_weight_ratio:.5}, "
+                    update_speed += f"{update:.4}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
 
         update_log.info(update_speed.strip().rstrip(','))
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
@@ -1028,6 +1070,15 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
+            with torch.no_grad():
+                self._count += 1
+                fake_preds = torch.zeros_like(ref_data['graph_output'])
+                self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+                if self.kwargs.get('head_bias', False):
+                    fake_preds.fill_(self.kwargs['head_bias'][0])
+                    self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                    self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
 
             # update metrics
             with torch.no_grad():
@@ -1039,19 +1090,27 @@ class Trainer:
 
                 loss.backward()
 
-                if self.use_grokfast:
-                    self.grads = gradfilter_ema(self.model, grads=self.grads)
+                # if self.use_grokfast:
+                #     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
 
-                self._log_updates()
+                # to be commented in production run
+                # self._log_updates()
 
                 self.optim.step()
 
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+                if self.lr_scheduler_name == "CosineAnnealingLR":
+                    if self.warmup:
+                        with self.warmup_scheduler.dampening():
+                            if self.warmup_scheduler.last_step + 1 >= self.warmup_steps:
+                                self.lr_sched.step()
+                    else:
+                        self.lr_sched.step()
+                elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
                     self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
 
             # evaluate ending condition
@@ -1108,6 +1167,12 @@ class Trainer:
         for category, dataset in zip(categories, dataloaders):
             self.reset_metrics()
             self.n_batches = len(dataset)
+
+            self.zero_mean = 0.0
+            self.zero_mae = 0.0
+            self.avg_mean = 0.0
+            self.avg_mae = 0.0
+            self._count = 0
             for self.ibatch, batch in enumerate(dataset):
                 success = self.batch_step(
                     data=batch,
@@ -1119,6 +1184,11 @@ class Trainer:
 
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
+
+            _str = f"zero_loss_mse: {self.zero_mean/self._count} zero_loss_mae: {self.zero_mae/self._count} "
+            if self.kwargs.get('head_bias', False):
+                _str += f"mean_loss: {self.avg_mean/self._count} zero_loss_mae: {self.avg_mae/self._count}"
+            print(_str)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
