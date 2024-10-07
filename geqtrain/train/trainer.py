@@ -1190,10 +1190,6 @@ class Trainer:
                         if param.grad is not None and torch.isnan(param.grad).any():
                             param.grad[torch.isnan(param.grad)] = 0
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 2209202 (remove apply_grad_norm)
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
@@ -1203,6 +1199,9 @@ class Trainer:
                     self._log_updates()
 
                 self.optim.step()
+
+                if self.use_warmup and not self._is_warmup_period_over():
+                    with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
                         pass
                 else:
                     self._batch_lvl_lrscheduler_step()
@@ -1214,8 +1213,15 @@ class Trainer:
             # if chunking is active -> if whole struct has been processed then batch is over
             if already_computed_nodes is None:
                 if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                return True
+                    already_computed_nodes = batch_chunk_center_nodes
+            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
+                already_computed_nodes = None
+            else:
+                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
+                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
 
+            if already_computed_nodes is None:
+                return True
     @property
     def stop_cond(self):
         """kill the training early"""
@@ -1630,6 +1636,8 @@ class Trainer:
             sampler=validation_sampler,
             **dl_kwargs,
         )
+        self.logger.info(f"Train n.obs-in-dset: {len(self.dataset_train)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_train)}")
+        self.logger.info(f"Validation n.obs-in-dset: {len(self.dataset_val)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_val)}")
 
 
 class TrainerWandB(Trainer):
