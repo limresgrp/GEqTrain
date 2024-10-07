@@ -49,7 +49,6 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
-<<<<<<< HEAD
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
         for param in param_group['params']:
@@ -62,9 +61,6 @@ def remove_node_centers_for_NaN_targets(
     loss_func: Loss,
     keep_node_types: Optional[List[str]] = None,
 ):
-=======
-def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
->>>>>>> 2209202 (remove apply_grad_norm)
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
         node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
@@ -1096,25 +1092,42 @@ class Trainer:
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
     def _log_updates(self):
+
         update_log = logging.getLogger(self.log_updates)
         grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
 
-        if not hasattr(self, 'titles'):
-            self.titles = [param_name for param_name, param in self.model.named_parameters() if param.grad is not None and param.dim() > 1]
+        # build titles for logging file(s)
+        # done only once
+        if not hasattr(self, 'update_logging_titles'):
+            self.update_logging_titles = [
+                param_name
+                for param_name, param in self.model.named_parameters()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                )
+            ]
             _titles = ""
-            for t in self.titles:
+            for t in self.update_logging_titles:
                 _titles += f"{t}, "
             _titles = _titles.strip().rstrip(',')
             update_log.info(_titles)
             grad_to_weight_ratio_log.info(_titles)
 
-        lr = self.optim.param_groups[0]['lr'] # the idxing [0] is due to the fact that 'params_to_be_decayed' group is the 0th group in optim
-        update_speed = ""
-        grad_ratio = ""
+        # log the values
+        update_speed, grad_ratio = "", ""
         with torch.no_grad():
             for param_name, param in self.model.named_parameters():
-                if param.grad is not None and param.dim() > 1:
-                    update = ((lr*param.grad).std()/param.std()).log10().item()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                ):
+                    lr = get_latest_lr(self.optim, self.model, param_name)
+                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
                     grad_to_weight_ratio = param.grad.std()/param.std()
                     update_speed += f"{update:.5}, "
                     grad_ratio += f"{grad_to_weight_ratio:.5}, "
@@ -1149,6 +1162,15 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
+            with torch.no_grad():
+                self._count += 1
+                fake_preds = torch.zeros_like(ref_data['graph_output'])
+                self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+                if self.kwargs.get('head_bias', False):
+                    fake_preds.fill_(self.kwargs['head_bias'][0])
+                    self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                    self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
 
             # update metrics
             with torch.no_grad():
@@ -1160,8 +1182,8 @@ class Trainer:
 
                 loss.backward()
 
-                if self.use_grokfast:
-                    self.grads = gradfilter_ema(self.model, grads=self.grads)
+                # if self.use_grokfast:
+                #     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
                 if self.sanitize_gradients:
                     for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
@@ -1243,6 +1265,11 @@ class Trainer:
 
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
+
+            _str = f"zero_loss_mse: {self.zero_mean/self._count} zero_loss_mae: {self.zero_mae/self._count} "
+            if self.kwargs.get('head_bias', False):
+                _str += f"mean_loss: {self.avg_mean/self._count} zero_loss_mae: {self.avg_mae/self._count}"
+            print(_str)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
