@@ -1128,8 +1128,8 @@ class Trainer:
                     lr = get_latest_lr(self.optim, self.model, param_name)
                     update = ((lr*param.grad).std()/param.std()).log10()#.item()
                     grad_to_weight_ratio = param.grad.std()/param.std()
-                    update_speed += f"{update:.5}, "
-                    grad_ratio += f"{grad_to_weight_ratio:.5}, "
+                    update_speed += f"{update:.4}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
 
         update_log.info(update_speed.strip().rstrip(','))
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
@@ -1195,6 +1195,15 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
+            with torch.no_grad():
+                self._count += 1
+                fake_preds = torch.zeros_like(ref_data['graph_output'])
+                self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+                if self.kwargs.get('head_bias', False):
+                    fake_preds.fill_(self.kwargs['head_bias'][0])
+                    self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+                    self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
 
             # todo, maybe to be commented during production. Create a "debug mode" flag?
             # log all on wandb
@@ -1220,13 +1229,8 @@ class Trainer:
 
                 loss.backward()
 
-                # if self.use_grokfast:
-                #     self.grads = gradfilter_ema(self.model, grads=self.grads)
-
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
+                if self.use_grokfast:
+                    self.grads = gradfilter_ema(self.model, grads=self.grads)
 
                 if self.sanitize_gradients:
                     for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
@@ -1237,7 +1241,6 @@ class Trainer:
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
 
-                # to be commented in production run
                 if self.debug:
                     self._log_updates()
 
@@ -1265,6 +1268,7 @@ class Trainer:
 
             if already_computed_nodes is None:
                 return True
+
     @property
     def stop_cond(self):
         """kill the training early"""
@@ -1314,11 +1318,6 @@ class Trainer:
 
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
-
-            # _str = f"zero_loss_mse: {self.zero_mean/self._count} zero_loss_mae: {self.zero_mae/self._count} "
-            # if self.kwargs.get('head_bias', False):
-            #     _str += f"mean_loss: {self.avg_mean/self._count} zero_loss_mae: {self.avg_mae/self._count}"
-            # print(_str)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
