@@ -931,7 +931,7 @@ class Trainer:
             prefix="metrics",
             positional_args=dict(components=self.metrics_components),
             all_args=self.kwargs,
-        )
+        )  # self.metrics.funcs is a dict where for each key u want to compute, it creates an hash for the loss to avoid clashes
 
         if not (
             self.metrics_key.lower().startswith(VALIDATION)
@@ -1103,15 +1103,15 @@ class Trainer:
 
                 self.optim.step()
 
-                if self.lr_scheduler_name == "CosineAnnealingLR":
-                    if self.warmup:
-                        with self.warmup_scheduler.dampening():
-                            if self.warmup_scheduler.last_step + 1 >= self.warmup_steps:
-                                self.lr_sched.step()
-                    else:
+                if self.warmup:
+                    with self.warmup_scheduler.dampening():
+                        if self.warmup_scheduler.last_step + 1 >= self.warmup_steps:
+                            self.lr_sched.step()
+                else:
+                    if self.lr_scheduler_name == "CosineAnnealingLR":
                         self.lr_sched.step()
-                elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+                    elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+                        self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
 
             # evaluate ending condition
             if self.skip_chunking:
