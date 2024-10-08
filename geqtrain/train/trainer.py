@@ -593,9 +593,11 @@ class Trainer:
 
             self.warmup = self.kwargs.get("lrWarmup", False)
             if self.warmup:
+                #! for now it has been tested only with CosineAnnealingLR
                 import pytorch_warmup as warmup
                 steps_per_epoch = len(self.dl_train)
-                self.warmup_steps = self.kwargs.get("warmupSteps", 1+steps_per_epoch*4) # defautl: at beginning of 4 epoch
+                # it will start using the lr_scheduler provided from step: steps_per_epoch*4 +1
+                self.warmup_steps = self.kwargs.get("warmupSteps", steps_per_epoch*4) # TODO defautl: at beginning of 4 epoch, but extract param
                 self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
                 self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
 
@@ -1044,6 +1046,38 @@ class Trainer:
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
 
 
+    def _batch_lvl_lrscheduler_step(self):
+        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if not self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.lr_scheduler_name == "CosineAnnealingLR":
+            self.lr_sched.step()
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+
+    def _epoch_lvl_lrscheduler_step(self):
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
+            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", False)
+
+
+    def _is_warmup_period_over(self):
+        n_warmup_steps_already_done = self.warmup_scheduler.last_step
+        return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
+
     def batch_step(self, data, validation=False):
         # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
@@ -1093,7 +1127,6 @@ class Trainer:
                 # if self.use_grokfast:
                 #     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
-
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
@@ -1104,14 +1137,11 @@ class Trainer:
                 self.optim.step()
 
                 if self.warmup:
-                    with self.warmup_scheduler.dampening():
-                        if self.warmup_scheduler.last_step + 1 >= self.warmup_steps:
-                            self.lr_sched.step()
+                    with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
+                        if self._is_warmup_period_over():
+                            self._batch_lvl_lrscheduler_step()
                 else:
-                    if self.lr_scheduler_name == "CosineAnnealingLR":
-                        self.lr_sched.step()
-                    elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                        self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+                    self._batch_lvl_lrscheduler_step()
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1205,8 +1235,11 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
-            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+
+        if not self.warmup:
+            self._epoch_lvl_lrscheduler_step()
+        elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
+            self._epoch_lvl_lrscheduler_step()
 
         for callback in self._end_of_epoch_callbacks:
             callback(self)
