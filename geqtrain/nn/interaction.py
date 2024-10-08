@@ -86,9 +86,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         latent_dim:             int  = 64,
         env_embed_multiplicity: int  = 64,
-        use_attention:          bool = True,
+        use_attention:          bool = False,
         head_dim:               int  = 16,
-        use_mace_product:       bool = True,
+        use_mace_product:       bool = False,
         product_correlation:    int  = 2,
 
         # MLP parameters:
@@ -151,7 +151,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
         else:
             out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
-    
+
         # - [optional] filter out_irreps l degrees
         if output_ls is None:
             output_ls = out_irreps.ls
@@ -163,7 +163,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         if isinstance(output_mul, str):
             if output_mul == 'hidden':
                 output_mul = self.latent_dim
-        
+
         out_irreps = o3.Irreps(
             [(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls]
         )
@@ -771,6 +771,6 @@ class InteractionLayer(torch.nn.Module):
         if self.linear is None:
             return latents, inv_latent, None
 
-        # do the linear for eq. features        
+        # do the linear for eq. features
         eq_features = self.linear(eq_features)
         return latents, inv_latent, eq_features
