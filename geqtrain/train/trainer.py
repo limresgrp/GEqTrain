@@ -1136,6 +1136,38 @@ class Trainer:
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
 
 
+    def _batch_lvl_lrscheduler_step(self):
+        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if not self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.lr_scheduler_name == "CosineAnnealingLR":
+            self.lr_sched.step()
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+
+    def _epoch_lvl_lrscheduler_step(self):
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
+            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", False)
+
+
+    def _is_warmup_period_over(self):
+        n_warmup_steps_already_done = self.warmup_scheduler.last_step
+        return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
+
     def batch_step(self, data, validation=False):
 
         self.optim.zero_grad(set_to_none=True)
@@ -1292,7 +1324,6 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        # todo atm not working
         if not self.use_warmup:
             self._epoch_lvl_lrscheduler_step()
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
