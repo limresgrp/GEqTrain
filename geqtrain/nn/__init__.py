@@ -15,6 +15,7 @@ from .readout import ReadoutModule
 from ._scale import PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
+from .nn_dipole import DipoleMomentModule
 
 __all__ = [
     GraphModuleMixin,
@@ -36,4 +37,5 @@ __all__ = [
     ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
+    DipoleMomentModule,
 ]

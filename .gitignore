@@ -1,6 +1,7 @@
 config/
 results/
 deployed/
+_misc/
 
 *.png
 *.csv

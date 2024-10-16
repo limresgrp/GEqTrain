@@ -1142,6 +1142,8 @@ class Trainer:
             if not self.using_batch_lvl_lrscheduler:
                 return
 
+        # todo: instead of str comparison could use a dict with k:lr_sched_name, v: 0/1 whether that scheduler is being used + assert check!
+        # idea: for loop on num_of_possible_lr_scheduler is surely faster then str cmpr thru the whole lr scheduler name
         if self.lr_scheduler_name == "CosineAnnealingLR":
             self.lr_sched.step()
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
@@ -1194,15 +1196,20 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
-            with torch.no_grad():
-                self._count += 1
-                fake_preds = torch.zeros_like(ref_data['graph_output'])
-                self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-                self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-                if self.kwargs.get('head_bias', False):
-                    fake_preds.fill_(self.kwargs['head_bias'][0])
-                    self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-                    self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+
+            # todo, maybe to be commented during production. Create a "debug mode" flag?
+            # log all on wandb
+            # log grad updates
+            # print belows
+            # with torch.no_grad():
+            #     self._count += 1
+            #     fake_preds = torch.zeros_like(ref_data['graph_output'])
+            #     self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+            #     self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+            #     if self.kwargs.get('head_bias', False):
+            #         fake_preds.fill_(self.kwargs['head_bias'][0])
+            #         self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+            #         self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
 
             # update metrics
             with torch.no_grad():
@@ -1304,10 +1311,10 @@ class Trainer:
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
 
-            _str = f"zero_loss_mse: {self.zero_mean/self._count} zero_loss_mae: {self.zero_mae/self._count} "
-            if self.kwargs.get('head_bias', False):
-                _str += f"mean_loss: {self.avg_mean/self._count} zero_loss_mae: {self.avg_mae/self._count}"
-            print(_str)
+            # _str = f"zero_loss_mse: {self.zero_mean/self._count} zero_loss_mae: {self.zero_mae/self._count} "
+            # if self.kwargs.get('head_bias', False):
+            #     _str += f"mean_loss: {self.avg_mean/self._count} zero_loss_mae: {self.avg_mae/self._count}"
+            # print(_str)
 
             self.metrics_dict[category] = self.metrics.current_result()
             self.loss_dict[category] = self.loss_stat.current_result()
@@ -1327,12 +1334,6 @@ class Trainer:
         if not self.use_warmup:
             self._epoch_lvl_lrscheduler_step()
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
-            self._epoch_lvl_lrscheduler_step()
-
-        for callback in self._end_of_epoch_callbacks:
-            callback(self)
-
-    def end_of_batch_log(self, batch_type: str):
         """
         store all the loss/mae of each batch
         """

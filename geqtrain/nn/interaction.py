@@ -165,7 +165,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 output_mul = self.latent_dim
 
         out_irreps = o3.Irreps(
-            [(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls]
+            [(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls] # always keep the l=0, even if your desired out is l>0
         )
 
         self.out_multiplicity = output_mul

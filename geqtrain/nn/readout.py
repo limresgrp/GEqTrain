@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional, Union, List
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -10,13 +10,13 @@ from geqtrain.utils import add_tags_to_parameters
 
 import re
 
-def is_valid_irrep_string(irrep_string):
+def is_valid_irreps_string(irrep_string):
     r'''
     Examples:
-    print(is_valid_irrep_string('64x0e+64x1o+64x2e'))  # Should return True
-    print(is_valid_irrep_string('64x0e+64x1o+64x2e+128x3o'))  # Should return True
-    print(is_valid_irrep_string('something'))  # Should return False
-    print(is_valid_irrep_string('64x0e+64x1o+64x'))  # Should return False
+    print(is_valid_irreps_string('64x0e+64x1o+64x2e'))  # Should return True
+    print(is_valid_irreps_string('64x0e+64x1o+64x2e+128x3o'))  # Should return True
+    print(is_valid_irreps_string('something'))  # Should return False
+    print(is_valid_irreps_string('64x0e+64x1o+64x'))  # Should return False
     '''
     pattern = re.compile(r'^(\d+x\d+[eo](\+\d+x\d+[eo])*)$')
     return bool(pattern.match(irrep_string))
@@ -45,41 +45,87 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         eq_has_internal_weights: bool = False,
         resnet: bool = False,
         dampen: bool = False,
-        irreps_in=None,
+        input_ls:  Optional[List[int]]              = None,
+        input_mul: Optional[Union[str, int]]        = None,
+        output_ls:  Optional[List[int]]             = None,
+        output_mul: Optional[Union[str, int]]       = None,
+        irreps_in=None, # if output is only scalar, this is required
     ):
         super().__init__()
 
-        self.field = field
-        self.out_field = out_field or field
-        self.eq_has_internal_weights = eq_has_internal_weights
-        self.resnet = resnet
-
-        self.has_invariant_output = False # scalar only part?
-        self.has_equivariant_output = False # out with l>0?
-
         # --- start definition of input/output irreps --- #
+
         # define input irreps
+        self.field = field
         in_irreps = irreps_in[field]
 
+        # --- start in_irreps ls --- #
+        # default behavior: do not modify
+
+        # - [optional] filter in_irreps l degrees if needed:
+        if input_ls is None:
+            input_ls = in_irreps.ls # all ls if none are passed
+        assert isinstance(input_ls, List)
+
+        # [optional] set in_irreps multiplicity
+        if input_mul is None:
+            input_mul = in_irreps[0].mul # take l=0 mul; ok since all ls have same mul
+
+        in_irreps = o3.Irreps(
+            [
+                (input_mul, ir)
+                for _, ir in in_irreps
+                if ir.l in [0] + input_ls # if ir.l in l=0 and "selected ls" i.e. the ls passed via input_ls
+            ]
+        )
+
+        # update dict
+        irreps_in[field] = in_irreps
+
+        # --- end in_irreps ls --- #
+
         # define output irreps
+        self.out_field = out_field or field
         if isinstance(out_irreps, o3.Irreps):
             out_irreps = out_irreps # leave as it is
         elif isinstance(out_irreps, str):
-            if is_valid_irrep_string(out_irreps):
-                out_irreps = o3.Irreps(out_irreps) # elif eg 1x0e has been passed, cast it
+            if is_valid_irreps_string(out_irreps):
+                out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
             else:
-                out_irreps = o3.Irreps(irreps_in[out_irreps]) # othewise we expect it to be k for irreps_in[k]
+                out_irreps = o3.Irreps(irreps_in[out_irreps]) # othewise we expect it to be key for irreps_in[key]
         elif self.out_field in irreps_in:
-            out_irreps = irreps_in[self.out_field] # take shape of out_field
+            out_irreps = irreps_in[self.out_field] # outs same irreps of irreps_in[out_field]
         else:
-           out_irreps = in_irreps
+           out_irreps = in_irreps # outs same irreps of irreps_in[field]
+
+        # --- start out_irreps ls --- #
+        # default behavior: do not modify
+
+        # - [optional] filter out_irreps l degrees if needed:
+        if output_ls is None:
+            output_ls = out_irreps.ls # all ls if none are passed
+        assert isinstance(output_ls, List)
+
+        # [optional] set out_irreps multiplicity
+        if output_mul is None:
+            output_mul = out_irreps[0].mul # take l=0 mul; ok since all ls have same mul
+
+        out_irreps = o3.Irreps(
+            [
+                (output_mul, ir)
+                for _, ir in out_irreps
+                if ir.l in [0] + output_ls # if ir.l in l=0 and "selected ls" i.e. the ls passed via output_ls
+            ]
+        )
+
+        # --- end out_irreps ls --- #
 
         self.out_irreps = out_irreps
         self.out_irreps_muls = [ir.mul for ir in out_irreps]
 
-        # check and init irreps
+        # check and init irreps dict
         my_irreps_in = {field: in_irreps}
-        if self.resnet:
+        if resnet:
             my_irreps_in.update({self.out_field: out_irreps})
         self._init_irreps(
             irreps_in=irreps_in,
@@ -89,17 +135,24 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         # --- end definition of input/output irreps --- #
 
+
         # --- start layer construction --- #
+
+        self.eq_has_internal_weights = eq_has_internal_weights
+        self.has_invariant_output = False # whether self outs scalars
+        self.has_equivariant_output = False # whether self outs l>0
 
         self.n_scalars_in = in_irreps.ls.count(0)
         assert self.n_scalars_in > 0
 
+        #?
         readout_latent_kwargs['use_layer_norm'] = True
         readout_latent_kwargs.pop('dropout', None)
+
         self.n_scalars_out = out_irreps.ls.count(0)
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
-            self.inv_readout = readout_latent( # mlp on scalars, used to compute the actual output
+            self.inv_readout = readout_latent( # mlp on scalars ONLY
                 mlp_input_dimension=self.n_scalars_in,
                 mlp_output_dimension=self.n_scalars_out,
                 **readout_latent_kwargs,
@@ -111,7 +164,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             eq_linear_input_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
             eq_linear_output_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l>0])
             self.reshape_in = reshape_irreps(eq_linear_input_irreps)
-            self.eq_readout = Linear( # equivariant MLP acting on l>0 only
+            self.eq_readout = Linear( # equivariant MLP acting on l>0 ONLY
                     eq_linear_input_irreps,
                     eq_linear_output_irreps,
                     shared_weights=self.eq_has_internal_weights,
@@ -128,16 +181,18 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 )
             self.reshape_in = None
 
-        if not self.eq_has_internal_weights and self.n_scalars_in > 0:
+        if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
                 mlp_input_dimension=self.n_scalars_in,
                 mlp_output_dimension=self.eq_readout.weight_numel,
                 **readout_latent_kwargs,
             )
 
+        # --- end layer construction --- #
 
+        self.resnet = resnet
         self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
-        if self.resnet:
+        if resnet:
             assert irreps_in[self.out_field] == out_irreps
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
         self.out_irreps_dim = self.out_irreps.dim
@@ -164,10 +219,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             if self.eq_has_internal_weights: # eq linear layer with its own inner weights
                 eq_features = self.eq_readout(eq_features)
             else:
-                # else the weights are computed via mlp on scalars
+                # else the weights are computed via mlp using scalars
                 weights = self.weights_emb(features[:, :self.n_scalars_in])
                 eq_features = self.eq_readout(eq_features, weights)
-            out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features)
+            out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
 
         if self.resnet:
             assert self._resnet_update_coeff is not None
