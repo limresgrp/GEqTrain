@@ -1085,11 +1085,6 @@ class Trainer:
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", False)
 
-
-    def _is_warmup_period_over(self):
-        n_warmup_steps_already_done = self.warmup_scheduler.last_step
-        return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
-
     def _log_updates(self):
 
         update_log = logging.getLogger(self.log_updates)
@@ -1169,6 +1164,7 @@ class Trainer:
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
+
     def batch_step(self, data, validation=False):
 
         self.optim.zero_grad(set_to_none=True)
@@ -1195,15 +1191,20 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
-            with torch.no_grad():
-                self._count += 1
-                fake_preds = torch.zeros_like(ref_data['graph_output'])
-                self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-                self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-                if self.kwargs.get('head_bias', False):
-                    fake_preds.fill_(self.kwargs['head_bias'][0])
-                    self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-                    self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+
+            # todo, maybe to be commented during production. Create a "debug mode" flag?
+            # log all on wandb
+            # log grad updates
+            # print belows
+            # with torch.no_grad():
+            #     self._count += 1
+            #     fake_preds = torch.zeros_like(ref_data['graph_output'])
+            #     self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+            #     self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
+            #     if self.kwargs.get('head_bias', False):
+            #         fake_preds.fill_(self.kwargs['head_bias'][0])
+            #         self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
+            #         self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
 
             # todo, maybe to be commented during production. Create a "debug mode" flag?
             # log all on wandb
