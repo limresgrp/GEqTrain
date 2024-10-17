@@ -3,7 +3,7 @@ import copy
 import os
 import sys
 import argparse
-from typing import List, Optional
+from typing import List, Optional, Union
 import logging
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from geqtrain.data import AtomicDataDict
 import torch
 from torch.utils.data import ConcatDataset
 from geqtrain.data._build import dataset_from_config
-from geqtrain.data.dataloader import Collater, DataLoader
+from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, R_MAX_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.loss import Loss
@@ -45,8 +45,8 @@ def main(args=None, running_as_script: bool = True):
         default=None,
     )
     parser.add_argument(
-        "-c",
-        "--config",
+        "-tc",
+        "--test-config",
         help="A YAML config file specifying the dataset to load test data from. If omitted, `config.yaml` in `train_dir` will be used",
         type=Path,
         default=None,
@@ -65,16 +65,6 @@ def main(args=None, running_as_script: bool = True):
         type=str,
         default='cpu',
     )
-    # parser.add_argument(
-    #     "--repeat",
-    #     help=(
-    #         "Number of times to repeat evaluating the test dataset. "
-    #         "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
-    #         "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
-    #     ),
-    #     type=int,
-    #     default=1,
-    # )
     parser.add_argument(
         "--test-indexes",
         help="Path to a file containing the indexes in the dataset that make up the test set. "
@@ -95,6 +85,12 @@ def main(args=None, running_as_script: bool = True):
         type=bool,
         default=False,
     )
+    parser.add_argument(
+        "--log",
+        help="log file to store all the metrics and screen logging.debug",
+        type=Path,
+        default=None,
+    )
     # parser.add_argument(
     #     "--output",
     #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
@@ -109,12 +105,16 @@ def main(args=None, running_as_script: bool = True):
     #     type=str,
     #     default="",
     # )
-    parser.add_argument(
-        "--log",
-        help="log file to store all the metrics and screen logging.debug",
-        type=Path,
-        default=None,
-    )
+        # parser.add_argument(
+    #     "--repeat",
+    #     help=(
+    #         "Number of times to repeat evaluating the test dataset. "
+    #         "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
+    #         "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
+    #     ),
+    #     type=int,
+    #     default=1,
+    # )
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -125,8 +125,8 @@ def main(args=None, running_as_script: bool = True):
     # Do the defaults:
     dataset_is_from_training: bool = False
     if args.train_dir:
-        if args.config is None:
-            args.config = args.train_dir / "config.yaml"
+        if args.test_config is None:
+            args.test_config = args.train_dir / "config.yaml"
             dataset_is_from_training = True
         if args.model is None:
             args.model = args.train_dir / "best_model.pth"
@@ -151,8 +151,8 @@ def main(args=None, running_as_script: bool = True):
             train_idcs = val_idcs = None
 
     # validate
-    if args.config is None:
-        raise ValueError("--config or --train-dir must be provided")
+    if args.test_config is None:
+        raise ValueError("--test-config or --train-dir must be provided")
 
     if args.model is None:
         raise ValueError("--model or --train-dir must be provided")
@@ -187,7 +187,7 @@ def main(args=None, running_as_script: bool = True):
         f"Loading {'training' if dataset_is_from_training else 'test'} dataset...",
     )
     
-    evaluate_config = Config.from_file(str(args.config), defaults={})
+    evaluate_config = Config.from_file(str(args.test_config), defaults={})
     config.update(evaluate_config)
     
     dataset_is_test: bool = False
@@ -209,7 +209,7 @@ def main(args=None, running_as_script: bool = True):
     if not (dataset_is_test or dataset_is_validation):
         raise Exception("Either test or validation dataset must be provided.")
     logger.info(
-        f"Loaded {'test_' if dataset_is_test else 'validation_' if dataset_is_validation else ''}dataset specified in {args.config.name}.",
+        f"Loaded {'test_' if dataset_is_test else 'validation_' if dataset_is_validation else ''}dataset specified in {args.test_config.name}.",
     )
 
     if args.test_indexes is None:
@@ -245,15 +245,38 @@ def main(args=None, running_as_script: bool = True):
         metrics.to(device=device)
         metrics_metadata = {
             'type_names'   : config["type_names"],
-            'target_names' : config['target_names'],
+            'target_names' : config.get('target_names', list(metrics.funcs.keys())),
         }
     except:
         raise Exception("Failed to load Metrics.")
 
+    # --- filter node target to train on based on node type or type name
+    keep_type_names = config.get("keep_type_names", None)
+    if keep_type_names is not None:
+        from geqtrain.train.utils import find_matching_indices
+        keep_node_types = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
+    else:
+        keep_node_types = None
+
     # dataloader
     _indexed_datasets = []
     for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
-        _indexed_datasets.append(_dataset.index_select(_test_idcs))
+        _dataset = _dataset.index_select(_test_idcs)
+        
+        if keep_node_types is not None:
+            _data = _dataset.data
+            if AtomicDataDict.NODE_TYPE_KEY in _data:
+                node_types = _data[AtomicDataDict.NODE_TYPE_KEY]
+            else:
+                node_types = _dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+            _data[AtomicDataDict.NODE_OUTPUT_KEY][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
+            if torch.all(torch.isnan(_data[AtomicDataDict.NODE_OUTPUT_KEY])):
+                _dataset = None
+            else:
+                _dataset.data = _data
+        
+        if _dataset is not None:
+            _indexed_datasets.append(_dataset)
     dataset_test = ConcatDataset(_indexed_datasets)
 
     dataloader = DataLoader(
@@ -265,46 +288,22 @@ def main(args=None, running_as_script: bool = True):
     # run inference
     logger.info("Starting...")
 
-    pbar = tqdm(dataloader)
-    for data in pbar:
+    
+    def metrics_callback(pbar, out, ref_data):
+        # accumulate metrics
+        batch_metrics = metrics(pred=out, ref=ref_data)
 
-        already_computed_nodes = None
-        while True:
-            
-            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
-                model=model,
-                data=data,
-                device=device,
-                cm=torch.no_grad(),
-                already_computed_nodes=already_computed_nodes,
-                skip_chunking=True,
-            )
-
-            # accumulate metrics
-            batch_metrics = metrics(pred=out, ref=ref_data)
-
-            desc = '\t'.join(
-                f'{k:>20s} = {v:< 20f}'
-                for k, v in metrics.flatten_metrics(
-                    batch_metrics,
-                    metrics_metadata=metrics_metadata,
-                )[0].items()
-            )
-            pbar.set_description(f"Metrics: {desc}")
-            del out, ref_data
-
-            # evaluate ending condition
-            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-            if already_computed_nodes is None:
-                break
+        desc = '\t'.join(
+            f'{k:>20s} = {v:< 20f}'
+            for k, v in metrics.flatten_metrics(
+                batch_metrics,
+                metrics_metadata=metrics_metadata,
+            )[0].items()
+        )
+        pbar.set_description(f"Metrics: {desc}")
+        del out, ref_data
+    
+    infer(dataloader, model, device, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
     
@@ -318,8 +317,42 @@ def main(args=None, running_as_script: bool = True):
         )
     )
 
+def infer(dataloader, model, device, chunk_callbacks=[], batch_callbacks=[], **kwargs):
+    pbar = tqdm(dataloader)
+    for batch_index, data in enumerate(pbar):
+        already_computed_nodes = None
+        while True:
+            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
+                model=model,
+                data=data,
+                device=device,
+                cm=torch.no_grad(),
+                already_computed_nodes=already_computed_nodes,
+                **kwargs,
+            )
 
-def load_model(model: Path, device="cpu"):
+            for callback in chunk_callbacks:
+                callback(pbar, out, ref_data, **kwargs)
+
+            # evaluate ending condition
+            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
+                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
+                    already_computed_nodes = batch_chunk_center_nodes
+            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
+                already_computed_nodes = None
+            else:
+                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
+                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
+
+            if already_computed_nodes is None:
+                break
+        for callback in batch_callbacks:
+            callback(batch_index, **kwargs)
+
+
+def load_model(model: Union[str, Path], device="cpu"):
+    if isinstance(model, str):
+        model = Path(model)
     logger = logging.getLogger("geqtrain-evaluate")
     logger.setLevel(logging.INFO)
 
@@ -339,11 +372,6 @@ def load_model(model: Path, device="cpu"):
         return model, model_config
     except ValueError:  # its not a deployed model
         pass
-
-    # global_config = model.parent / "config.yaml"
-    # global_config = Config.from_file(str(global_config))
-    # _set_global_options(global_config)
-    # del global_config
 
     # load a training session model
     model, model_config = Trainer.load_model_from_training_session(

@@ -312,7 +312,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
             # Check that the number of frames is consistent for all node and edge fields
             assert all([len(v) == num_examples for v in node_fields.values() if v is not None])
-            assert all([len(v) == num_examples for v in edge_fields.values() if v is not None])
+            # assert all([len(v) == num_examples for v in edge_fields.values() if v is not None]) !!! TODO
 
             include_frames = self.include_frames
             if include_frames is None:

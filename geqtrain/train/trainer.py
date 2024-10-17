@@ -103,6 +103,7 @@ def run_inference(
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
+    **kwargs,
 ):
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
     batch = AtomicData.to_AtomicDataDict(data.to(device)) # AtomicDataDict is the dstruct that is taken as input from each forward
