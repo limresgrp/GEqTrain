@@ -810,7 +810,8 @@ class Trainer:
 
         state_dict = dictionary.pop("state_dict", None)
 
-        trainer = cls(model=model, **dictionary)
+        trainer = cls(**dictionary)
+        trainer.init(model=model)
 
         if state_dict is not None and trainer.model is not None and not dictionary.get("fine_tune"):
             logging.debug("Reload optimizer and scheduler states")

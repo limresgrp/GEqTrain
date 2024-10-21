@@ -424,18 +424,18 @@ def neighbor_list(
             dtype=out_dtype,
             device=out_device,
         )
+        # Check pbc consistency
+        x = pos[edge_index]
+        dist_vec = x[1] - x[0]
+        z = dist_vec + torch.einsum(
+                "ni,ij->nj",
+                edge_cell_shift,
+                cell_tensor,
+            )
+        assert torch.norm(z, dim=-1).max() < r_max
     else:
         dist_matrix = torch.norm(pos[:, None, ...] - pos[None, ...], dim=-1).fill_diagonal_(torch.inf)
-        edge_index = torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device), None, None
+        edge_index = torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device)
         edge_cell_shift, cell_tensor = None, None
     
-    # Check pbc consistency
-    x = pos[edge_index]
-    dist_vec = x[1] - x[0]
-    z = dist_vec + torch.einsum(
-            "ni,ij->nj",
-            edge_cell_shift,
-            cell_tensor,
-        )
-    assert torch.norm(z, dim=-1).max() < r_max
     return edge_index, edge_cell_shift, cell_tensor
