@@ -13,6 +13,7 @@ from ._weight_init import (
 from ._dipole import DipoleMoment
 
 from ._build import model_from_config
+from ._global_model import GlobalModel
 
 __all__ = [
     Model,

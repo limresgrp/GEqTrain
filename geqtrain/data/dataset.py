@@ -26,6 +26,7 @@ from geqtrain.data import (
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
 
+from ._frad_transforms import nosify_mol
 
 def fix_batch_dim(arr):
     if arr is None:
@@ -81,6 +82,12 @@ def parse_attrs(
 
     return _fields, _fixed_fields
 
+def test_transform(data):
+    '''
+    a transform must return a in-place modified version of input
+    '''
+    data.new_field = 'hi'
+    return data
 
 class AtomicDataset(Dataset):
     """The base class for all datasets."""
@@ -92,7 +99,7 @@ class AtomicDataset(Dataset):
         self,
         root: str,
     ):
-        super().__init__(root=root)
+        super().__init__(root=root, transform=nosify_mol) # this takes as input a callable, this can be a comosed callable
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -370,7 +377,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         del graph_fields
 
         # type conversion
-        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY])
+        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY, "smiles"])
 
         total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (
             1024 * 1024

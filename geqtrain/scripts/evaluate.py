@@ -4,6 +4,11 @@ import argparse
 import logging
 from typing import Union
 from pathlib import Path
+<<<<<<< HEAD
+=======
+import numpy as np
+
+>>>>>>> 7ac5f32 (WIP frad/halicin)
 from tqdm import tqdm
 
 import torch
@@ -18,6 +23,7 @@ from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
+from sklearn.metrics import confusion_matrix
 
 def main(args=None, running_as_script: bool = True):
     # in results dir, do: geqtrain-deploy build --train-dir . deployed.pth
@@ -158,7 +164,7 @@ def main(args=None, running_as_script: bool = True):
     if args.device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device(args.device)
+        device = torch.device(args.device) # must be cuda:dev_id
 
     # logger
     logger = logging.getLogger("geqtrain-evaluate")
@@ -273,6 +279,7 @@ def main(args=None, running_as_script: bool = True):
 
     # run inference
     logger.info("Starting...")
+    conf_matrix = np.array([0.])
 
 
     def metrics_callback(pbar, out, ref_data, **kwargs): # Keep **kwargs or callback fails
@@ -320,6 +327,26 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
 
             for callback in chunk_callbacks:
                 callback(pbar, out, ref_data, **kwargs)
+            # accumulate metrics
+            batch_metrics = metrics(pred=out, ref=ref_data)
+
+            target = ref_data["graph_output"].cpu().bool()
+            prediction = (out["graph_output"].sigmoid()>.5).cpu().bool()
+
+            if np.sum(conf_matrix) == 0:
+                conf_matrix = confusion_matrix(target, prediction)
+            else:
+                conf_matrix += confusion_matrix(target, prediction)
+
+            desc = '\t'.join(
+                f'{k:>20s} = {v:< 20f}'
+                for k, v in metrics.flatten_metrics(
+                    batch_metrics,
+                    metrics_metadata=metrics_metadata,
+                )[0].items()
+            )
+            pbar.set_description(f"Metrics: {desc}")
+            del out, ref_data
 
             # evaluate ending condition
             if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
@@ -335,6 +362,21 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
                 break
         for callback in batch_callbacks:
             callback(batch_index, **kwargs)
+
+    logger.info("\n--- Final result: ---")
+    logger.info(
+        "\n".join(
+            f"{k:>20s} = {v:< 20f}"
+            for k, v in metrics.flatten_metrics(
+                metrics.current_result(),
+                metrics_metadata=metrics_metadata,
+            )[0].items()
+        )
+    )
+    print(conf_matrix)
+    tn, fp, fn, tp = conf_matrix.ravel()
+    print("tn: ", tn, "fp: ", fp, "fn: ", fn, "tp: ", tp)
+
 
 
 def load_model(model: Union[str, Path], device="cpu"):

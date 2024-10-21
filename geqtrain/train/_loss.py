@@ -8,13 +8,117 @@ import torch.nn
 from typing import Dict
 from importlib import import_module
 from torch_scatter import scatter, scatter_mean
+
+import torcheval
+from torcheval.metrics.functional import binary_precision
+
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict
+
+
+class BinaryAccuracy:
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        self.treshold_for_positivity = .5
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str, # key to be used to select element in DataDict
+        mean: bool = True,
+    ):
+        if mean:
+            raise(f"{__class__.__name__} cannot be used as loss function for training")
+
+        targets = ref[key]
+        predictions = (pred[key].sigmoid()<self.treshold_for_positivity).float()
+        return torch.abs(targets - predictions).flatten()
+
+        accuracy = torcheval.metrics.functional.binary_accuracy(predictions.squeeze(), targets.squeeze())
+        return torch.full(targets.shape, accuracy, device=targets.device)
+
+class Precision:
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        self.treshold_for_positivity = .5
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str, # key to be used to select element in DataDict
+        mean: bool = True,
+    ):
+        if mean:
+            raise(f"{__class__.__name__} cannot be used as loss function for training")
+
+        targets = ref[key]
+        predictions = (pred[key].sigmoid()>self.treshold_for_positivity).float()
+        # precision = torcheval.metrics.functional.binary_precision(predictions.squeeze(), targets.squeeze())
+        # return torch.full(targets.shape, precision, device=targets.device)
+        accuracy = torcheval.metrics.functional.binary_accuracy(predictions.squeeze(), targets.squeeze())
+        return torch.full(targets.shape, accuracy, device=targets.device)
+
+class Recall:
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        self.treshold_for_positivity = .5
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str, # key to be used to select element in DataDict
+        mean: bool = True,
+    ):
+        if mean:
+            raise(f"{__class__.__name__} cannot be used as loss function for training")
+
+        targets = ref[key].bool()
+        predictions = (pred[key].sigmoid()>self.treshold_for_positivity).bool()
+        recall = torcheval.metrics.functional.binary_recall(predictions.squeeze(), targets.squeeze())
+        return torch.full(targets.shape, recall, device=targets.device)
+
+class F1:
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+    ):
+        self.treshold_for_positivity = .5
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str, # key to be used to select element in DataDict
+        mean: bool = True,
+    ):
+        if mean:
+            raise(f"{__class__.__name__} cannot be used as loss function for training")
+
+        targets = ref[key]
+        predictions = (pred[key].sigmoid()>self.treshold_for_positivity).float()
+        f1 = torcheval.metrics.functional.binary_f1_score(predictions.squeeze(), targets.squeeze())
+        return torch.full(targets.shape, f1, device=targets.device)
+
+
 
 
 class SimpleLoss:
     """
     wrapper to torch.nn loss function; computes weighted loss function
+    it works only for torch.nn classes
 
     if "ignore_nan" not provided in yaml then NaNs will propagate as normal.
 
@@ -70,10 +174,11 @@ class SimpleLoss:
                 return loss
         else:
             loss = self.func(pred_key, ref_key) * not_zeroes
-            if mean:
+            if mean: # used as loss during training
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
-            else:
-                return loss
+            else: # used during metrics evaluation (whether it is in train or val)
+                loss[~not_zeroes.bool()] = torch.nan
+                return loss.flatten() # (batch_size, N_labels)
 
     def prepare(
         self,
@@ -81,6 +186,10 @@ class SimpleLoss:
         ref:  Dict,
         key:  str,
     ):
+        '''
+        not_zeroes tensor of 0s and 1s -> goal: mask to select which target is not to be considered for loss
+        same shape of loss
+        '''
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
         pred_key = pred.get(key, None)
