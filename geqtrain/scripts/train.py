@@ -319,67 +319,93 @@ def fine_tune(rank, world_size, config):
 
 
 def restart(rank, world_size, config):
-    # load the dictionary
-    restart_file = f"{config['root']}/{config['run_name']}/trainer.pth"
-    dictionary = load_file(
-        supported_formats=dict(torch=["pt", "pth"]),
-        filename=restart_file,
-        enforced_format="torch",
-    )
-
-    # compare dictionary to config and update stop condition related arguments
-    for k in config.keys():
-        if config[k] != dictionary.get(k, ""):
-            if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
-                     "metrics_components", "noise"]:
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif k.startswith("early_stop"):
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif isinstance(config[k], type(dictionary.get(k, ""))):
-                raise ValueError(
-                    f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
-                )
-
-    # recursive loop, if same type but different value
-    # raise error
-
-    config = Config(dictionary, exclude_keys=["state_dict", "progress"])
-
-    # dtype, etc.
-    _set_global_options(config)
-
-    # note, the from_dict method will check whether the code version
-    # in trainer.pth is consistent and issue warnings
-    if config.wandb:
-        from geqtrain.utils.wandb import resume
-
-        resume(config)
-        from geqtrain.train import TrainerWandB
-        trainer = TrainerWandB.from_dict(dictionary)
-    else:
-        from geqtrain.train import Trainer
-        trainer = Trainer.from_dict(dictionary)
-
-    # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
-        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-        logging.info(
-            f"Successfully loaded the validation data set of type {validation_dataset}..."
+        # load the dictionary
+        restart_file = f"{config['root']}/{config['run_name']}/trainer.pth"
+        dictionary = load_file(
+            supported_formats=dict(torch=["pt", "pth"]),
+            filename=restart_file,
+            enforced_format="torch",
         )
-    except KeyError:
-        # It couldn't be found
-        validation_dataset = None
 
-    trainer.set_dataset(dataset, validation_dataset)
-    trainer.set_dataloader()
+        # compare dictionary to config and update stop condition related arguments
+        for k in config.keys():
+            if config[k] != dictionary.get(k, ""):
+                if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
+                        "metrics_components", "noise", "use_dt"]:
+                    dictionary[k] = config[k]
+                    logging.info(f'Update "{k}" to {dictionary[k]}')
+                elif k.startswith("early_stop"):
+                    dictionary[k] = config[k]
+                    logging.info(f'Update "{k}" to {dictionary[k]}')
+                elif isinstance(config[k], type(dictionary.get(k, ""))):
+                    raise ValueError(
+                        f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
+                    )
 
-    # Train
-    trainer.save()
-    trainer.train()
+        # recursive loop, if same type but different value
+        # raise error
+
+        config = Config(dictionary, exclude_keys=["state_dict", "progress"])
+
+        # dtype, etc.
+        _set_global_options(config)
+
+        if config.use_dt:
+            # Setup the process for distributed training
+            setup_process(rank, world_size)
+
+        # note, the from_dict method will check whether the code version
+        # in trainer.pth is consistent and issue warnings
+        if config.use_dt:
+            dictionary.update({
+                "rank": rank,
+                "world_size": world_size,
+            })
+        if config.wandb:
+            from geqtrain.utils.wandb import resume
+            if rank == 0:
+                resume(config)
+            if config.use_dt:
+                from geqtrain.train import DistributedTrainerWandB
+                trainer = DistributedTrainerWandB.from_dict(dictionary)
+            else:
+                from geqtrain.train import TrainerWandB
+                trainer = TrainerWandB.from_dict(dictionary)
+        else:
+            if config.use_dt:
+                from geqtrain.train import DistributedTrainer
+                trainer = DistributedTrainer.from_dict(dictionary)
+            else:
+                from geqtrain.train import Trainer
+                trainer = Trainer.from_dict(dictionary)
+
+        # = Load the dataset =
+        dataset = dataset_from_config(config, prefix="dataset")
+        logging.info(f"Successfully loaded the data set of type {dataset}...")
+        try:
+            validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+            logging.info(
+                f"Successfully loaded the validation data set of type {validation_dataset}..."
+            )
+        except KeyError:
+            # It couldn't be found
+            validation_dataset = None
+
+        trainer.set_dataset(dataset, validation_dataset)
+        trainer.set_dataloader()
+
+        # Train
+        trainer.save()
+        trainer.train()
+    except KeyboardInterrupt:
+        logging.info("Process manually stopped!")
+    except Exception as e:
+        logging.error(e)
+        raise e
+    finally:
+        if config.use_dt:
+            cleanup(rank)
 
     return
 
