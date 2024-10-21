@@ -26,6 +26,7 @@ setup(
         ]
     },
     install_requires=[
+        "ase",
         "numpy",
         "einops",
         "tqdm",

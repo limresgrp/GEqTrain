@@ -20,6 +20,8 @@ R_MAX_KEY: Final[str] = "r_max"
 POSITIONS_KEY: Final[str] = "pos"
 # [2, n_edge] index tensor giving center -> neighbor relations
 EDGE_INDEX_KEY: Final[str] = "edge_index"
+# [bool] | [3] wether to use pbc or not and on which axis
+PBC_KEY: Final[str] = "pbc"
 # [n_edge, 3] tensor of how many periodic cells each edge crosses in each cell vector
 EDGE_CELL_SHIFT_KEY: Final[str] = "edge_cell_shift"
 # [n_batch, 3, 3] or [3, 3] tensor where rows are the cell vectors

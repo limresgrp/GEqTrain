@@ -153,6 +153,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         self,
         root: str,
         dataset_id: int,
+        pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
         extra_fixed_fields: Dict[str, Any] = {},
@@ -165,8 +166,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_attributes: Dict = {},
     ):
         self.dataset_id = dataset_id
-        # TO DO, this may be simplified
-        # See if a subclass defines some inputs
+        self.pbc = pbc
         self.file_name = (
             getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         )
@@ -336,7 +336,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                         **{f: v[i] for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
-                })
+                }, pbc=self.pbc)
                 for i in include_frames
             ]
 
@@ -428,6 +428,7 @@ class NpzDataset(AtomicInMemoryDataset):
         self,
         root: str,
         dataset_id: int,
+        pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -444,6 +445,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
         super().__init__(
             dataset_id=dataset_id,
+            pbc=pbc,
             file_name=file_name,
             url=url,
             root=root,
