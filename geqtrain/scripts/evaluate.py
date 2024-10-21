@@ -289,10 +289,10 @@ def main(args=None, running_as_script: bool = True):
         pbar.set_description(f"Metrics: {desc}")
         del out, ref_data
 
+    config.pop('device')
     infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
-
     logger.info(
         "\n".join(
             f"{k:>20s} = {v:< 20f}"

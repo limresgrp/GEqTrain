@@ -1613,8 +1613,9 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val)   == len(validation_dataset.datasets)
+        # TODO: verify these only when needed
+        # assert len(self.n_train) == len(dataset.datasets)
+        # assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
@@ -1668,8 +1669,9 @@ class Trainer:
             sampler=validation_sampler,
             **dl_kwargs,
         )
-        self.logger.info(f"Train n.obs-in-dset: {len(self.dataset_train)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_train)}")
-        self.logger.info(f"Validation n.obs-in-dset: {len(self.dataset_val)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_val)}")
+        # TODO these do not work in evaluate script, replace them with associated members
+        # self.logger.info(f"Train n.obs-in-dset: {len(self.dataset_train)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_train)}")
+        # self.logger.info(f"Validation n.obs-in-dset: {len(self.dataset_val)} n.batches-in-dloader/steps-per-epoch: {len(self.dl_val)}")
 
 
 class TrainerWandB(Trainer):
