@@ -404,7 +404,7 @@ def restart(rank, world_size, config):
         logging.error(e)
         raise e
     finally:
-        if config.use_dt:
+        if dictionary.get("use_dt", False):
             cleanup(rank)
 
     return

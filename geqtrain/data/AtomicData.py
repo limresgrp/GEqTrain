@@ -363,7 +363,7 @@ def neighbor_list(
         edge_index (torch.tensor shape [2, num_edges]): List of edges.
     """
 
-    if pbc:
+    if any(pbc):
         import ase.geometry
         import ase.neighborlist
 
