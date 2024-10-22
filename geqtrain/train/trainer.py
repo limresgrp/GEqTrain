@@ -48,6 +48,13 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 
+def get_latest_lr(optimizer, model, param_name: str) -> float:
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            if param_name == [name for name, p in model.named_parameters() if p is param][0]:
+                return param_group['lr']
+    raise ValueError(f"Parameter {param_name} not found in optimizer.")
+
 def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
@@ -503,6 +510,13 @@ class Trainer:
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
 
+    def _get_num_of_steps_per_epoch(self):
+        if hasattr(self, "dl_train"):
+            return len(self.dl_train)
+        elif hasattr(self, "steps_per_epoch"): # from reload of trainer
+            return self.steps_per_epoch
+        raise ValueError("Missing both self.steps_per_epoch and self.dl_train")
+
     def init_objects(self):
         '''
         Initializes:
@@ -523,6 +537,7 @@ class Trainer:
         }
 
         def merge_groups(param, param_groups):
+            # overrides default dict for optim
             merged_kwargs = {}
             for param_group in param_groups:
                 merged_kwargs.update(param_groups_dict[param_group])
@@ -539,6 +554,8 @@ class Trainer:
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
+        # parsing params to build optim groups
+        # atm only ['nowd', 'dampen'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
@@ -547,7 +564,7 @@ class Trainer:
                     param_groups.append(tag)
             if p.dim()<2:
                 param_groups.append('nowd')
-            
+
             group = merge_groups(p, param_groups)
             merge_or_create_group(optim_groups, group)
 
@@ -565,13 +582,29 @@ class Trainer:
 
         assert (
             self.lr_scheduler_name
-            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "none"]
+            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "CosineAnnealingLR", "none"]
         ) or (
             (len(self.end_of_epoch_callbacks) + len(self.end_of_batch_callbacks)) > 0
         ), f"{self.lr_scheduler_name} cannot be used unless callback functions are defined"
+
         self.lr_sched = None
         self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
+
+            if self.lr_scheduler_name == "CosineAnnealingLR":
+                self.steps_per_epoch = self._get_num_of_steps_per_epoch()
+                self.kwargs['lr_scheduler_T_max'] = self.steps_per_epoch * self.max_epochs
+
+            self.warmup = self.kwargs.get("lrWarmup", False)
+            if self.warmup:
+                #! for now it has been tested only with CosineAnnealingLR
+                import pytorch_warmup as warmup
+                self.steps_per_epoch = self._get_num_of_steps_per_epoch()
+                n_warmup_epochs = int((self.max_epochs/100)*5) # warmup 5% of train epochs, start using provided lrsched at (5% of train epochs)+1
+                self.warmup_steps = self.kwargs.get("warmupSteps", self.steps_per_epoch*n_warmup_epochs)
+                self.kwargs['lr_scheduler_T_max'] = self.steps_per_epoch * self.max_epochs - self.warmup_steps
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
+
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
                 class_name=self.lr_scheduler_name,
@@ -905,7 +938,7 @@ class Trainer:
             prefix="metrics",
             positional_args=dict(components=self.metrics_components),
             all_args=self.kwargs,
-        )
+        )  # self.metrics.funcs is a dict where for each key u want to compute, it creates an hash for the loss to avoid clashes
 
         if not (
             self.metrics_key.lower().startswith(VALIDATION)
@@ -925,7 +958,7 @@ class Trainer:
 
         # register hook to clamp gradients
         for p in self.model.parameters():
-            
+
             if self.sanitize_gradients:
 
                 def sanitize_fn(grad):
@@ -963,34 +996,62 @@ class Trainer:
             callback(self)
 
         self.final_log()
-        
+
         self.save()
         # hooks_handler.deregister_hooks()
         finish_all_writes()
 
-    def get_cm(self, validation):
-        if self.model_requires_grads or not validation:
-            return contextlib.nullcontext()
-        return torch.no_grad()
+
+    def _batch_lvl_lrscheduler_step(self):
+        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if not self.using_batch_lvl_lrscheduler:
+                return
+
+        # todo: instead of str comparison could use a dict with k:lr_sched_name, v: 0/1 whether that scheduler is being used + assert check!
+        # idea: for loop on num_of_possible_lr_scheduler is surely faster then str cmpr thru the whole lr scheduler name
+        if self.lr_scheduler_name == "CosineAnnealingLR":
+            self.lr_sched.step()
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+
+    def _epoch_lvl_lrscheduler_step(self):
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
+            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", False)
+
+
+    def _is_warmup_period_over(self):
+        n_warmup_steps_already_done = self.warmup_scheduler.last_step
+        return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
     def batch_step(self, data, validation=False):
-        # no need to have gradients from old steps taking up memory
+
         self.optim.zero_grad(set_to_none=True)
 
         if validation: self.model.eval()
         else: self.model.train()
 
-        cm = self.get_cm(validation)
-        already_computed_nodes = None
         while True:
 
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
                 model=self.model,
                 data=data,
                 device=self.torch_device,
-                already_computed_nodes=already_computed_nodes,
+                already_computed_nodes=None,
                 per_node_outputs_keys=self.per_node_outputs_keys,
-                cm=cm,
+                cm=contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad(),
                 mixed_precision=self.mixed_precision,
                 skip_chunking=self.skip_chunking,
                 noise=self.noise,
@@ -1009,17 +1070,21 @@ class Trainer:
             if not validation:
 
                 loss.backward()
+
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
-
                 self.optim.step()
 
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+                if self.warmup:
+                    with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
+                        if self._is_warmup_period_over():
+                            self._batch_lvl_lrscheduler_step()
+                else:
+                    self._batch_lvl_lrscheduler_step()
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1075,6 +1140,7 @@ class Trainer:
         for category, dataset in zip(categories, dataloaders):
             self.reset_metrics()
             self.n_batches = len(dataset)
+
             for self.ibatch, batch in enumerate(dataset):
                 success = self.batch_step(
                     data=batch,
@@ -1102,8 +1168,11 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
-            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+        # todo atm not working
+        if not self.warmup:
+            self._epoch_lvl_lrscheduler_step()
+        elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
+            self._epoch_lvl_lrscheduler_step()
 
         for callback in self._end_of_epoch_callbacks:
             callback(self)
@@ -1164,7 +1233,7 @@ class Trainer:
         save model and trainer details
         """
         if not self.is_master:
-            return 
+            return
 
         with atomic_write_group():
             current_metrics = self.mae_dict[self.metrics_key]
@@ -1172,6 +1241,7 @@ class Trainer:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
 
+                self.best_model_saved_at_epoch = self.iepoch
                 self.save_model(self.best_model_path, blocking=False)
 
                 self.logger.info(
@@ -1262,7 +1332,7 @@ class Trainer:
                     log_str[category] += f" {value:12.3g}"
                     log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
-        
+
         self.norm_dict = dict(Grad_norm=self.norms)
 
         if not self.is_master:
@@ -1387,8 +1457,9 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        assert len(self.n_train) == len(dataset.datasets)
-        assert len(self.n_val)   == len(validation_dataset.datasets)
+        # TODO: verify these only when needed, now commented to allow different train/val dset at train restart()
+        # assert len(self.n_train) == len(dataset.datasets)
+        # assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
@@ -1461,12 +1532,14 @@ class TrainerWandB(Trainer):
 
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
+            if "log" not in wandb_watch_kwargs:
+                wandb_watch_kwargs["log"] = None # do not log sys info
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
     def end_of_epoch_log(self):
         if not self.is_master:
             return
-        
+
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
@@ -1486,12 +1559,12 @@ class DistributedTrainer(Trainer):
         # Set the device for this process
         torch.cuda.set_device(self.rank)
         super().init(**kwargs)
-    
+
     def set_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
         validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
         super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
-    
+
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
