@@ -2,6 +2,8 @@ config/
 results/
 deployed/
 _misc/
+results/
+test/
 
 *.png
 *.csv
