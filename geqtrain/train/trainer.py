@@ -407,6 +407,7 @@ class Trainer:
         mixed_precision: bool = False,
         hooks: Dict = {},
         use_grokfast: bool = False,
+        use_warmup: bool = False,
         **kwargs,
     ):
 
@@ -595,8 +596,7 @@ class Trainer:
                 self.steps_per_epoch = self._get_num_of_steps_per_epoch()
                 self.kwargs['lr_scheduler_T_max'] = self.steps_per_epoch * self.max_epochs
 
-            self.warmup = self.kwargs.get("lrWarmup", False)
-            if self.warmup:
+            if self.use_warmup:
                 #! for now it has been tested only with CosineAnnealingLR
                 import pytorch_warmup as warmup
                 self.steps_per_epoch = self._get_num_of_steps_per_epoch()
@@ -1001,7 +1001,6 @@ class Trainer:
         # hooks_handler.deregister_hooks()
         finish_all_writes()
 
-
     def _batch_lvl_lrscheduler_step(self):
         # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
         if hasattr(self, "using_batch_lvl_lrscheduler"):
@@ -1019,7 +1018,6 @@ class Trainer:
             self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", True)
-
 
     def _epoch_lvl_lrscheduler_step(self):
         if hasattr(self, "using_batch_lvl_lrscheduler"):
@@ -1043,15 +1041,17 @@ class Trainer:
         if validation: self.model.eval()
         else: self.model.train()
 
+        cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
+        already_computed_nodes = None
         while True:
 
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
                 model=self.model,
                 data=data,
                 device=self.torch_device,
-                already_computed_nodes=None,
+                already_computed_nodes=already_computed_nodes,
                 per_node_outputs_keys=self.per_node_outputs_keys,
-                cm=contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad(),
+                cm=cm,
                 mixed_precision=self.mixed_precision,
                 skip_chunking=self.skip_chunking,
                 noise=self.noise,
@@ -1079,10 +1079,9 @@ class Trainer:
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
                 self.optim.step()
 
-                if self.warmup:
+                if self.use_warmup and not self._is_warmup_period_over():
                     with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
-                        if self._is_warmup_period_over():
-                            self._batch_lvl_lrscheduler_step()
+                        pass
                 else:
                     self._batch_lvl_lrscheduler_step()
 
@@ -1169,7 +1168,7 @@ class Trainer:
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
         # todo atm not working
-        if not self.warmup:
+        if not self.use_warmup:
             self._epoch_lvl_lrscheduler_step()
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
             self._epoch_lvl_lrscheduler_step()
