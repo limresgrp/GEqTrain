@@ -117,17 +117,21 @@ def main(args=None, running_as_script: bool = True):
 
     # Do the defaults:
     dataset_is_from_training: bool = False
+    print_best_model_epoch: bool = False
     if args.train_dir:
         if args.test_config is None:
             args.test_config = args.train_dir / "config.yaml"
             dataset_is_from_training = True
         if args.model is None:
+            print_best_model_epoch = True
             args.model = args.train_dir / "best_model.pth"
         if args.test_indexes is None and dataset_is_from_training:
             # Find the remaining indexes that aren't train or val
             trainer = torch.load(
                 str(args.train_dir / "trainer.pth"), map_location="cpu"
             )
+            if print_best_model_epoch:
+                print(f"Loading model from epoch: {trainer.best_model_saved_at_epoch}")
             train_idcs = []
             dataset_offset = 0
             for tr_idcs in trainer["train_idcs"]:
@@ -179,10 +183,10 @@ def main(args=None, running_as_script: bool = True):
     logger.info(
         f"Loading {'training' if dataset_is_from_training else 'test'} dataset...",
     )
-    
+
     evaluate_config = Config.from_file(str(args.test_config), defaults={})
     config.update(evaluate_config)
-    
+
     dataset_is_test: bool = False
     dataset_is_validation: bool = False
     try:
@@ -270,8 +274,8 @@ def main(args=None, running_as_script: bool = True):
     # run inference
     logger.info("Starting...")
 
-    
-    def metrics_callback(pbar, out, ref_data, **kwargs):
+
+    def metrics_callback(pbar, out, ref_data):
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
 
@@ -284,11 +288,11 @@ def main(args=None, running_as_script: bool = True):
         )
         pbar.set_description(f"Metrics: {desc}")
         del out, ref_data
-    
+
     infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
-    
+
     logger.info(
         "\n".join(
             f"{k:>20s} = {v:< 20f}"
@@ -348,14 +352,14 @@ def load_model(model: Union[str, Path], device="cpu"):
             set_global_options=True,  # don't warn that setting
         )
         logger.info("loaded deployed model.")
-        
+
         import tempfile
         tmp = tempfile.NamedTemporaryFile()
         # Open the file for writing.
         with open(tmp.name, 'w') as f:
             f.write(metadata[CONFIG_KEY])
         model_config = Config.from_file(tmp.name)
-        
+
         model.eval()
         return model, model_config
     except ValueError:  # its not a deployed model
