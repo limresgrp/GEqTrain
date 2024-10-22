@@ -99,12 +99,30 @@ class AtomicDataset(Dataset):
         pnames = list(inspect.signature(self.__init__).parameters)
         IGNORE_KEYS = {
             AtomicDataDict.DATASET_INDEX_KEY,
+            "embedding_dimensionality",
         }
-        params = {
-            k: getattr(self, k)
-            for k in pnames
-            if k not in IGNORE_KEYS and hasattr(self, k)
-        }
+
+        def filter_attributes(self, pnames, IGNORE_KEYS):
+            def filter_dict(d):
+                # Recursively filter dictionary to exclude keys in IGNORE_KEYS
+                return {
+                    k: (filter_dict(v) if isinstance(v, dict) else v)
+                    for k, v in d.items()
+                    if k not in IGNORE_KEYS
+                }
+
+            params = {
+                k: (
+                    filter_dict(getattr(self, k))
+                    if isinstance(getattr(self, k), dict) else getattr(self, k)
+                )
+                for k in pnames
+                if k not in IGNORE_KEYS and hasattr(self, k)
+            }
+            
+            return params
+        
+        params = filter_attributes(self, pnames, IGNORE_KEYS)
         # Add other relevant metadata:
         params["dtype"] = str(torch.get_default_dtype())
         params["geqtrain_version"] = geqtrain.__version__
