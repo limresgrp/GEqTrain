@@ -111,7 +111,7 @@ def GlobalModel(
                 dict(
                     name="head",
                     field=AtomicDataDict.NODE_FEATURES_KEY,
-                    out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+                    out_field='noise_target', #AtomicDataDict.NODE_OUTPUT_KEY,
                 ),
             ),
         }

@@ -177,7 +177,7 @@ class SimpleLoss:
             if mean: # used as loss during training
                 return loss.mean(dim=-1).sum() / not_zeroes.sum()
             else: # used during metrics evaluation (whether it is in train or val)
-                loss[~not_zeroes.bool()] = torch.nan
+                # loss[~not_zeroes.bool()] = torch.nan
                 return loss.flatten() # (batch_size, N_labels)
 
     def prepare(

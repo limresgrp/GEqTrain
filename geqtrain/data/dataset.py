@@ -82,12 +82,6 @@ def parse_attrs(
 
     return _fields, _fixed_fields
 
-def test_transform(data):
-    '''
-    a transform must return a in-place modified version of input
-    '''
-    data.new_field = 'hi'
-    return data
 
 class AtomicDataset(Dataset):
     """The base class for all datasets."""
@@ -99,7 +93,7 @@ class AtomicDataset(Dataset):
         self,
         root: str,
     ):
-        super().__init__(root=root, transform=nosify_mol) # this takes as input a callable, this can be a comosed callable
+        super().__init__(root=root, transform=nosify_mol) # this takes as input a callable, this can be a composed callable
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -126,9 +120,9 @@ class AtomicDataset(Dataset):
                 for k in pnames
                 if k not in IGNORE_KEYS and hasattr(self, k)
             }
-            
+
             return params
-        
+
         params = filter_attributes(self, pnames, IGNORE_KEYS)
         # Add other relevant metadata:
         params["dtype"] = str(torch.float32)

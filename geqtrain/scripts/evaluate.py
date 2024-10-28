@@ -7,6 +7,8 @@ from pathlib import Path
 <<<<<<< HEAD
 =======
 import numpy as np
+import h5py
+from torch_scatter import scatter
 
 >>>>>>> 7ac5f32 (WIP frad/halicin)
 from tqdm import tqdm
@@ -55,7 +57,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=1,
+        default=16,
     )
     parser.add_argument(
         "-d",
@@ -297,7 +299,12 @@ def main(args=None, running_as_script: bool = True):
         del out, ref_data
 
     config.pop('device')
-    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
+    save_out_feature = True # TODO: extract this in args
+    observations, gt = infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], save_out_feature=save_out_feature, **config)
+
+    if save_out_feature:
+        filename = './train_data.h5' # TODO: extract this in args + add handling of the .h5 extension
+        write_batched_obs_to_file(len(dataloader), filename, observations, gt)
 
     logger.info("\n--- Final result: ---")
     logger.info(
@@ -310,8 +317,32 @@ def main(args=None, running_as_script: bool = True):
         )
     )
 
-def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
+
+# def write_obs_to_file(filename:str='./dataset.h5', observations:List=[], ground_truths:List=[]):
+#     with h5py.File(filename, 'w') as h5_file:
+#         for i, (obs, gt) in enumerate(zip(observations, ground_truths)):
+#             h5_file.create_dataset(f'observation_{i}', data=obs.numpy())
+#             h5_file.create_dataset(f'ground_truth_{i}', data=gt.numpy())
+
+#     # reopen to test consistency
+#     hdf5_file = h5py.File(filename, 'r')
+#     assert len(hdf5_file.keys())//2 == len(observations)
+
+def write_batched_obs_to_file(n_batches, filename:str='./dataset.h5', observations:List=[], ground_truths:List=[]):
+    dset_id = 0
+    with h5py.File(filename, 'w') as h5_file:
+        for batch_idx in range(n_batches):
+            obs_batch, gt_batch = observations[batch_idx], ground_truths[batch_idx]
+            for obs_idx in range(obs_batch.shape[0]): # expected bs first
+                obs, gt = obs_batch[obs_idx], gt_batch[obs_idx]
+                h5_file.create_dataset(f'observation_{dset_id}', data=obs.numpy())
+                h5_file.create_dataset(f'ground_truth_{dset_id}', data=gt.numpy())
+                dset_id+=1
+
+
+def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], save_out_feature:bool=False, **kwargs):
     pbar = tqdm(dataloader)
+    observations, gt = [] , []
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
         while True:
@@ -324,6 +355,15 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
                 per_node_outputs_keys=per_node_outputs_keys,
                 **kwargs,
             )
+
+            if save_out_feature:
+                field = AtomicDataDict.NODE_FEATURES_KEY
+                out_field = AtomicDataDict.GRAPH_OUTPUT_KEY
+                graph_feature = scatter(out[field][...,:32], index = out['batch'], dim=0)
+                # _, counts = out['batch'].unique(return_counts=True)
+                # graph_feature /=counts
+                observations.append(graph_feature.cpu())
+                gt.append(out[out_field].cpu())
 
             for callback in chunk_callbacks:
                 callback(pbar, out, ref_data, **kwargs)
@@ -360,6 +400,7 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
 
             if already_computed_nodes is None:
                 break
+
         for callback in batch_callbacks:
             callback(batch_index, **kwargs)
 
@@ -377,6 +418,7 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
     tn, fp, fn, tp = conf_matrix.ravel()
     print("tn: ", tn, "fp: ", fp, "fn: ", fn, "tp: ", tp)
 
+    return observations, gt
 
 
 def load_model(model: Union[str, Path], device="cpu"):
