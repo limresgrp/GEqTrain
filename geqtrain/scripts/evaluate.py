@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 import logging
@@ -9,7 +10,7 @@ import torch
 from torch.utils.data import ConcatDataset
 from geqtrain.data._build import dataset_from_config
 from geqtrain.data.dataloader import DataLoader
-from geqtrain.scripts.deploy import load_deployed_model, R_MAX_KEY
+from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
 from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets
@@ -347,9 +348,14 @@ def load_model(model: Union[str, Path], device="cpu"):
             set_global_options=True,  # don't warn that setting
         )
         logger.info("loaded deployed model.")
-        model_config = {
-            "r_max": float(metadata[R_MAX_KEY]),
-        }
+        
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile()
+        # Open the file for writing.
+        with open(tmp.name, 'w') as f:
+            f.write(metadata[CONFIG_KEY])
+        model_config = Config.from_file(tmp.name)
+        
         model.eval()
         return model, model_config
     except ValueError:  # its not a deployed model

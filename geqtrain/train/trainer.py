@@ -904,7 +904,7 @@ class Trainer:
             # this set as default dtype... does it matter?
             model.to(
                 device=torch.device(device),
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float32,
             )
             model_state_dict = torch.load(
                 traindir + "/" + model_name, map_location=device
