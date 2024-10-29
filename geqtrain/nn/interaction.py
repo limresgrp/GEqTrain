@@ -5,7 +5,7 @@ import torch
 from typing import Optional, List, Tuple, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
-from einops import rearrange
+from einops.layers.torch import Rearrange
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -22,7 +22,6 @@ from geqtrain.nn.allegro import (
     MakeWeightedChannels,
 )
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
-from geqtrain.utils._global_options import DTYPE
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
 
@@ -237,7 +236,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # note that the sigmoid of these are the factor _between_ layers
         # so the first entry is the ratio for the latent resnet of the first and second layers, etc.
         # e.g. if there are 3 layers, there are 2 ratios: l1:l2, l2:l3
-        self._latent_resnet_update_params = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=DTYPE))
+        self._latent_resnet_update_params = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=torch.float32))
 
         self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
         self.register_buffer("_zero", torch.as_tensor(0.0))
@@ -323,13 +322,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Initialize state
         out_features = torch.zeros(
             (num_edges, self.out_multiplicity, self.out_feat_elems),
-            dtype=DTYPE,
+            dtype=torch.float32,
             device=edge_attr.device
         )
 
         latents = torch.zeros(
             (num_edges, self.latent_dim),
-            dtype=DTYPE,
+            dtype=torch.float32,
             device=edge_attr.device,
         )
         active_edges = torch.arange(
@@ -508,6 +507,8 @@ class InteractionLayer(torch.nn.Module):
             ),
         )
 
+        self.rearrange_scalars = Rearrange('e m s -> e (m s)')
+
         # Make env embed mlp
         generate_n_weights = (env_weighter.weight_numel)  # the weight for the edge embedding
         generate_n_weights += self.env_embed_multiplicity # + the weights for the edge attention
@@ -578,7 +579,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=generate_n_weights,
             has_bias=False,
         )
-
+        
         # Take the node attrs and obtain a query matrix
         self.edge_attr_to_query = ScalarMLPFunction(
             mlp_input_dimension=(
@@ -602,6 +603,11 @@ class InteractionLayer(torch.nn.Module):
             zero_init_last_layer_weights = True,
         ) if parent.use_attention else None
 
+        if parent.use_attention:
+            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=self.env_embed_multiplicity, d=self.head_dim)
+        else:
+            self.rearrange_qk = None
+
         self.latent_mlp = latent_mlp
         self._env_weighter = env_weighter
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
@@ -616,9 +622,9 @@ class InteractionLayer(torch.nn.Module):
 
     def forward(
         self,
-        data,
-        active_edges,
-        num_nodes,
+        data: AtomicDataDict.Type,
+        active_edges: torch.Tensor,
+        num_nodes: int,
         latents,
         inv_latent_cat,
         eq_features,
@@ -693,11 +699,16 @@ class InteractionLayer(torch.nn.Module):
                 edge_invariants,
             ], dim=-1)
 
+            # Asserts needed for JIT
+            assert self.edge_attr_to_query is not None
+            assert self.latent_to_key is not None
+            assert self.rearrange_qk is not None
+            
             Q = self.edge_attr_to_query(edge_full_attr)
-            Q = rearrange(Q, 'e (m d) -> e m d', m=self.env_embed_multiplicity, d=self.head_dim)
+            Q = self.rearrange_qk(Q)
 
             K = self.latent_to_key(latents)
-            K = rearrange(K, 'e (m d) -> e m d', m=self.env_embed_multiplicity, d=self.head_dim)
+            K = self.rearrange_qk(K)
 
             W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
 
@@ -721,6 +732,11 @@ class InteractionLayer(torch.nn.Module):
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
 
         if self.use_mace_product:
+
+            # Asserts needed for JIT
+            assert self.product is not None
+            assert self.reshape_in_module is not None
+
             expanded_features_per_active_atom: torch.Tensor = self.product(
                 node_feats=local_env_per_active_atom,
                 node_attrs=node_invariants[active_node_centers],
@@ -742,7 +758,7 @@ class InteractionLayer(torch.nn.Module):
         # Get invariants
         # features has shape [z][mul][k]
         # we know scalars are first
-        scalars = rearrange(eq_features[:, :, :self.tp_n_scalar_out], 'e m s -> e (m s)')
+        scalars = self.rearrange_scalars(eq_features[:, :, :self.tp_n_scalar_out])
 
         inv_latent = torch.cat(
             [

@@ -71,7 +71,7 @@ class BesselBasisVec(nn.Module):
         self.register_buffer("bessel_values", bessel_values)
 
         bessel_weights = (
-            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
+            torch.ones(self.num_basis, dtype=torch.float32)
         )
         if self.trainable:
             self.bessel_weights = nn.Parameter(bessel_weights)
@@ -118,7 +118,7 @@ class GaussianBasis(nn.Module):
         self.register_buffer("gaussian_values", gaussian_values)
 
         gaussian_weights = (
-            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
+            torch.ones(self.num_basis, dtype=torch.float32)
         )
         if self.trainable:
             self.gaussian_weights = nn.Parameter(gaussian_weights)

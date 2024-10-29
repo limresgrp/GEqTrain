@@ -12,7 +12,6 @@ import argparse
 import pathlib
 import logging
 import yaml
-import itertools
 import torch
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
@@ -21,10 +20,12 @@ import numpy as np  # noqa: F401
 
 from e3nn.util.jit import script
 
-from geqtrain.model import model_from_config
 from geqtrain.train import Trainer
 from geqtrain.utils import Config
 from geqtrain.utils._global_options import _set_global_options
+
+from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
+allow_ops_in_compiled_graph() # needed to compile einops. See https://github.com/arogozhnikov/einops/wiki/Using-torch.compile-with-einops
 
 CONFIG_KEY: Final[str] = "config"
 TORCH_VERSION_KEY: Final[str] = "torch_version"

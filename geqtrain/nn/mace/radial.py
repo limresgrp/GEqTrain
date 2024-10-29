@@ -26,7 +26,7 @@ class BesselBasis(torch.nn.Module):
                 start=1.0,
                 end=num_basis,
                 steps=num_basis,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float32,
             )
         )
         if trainable:
@@ -35,11 +35,11 @@ class BesselBasis(torch.nn.Module):
             self.register_buffer("bessel_weights", bessel_weights)
 
         self.register_buffer(
-            "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
+            "r_max", torch.tensor(r_max, dtype=torch.float32)
         )
         self.register_buffer(
             "prefactor",
-            torch.tensor(np.sqrt(2.0 / r_max), dtype=torch.get_default_dtype()),
+            torch.tensor(np.sqrt(2.0 / r_max), dtype=torch.float32),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # [..., 1]
@@ -65,9 +65,9 @@ class PolynomialCutoff(torch.nn.Module):
 
     def __init__(self, r_max: float, p=6):
         super().__init__()
-        self.register_buffer("p", torch.tensor(p, dtype=torch.get_default_dtype()))
+        self.register_buffer("p", torch.tensor(p, dtype=torch.float32))
         self.register_buffer(
-            "r_max", torch.tensor(r_max, dtype=torch.get_default_dtype())
+            "r_max", torch.tensor(r_max, dtype=torch.float32)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

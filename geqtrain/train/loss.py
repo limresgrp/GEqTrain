@@ -98,7 +98,7 @@ class Loss:
         '''
         key = self.suffix_key(key)
         self.keys.append(key)
-        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
+        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
         self.funcs[key] = instantiate_loss_function(func, func_params)
         self.func_params[key] = func_params
 

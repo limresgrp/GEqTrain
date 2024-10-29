@@ -16,7 +16,6 @@
 from typing import List, Optional
 import torch
 import math
-from geqtrain.utils._global_options import DTYPE
 
 
 class KANLinear(torch.nn.Module):
@@ -290,7 +289,7 @@ class KAN(torch.nn.Module):
         self.bias = None
         if has_bias:
             if bias is None:
-                bias = torch.zeros(1, self.out_features, dtype=DTYPE)
+                bias = torch.zeros(1, self.out_features, dtype=torch.float32)
             else:
                 bias = torch.as_tensor(bias).reshape(1, self.out_features)
             self.bias = torch.nn.Parameter(bias)

@@ -6,7 +6,6 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.utils._global_options import DTYPE
 
 
 @compile_mode("script")
@@ -45,7 +44,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_bias to have length {num_types}, "
                 f"but got {len(per_type_bias)}"
             )
-            per_type_bias = torch.tensor(per_type_bias, dtype=DTYPE)
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
             self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
         else:
             self.per_type_bias = None
@@ -55,7 +54,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_std to have length {num_types}, "
                 f"but got {len(per_type_std)}"
             )
-            per_type_std = torch.tensor(per_type_std, dtype=DTYPE)
+            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
             self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
         else:
             self.per_type_std = None

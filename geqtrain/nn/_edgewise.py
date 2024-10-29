@@ -1,7 +1,7 @@
 import torch
 import math
 from typing import Optional
-from einops import rearrange
+from einops.layers.torch import Rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 from geqtrain.data import AtomicDataDict
@@ -81,6 +81,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                 **readout_latent_kwargs,
             )
 
+            self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+
             self.reshape_out = inverse_reshape_irreps(irreps)
 
             self.irreps_out.update(
@@ -107,10 +109,10 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])
-            Q = rearrange(Q, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+            Q = self.rearrange_qk(Q)
 
             K = self.edge_feat_to_key(edge_feat[..., :self.n_scalars])
-            K = rearrange(K, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+            K = self.rearrange_qk(K)
 
             W = torch.einsum('ecd,ecd -> ec', Q, K) * self.isqrtd
 

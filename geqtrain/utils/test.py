@@ -45,7 +45,7 @@ def assert_permutation_equivariant(
     __tracebackhide__ = True
 
     if tolerance is None:
-        atol = PERMUTATION_FLOAT_TOLERANCE[torch.get_default_dtype()]
+        atol = PERMUTATION_FLOAT_TOLERANCE[torch.float32]
     else:
         atol = tolerance
 
@@ -216,7 +216,7 @@ def assert_AtomicData_equivariant(
     errs = {k: torch.max(torch.vstack([e[k] for e in errs]), dim=0)[0] for k in errs[0]}
 
     if o3_tolerance is None:
-        o3_tolerance = FLOAT_TOLERANCE[torch.get_default_dtype()]
+        o3_tolerance = FLOAT_TOLERANCE[torch.float32]
     all_errs = []
     for case, err in errs.items():
         for key, this_err in zip(irreps_out.keys(), err):

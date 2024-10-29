@@ -124,7 +124,7 @@ class AtomicDataset(Dataset):
         
         params = filter_attributes(self, pnames, IGNORE_KEYS)
         # Add other relevant metadata:
-        params["dtype"] = str(torch.get_default_dtype())
+        params["dtype"] = str(torch.float32)
         params["geqtrain_version"] = geqtrain.__version__
         return params
 

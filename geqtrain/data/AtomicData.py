@@ -115,19 +115,19 @@ def _process_dict(kwargs, ignore_fields=[]):
             kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, np.ndarray):
             if np.issubdtype(v.dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, list):
             ele_dtype = np.array(v).dtype
             if np.issubdtype(ele_dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif np.issubdtype(type(v), np.floating):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
-            kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+            kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
         elif np.issubdtype(type(v), int):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
@@ -274,7 +274,7 @@ class AtomicData(Data):
         else:
             assert len(pbc) == 3
 
-        pos = torch.as_tensor(pos, dtype=torch.get_default_dtype())
+        pos = torch.as_tensor(pos, dtype=torch.float32)
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
 
@@ -378,7 +378,7 @@ def neighbor_list(
         else:
             temp_pos = np.asarray(pos)
             out_device = torch.device("cpu")
-            out_dtype = torch.get_default_dtype()
+            out_dtype = torch.float32
         
         if isinstance(cell, torch.Tensor):
             temp_cell = cell.detach().cpu().numpy()
