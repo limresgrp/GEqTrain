@@ -377,13 +377,10 @@ class Config(object):
             num_types = len(type_names)
             # check consistency
             assert self.get("num_types", num_types) == num_types
+            self["num_types"] = num_types
         elif "num_types" in self:
             num_types = self["num_types"]
             self["type_names"] = [f"type_{str(i)}" for i in range(num_types)]
-        else:
-            num_types = 1
-            self["type_names"] = ["type_0"]
-        self["num_types"] = num_types
     
     def parse_attributes(self):
         if "node_attributes" in self and "node_types" in self["node_attributes"]:
