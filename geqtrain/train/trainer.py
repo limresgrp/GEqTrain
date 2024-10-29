@@ -20,6 +20,7 @@ from geqtrain.data import (
     DataLoader,
     AtomicData,
     AtomicDataDict,
+    AtomicInMemoryDataset,
     _NODE_FIELDS,
     _EDGE_FIELDS,
 )
@@ -55,22 +56,26 @@ def get_latest_lr(optimizer, model, param_name: str) -> float:
                 return param_group['lr']
     raise ValueError(f"Parameter {param_name} not found in optimizer.")
 
-def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
+def remove_node_centers_for_NaN_targets(
+    dataset: AtomicInMemoryDataset,
+    loss_func: Loss,
+    keep_node_types: Optional[List[str]] = None,
+):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
-        node_types = data[AtomicDataDict.NODE_TYPE_KEY]
+        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
     else:
-        node_types = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
     # - Remove edges of atoms whose result is NaN - #
     per_node_outputs_keys = []
     if loss_func is not None:
-        for key in loss_func.coeffs:
+        for key in loss_func.keys:
             if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
                 key_clean = loss_func.remove_suffix(key)
                 if key_clean not in _NODE_FIELDS:
                     continue
                 if key_clean in data:
-                    val = data[key_clean]
+                    val: torch.Tensor = data[key_clean]
                     if val.dim() == 1:
                         val = val.reshape(len(val), -1)
                     if keep_node_types is not None:
@@ -485,7 +490,7 @@ class Trainer:
         self.loss, _ = instantiate(
             builder=Loss,
             prefix="loss", # look in yaml for all things that begin with "loss_*"
-            positional_args=dict(coeffs=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
+            positional_args=dict(components=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
             # and from these it creates loss funcs
             all_args=self.kwargs, # self.kwargs are all the things in yaml...
         )
@@ -514,9 +519,7 @@ class Trainer:
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
             return len(self.dl_train)
-        elif hasattr(self, "steps_per_epoch"): # from reload of trainer
-            return self.steps_per_epoch
-        raise ValueError("Missing both self.steps_per_epoch and self.dl_train")
+        raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
         '''
@@ -593,16 +596,15 @@ class Trainer:
         if self.lr_scheduler_name != "none":
 
             if self.lr_scheduler_name == "CosineAnnealingLR":
-                self.steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.kwargs['lr_scheduler_T_max'] = self.steps_per_epoch * self.max_epochs
+                steps_per_epoch = self._get_num_of_steps_per_epoch()
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
 
             if self.use_warmup:
                 #! for now it has been tested only with CosineAnnealingLR
                 import pytorch_warmup as warmup
-                self.steps_per_epoch = self._get_num_of_steps_per_epoch()
-                n_warmup_epochs = int((self.max_epochs/100)*5) # warmup 5% of train epochs, start using provided lrsched at (5% of train epochs)+1
-                self.warmup_steps = self.kwargs.get("warmupSteps", self.steps_per_epoch*n_warmup_epochs)
-                self.kwargs['lr_scheduler_T_max'] = self.steps_per_epoch * self.max_epochs - self.warmup_steps
+                steps_per_epoch = self._get_num_of_steps_per_epoch()
+                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", self.max_epochs//20) # Default: 5% of max epochs
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
                 self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
@@ -844,7 +846,6 @@ class Trainer:
         state_dict = dictionary.pop("state_dict", None)
 
         trainer = cls(**dictionary)
-        trainer.init(model=model)
 
         if state_dict is not None and trainer.model is not None and not dictionary.get("fine_tune"):
             logging.debug("Reload optimizer and scheduler states")
@@ -877,7 +878,7 @@ class Trainer:
                 "Please either increase the max_epoch or change early stop criteria"
             )
 
-        return trainer
+        return trainer, model
 
     @staticmethod
     def load_model_from_training_session(

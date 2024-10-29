@@ -6,6 +6,7 @@ import logging
 import argparse
 import os
 import shutil
+from typing import Dict, Optional
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
@@ -74,7 +75,6 @@ def main(args=None, running_as_script: bool = True):
         func(0, 1, config.as_dict())
 
     return
-
 
 def parse_command_line(args=None):
     parser = argparse.ArgumentParser(
@@ -146,65 +146,36 @@ def parse_command_line(args=None):
 
     return args, config
 
-
 def fresh_start(rank, world_size, config):
     try:
         config = Config.from_dict(config)
-        # we use add_to_config cause it's a fresh start and need to record it
         _set_global_options(config)
 
         if config.use_dt:
             # Setup the process for distributed training
             setup_process(rank, world_size)
 
-        # = Make the trainer =
-        if config.wandb:
-            import wandb  # noqa: F401
-            # download parameters from wandb in case of sweeping
-            from geqtrain.utils.wandb import init_n_update
-            if rank == 0:
-                config = init_n_update(config)
-            if config.use_dt:
-                from geqtrain.train import DistributedTrainerWandB
-                trainer = DistributedTrainerWandB(rank=rank, world_size=world_size, **dict(config))
-            else:
-                from geqtrain.train import TrainerWandB
-                trainer = TrainerWandB(**dict(config))
-        else:
-            if config.use_dt:
-                from geqtrain.train import DistributedTrainer
-                trainer = DistributedTrainer(rank=rank, world_size=world_size, **dict(config))
-            else:
-                from geqtrain.train import Trainer
-                trainer = Trainer(**dict(config))
-        
+        trainer, model = load_trainer_and_model(rank, world_size, config)
+        # Copy conf file in results folder
         shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
 
         config.update(trainer.params)
 
-        # = Load the dataset =
-        dataset = dataset_from_config(config, prefix="dataset") # ConcatDataset of many NpzDatasets
-        logging.info(f"Successfully loaded the data set of type {dataset}...")
-        try:
-            validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-            logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
-        except KeyError:
-            # It couldn't be found
-            validation_dataset = None
-
-        # = Train/validation split =
-        trainer.set_dataset(dataset, validation_dataset)
+        trainer.set_dataset(*load_dataset(config))
         trainer.set_dataloader()
         
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
         # = Build model =
-        model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
-        logging.info("Successfully built the network...")
+        if model is None:
+            logging.info("Building the network...")
+            model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+            logging.info("Successfully built the network!")
 
         # Equivar test
         if config.equivariance_test:
+            logging.info("Running equivariance test...")
             model.eval()
             errstr = assert_AtomicData_equivariant(
                 model, trainer.dataset_train[0]
@@ -343,57 +314,21 @@ def restart(rank, world_size, config):
                         f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
                     )
 
-        # recursive loop, if same type but different value
-        # raise error
-
         config = Config(dictionary, exclude_keys=["state_dict", "progress"])
-
-        # dtype, etc.
         _set_global_options(config)
 
         if config.use_dt:
             # Setup the process for distributed training
             setup_process(rank, world_size)
 
-        # note, the from_dict method will check whether the code version
-        # in trainer.pth is consistent and issue warnings
-        if config.use_dt:
-            dictionary.update({
-                "rank": rank,
-                "world_size": world_size,
-            })
-        if config.wandb:
-            from geqtrain.utils.wandb import resume
-            if rank == 0:
-                resume(config)
-            if config.use_dt:
-                from geqtrain.train import DistributedTrainerWandB
-                trainer = DistributedTrainerWandB.from_dict(dictionary)
-            else:
-                from geqtrain.train import TrainerWandB
-                trainer = TrainerWandB.from_dict(dictionary)
-        else:
-            if config.use_dt:
-                from geqtrain.train import DistributedTrainer
-                trainer = DistributedTrainer.from_dict(dictionary)
-            else:
-                from geqtrain.train import Trainer
-                trainer = Trainer.from_dict(dictionary)
-
-        # = Load the dataset =
-        dataset = dataset_from_config(config, prefix="dataset")
-        logging.info(f"Successfully loaded the data set of type {dataset}...")
-        try:
-            validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-            logging.info(
-                f"Successfully loaded the validation data set of type {validation_dataset}..."
-            )
-        except KeyError:
-            # It couldn't be found
-            validation_dataset = None
-
-        trainer.set_dataset(dataset, validation_dataset)
+        trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary)
+        trainer.set_dataset(*load_dataset(config))
         trainer.set_dataloader()
+
+        trainer.init(model=model)
+
+        # Store any updated config information in the trainer
+        trainer.update_kwargs(config)
 
         # Train
         trainer.save()
@@ -404,10 +339,50 @@ def restart(rank, world_size, config):
         logging.error(e)
         raise e
     finally:
-        if dictionary.get("use_dt", False):
-            cleanup(rank)
-
+        try:
+            if dictionary.get("use_dt", False):
+                cleanup(rank)
+        except:
+            pass
     return
+
+def load_dataset(config):
+    dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {dataset}...")
+    try:
+        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+        logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
+    except KeyError:
+            # It couldn't be found
+        validation_dataset = None
+    return dataset,validation_dataset
+
+def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionary: Optional[Dict]=None):
+    if dictionary is None:
+        dictionary = dict(config)
+    if config.use_dt:
+        dictionary.update({
+                "rank": rank,
+                "world_size": world_size,
+            })
+    if config.wandb:
+        from geqtrain.utils.wandb import resume
+        if rank == 0:
+            resume(config)
+        if config.use_dt:
+            from geqtrain.train import DistributedTrainerWandB
+            trainer, model = DistributedTrainerWandB.from_dict(dictionary)
+        else:
+            from geqtrain.train import TrainerWandB
+            trainer, model = TrainerWandB.from_dict(dictionary)
+    else:
+        if config.use_dt:
+            from geqtrain.train import DistributedTrainer
+            trainer, model = DistributedTrainer.from_dict(dictionary)
+        else:
+            from geqtrain.train import Trainer
+            trainer, model = Trainer.from_dict(dictionary)
+    return trainer,model
 
 
 if __name__ == "__main__":
