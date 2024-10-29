@@ -2,8 +2,8 @@ import re
 import logging
 from typing import List
 
-def parse_dict(coeffs: dict):
-    for key, value in coeffs.items():
+def parse_dict(components: dict):
+    for key, value in components.items():
         logging.debug(f" parsing {key} {value}")
         coeff = 1.0
         func = "MSELoss"

@@ -3,21 +3,22 @@
 
 from copy import deepcopy
 from hashlib import sha1
-from typing import Dict, List, Union, Sequence, Tuple
+from typing import Dict, List, Union
 
 import yaml
 
 import torch
 
 from geqtrain.data import AtomicDataDict
+from geqtrain.train.loss import Loss
 from geqtrain.train.utils import parse_dict
 from torch_runstats import RunningStats, Reduction
 
-from ._loss import instanciate_loss_function
+from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
 
-class Metrics:
+class Metrics(Loss):
     """Computes all mae, rmse needed for report
 
     Args:
@@ -55,48 +56,41 @@ class Metrics:
     """
 
     def __init__(
-        self, components: Sequence[Union[Tuple[str, str], Tuple[str, str, dict]]]
+        self,
+        components: Union[str, List[str], List[dict]],
     ):
 
-        self.running_stats = {}
+        super(Metrics, self).__init__(components)
+
+        self.running_stats: Dict[str, RunningStats] = {}
         self.params = {}
-        self.funcs = {}
         self.kwargs = {}
-        for component in components: # components is a list
-            if isinstance(component, dict):
-                for key, _, func, func_params in parse_dict(component): # func is a ctor
+        for key in self.keys:
+            func_params: Dict = self.func_params.get(key, {})
+            func_params["PerSpecies"] = func_params.get("PerSpecies", False)
+            func_params["PerLabel"]   = func_params.get("PerLabel", False)
+            func_params["PerNode"]    = func_params.get("PerNode", False)
+            func_params["functional"] = func_params.get("functional", "L1Loss")
 
-                    func_params["PerSpecies"] = func_params.get("PerSpecies", False)
-                    func_params["PerLabel"] = func_params.get("PerLabel", False)
-                    func_params["PerNode"] = func_params.get("PerNode", False)
-                    func_params["functional"] = func_params.get("functional", "L1Loss")
+            # default is to flatten the array
+            if key not in self.running_stats:
+                self.kwargs[key] = {}
+                self.params[key] = {}
 
-                    param_hash = Metrics.hash_component(component)
+            # store for initialization
+            kwargs = deepcopy(func_params)
+            kwargs.pop("PerSpecies")
+            kwargs.pop("PerLabel")
+            kwargs.pop("PerNode")
+            kwargs.pop("functional")
 
-                    # default is to flatten the array
-                    if key not in self.running_stats:
-                        self.running_stats[key] = {}
-                        self.funcs[key] = {}
-                        self.kwargs[key] = {}
-                        self.params[key] = {}
-
-                    # store for initialization
-                    kwargs = deepcopy(func_params)
-                    kwargs.pop("PerSpecies")
-                    kwargs.pop("PerLabel")
-                    kwargs.pop("PerNode")
-                    kwargs.pop("functional")
-
-                    # by default, report a scalar that is mae and rmse over all component
-                    loss_func = instanciate_loss_function(func, func_params)
-                    self.funcs[key][param_hash] = loss_func
-                    reduction = getattr(loss_func, "reduction", Reduction.MEAN)
-                    self.kwargs[key][param_hash] = dict(reduction=reduction)
-                    self.kwargs[key][param_hash].update(kwargs)
-                    self.params[key][param_hash] = (reduction, func_params)
+            reduction = getattr(self.funcs[key], "reduction", Reduction.MEAN)
+            self.kwargs[key] = dict(reduction=reduction)
+            self.kwargs[key].update(kwargs)
+            self.params[key] = (reduction, func_params)
 
 
-    def init_runstat(self, params, error: torch.Tensor):
+    def init_runstat(self, params: Dict, error: torch.Tensor) -> RunningStats:
         """
         Initialize Runstat Counter based on the shape of the error matrix
 
@@ -123,103 +117,103 @@ class Metrics:
         buffer = yaml.dump(component).encode("ascii")
         return sha1(buffer).hexdigest()
 
-    def __call__(self, pred: dict, ref: dict):
+    def __call__(
+        self,
+        pred: Dict[str, torch.Tensor],
+        ref:  Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
 
         metrics = {}
         N = None
-        for key in self.funcs.keys():
-            for param_hash, kwargs in self.kwargs[key].items():
-                func = self.funcs[key][param_hash]
-                error = func(
-                    pred=pred,
-                    ref=ref,
-                    key=key,
-                    mean=False,
+        for key in self.keys:
+            error: torch.Tensor = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
+                pred=pred,
+                ref=ref,
+                key=self.remove_suffix(key),
+                mean=False,
+            )
+
+            _, params = self.params[key]
+            per_species = params["PerSpecies"]
+            per_node    = params["PerNode"]
+            per_label   = params["PerLabel"]
+
+            # initialize the internal run_stat base on the error shape
+            if key not in self.running_stats:
+                self.running_stats[key] = self.init_runstat(
+                    params=self.kwargs[key], error=error
                 )
 
-                _, params = self.params[key][param_hash]
-                per_species = params["PerSpecies"]
-                per_node = params["PerNode"]
-                per_label = params["PerLabel"]
+            stat: RunningStats = self.running_stats[key]
 
-                # initialize the internal run_stat base on the error shape
-                if param_hash not in self.running_stats[key]:
-                    self.running_stats[key][param_hash] = self.init_runstat(
-                        params=kwargs, error=error
-                    )
+            params = {}
+            if per_species:
+                params = {
+                    "accumulate_by": ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+                }
+            elif per_label:
+                params = {
+                    "accumulate_by": torch.cat(len(ref[key]) * [
+                        torch.arange(ref[key].shape[-1], device=error.device)
+                    ])
+                }
+            if per_node:
+                if N is None:
+                    N = torch.bincount(ref[AtomicDataDict.BATCH_KEY]).unsqueeze(-1)
+                error_N = error / N
 
-                stat = self.running_stats[key][param_hash]
+            else:
+                error_N = error
 
-                params = {}
-                if per_species:
-                    params = {
-                        "accumulate_by": pred[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-                    }
-                elif per_label:
-                    params = {
-                        "accumulate_by": torch.cat([
-                            torch.arange(ref[key].shape[-1], device = pred[AtomicDataDict.NODE_TYPE_KEY].device)
-                        ] * ref[key].shape[0])
-                    }
-                if per_node:
-                    if N is None:
-                        N = torch.bincount(ref[AtomicDataDict.BATCH_KEY]).unsqueeze(-1)
-                    error_N = error / N
-
-                else:
-                    error_N = error
-
-                error_N[error_N == 0.] = torch.nan # Turn 0. errors to nan
-                if stat.dim == () and not per_species:
-                    metrics[(key, param_hash)] = stat.accumulate_batch(
-                        error_N.flatten(), **params
-                    )
-                else:
-                    metrics[(key, param_hash)] = stat.accumulate_batch(
-                        error_N, **params
-                    )
+            if stat.dim == () and not per_species:
+                metrics[key] = stat.accumulate_batch(
+                    error_N.flatten(), **params
+                )
+            else:
+                metrics[key] = stat.accumulate_batch(
+                    error_N, **params
+                )
 
         return metrics
 
     def reset(self):
-        for stats in self.running_stats.values():
-            for stat in stats.values():
-                stat.reset()
+        for stat in self.running_stats.values():
+            stat.reset()
 
     def to(self, device):
-        for stats in self.running_stats.values():
-            for stat in stats.values():
-                stat.to(device=device)
+        for stat in self.running_stats.values():
+            stat.to(device=device)
 
     def current_result(self):
 
         metrics = {}
-        for key, stats in self.running_stats.items():
-            for reduction, stat in stats.items():
-                metrics[(key, reduction)] = stat.current_result()
+        for key, stat in self.running_stats.items():
+            metrics[key] = stat.current_result()
         return metrics
 
-    def flatten_metrics(self, metrics, metrics_metadata: Dict[str, List[str]]=None):
+    def flatten_metrics(
+        self,
+        metrics: Dict[str, torch.Tensor],
+        metrics_metadata: Dict[str, List[str]]=None,
+    ):
 
         type_names = metrics_metadata.get('type_names', [])
         target_names = metrics_metadata.get('target_names', [])
 
         flat_dict = {}
         skip_keys = []
-        for k, value in metrics.items():
-
-            key, param_hash = k
-            reduction, params = self.params[key][param_hash]
+        for key, value in metrics.items():
+            reduction, params = self.params[key]
 
             short_name = ABBREV.get(key, key)
-            if hasattr(self.funcs[key][param_hash], "get_name"):
-                short_name = self.funcs[key][param_hash].get_name(short_name)
+            if hasattr(self.funcs[key], "get_name"):
+                short_name = self.funcs[key].get_name(short_name)
 
             per_node = params["PerNode"]
             suffix = "/N" if per_node else ""
             item_name = f"{short_name}{suffix}_{reduction}"
 
-            stat = self.running_stats[key][param_hash]
+            stat = self.running_stats[key]
             per_species = params["PerSpecies"]
             per_label = params["PerLabel"]
 
@@ -257,8 +251,6 @@ class Metrics:
                             name = f"{ele}_{item_name}_{idx}"
                             flat_dict[name] = v.item()
                             skip_keys.append(name)
-
-
             else:
                 if stat.output_dim == tuple():
                     # a scalar

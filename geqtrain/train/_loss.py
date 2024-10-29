@@ -165,7 +165,7 @@ class PerSpeciesLoss(SimpleLoss):
             return per_species_loss.mean()
 
 
-def instanciate_loss_function(name: str, params):
+def instantiate_loss_function(name: str, params: Dict):
     """
     Search for loss functions in this module
     instanciates the loss obj
