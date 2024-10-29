@@ -1,15 +1,9 @@
-import contextlib
-import copy
-import os
 import sys
 import argparse
-from typing import List, Optional, Union
 import logging
+from typing import Union
 from pathlib import Path
-
 from tqdm import tqdm
-
-from geqtrain.data import AtomicDataDict
 
 import torch
 from torch.utils.data import ConcatDataset
@@ -17,10 +11,8 @@ from geqtrain.data._build import dataset_from_config
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, R_MAX_KEY
 from geqtrain.train import Trainer
-from geqtrain.train.loss import Loss
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import run_inference
-from geqtrain.utils._global_options import _set_global_options
+from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets
 from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
@@ -245,7 +237,7 @@ def main(args=None, running_as_script: bool = True):
         metrics.to(device=device)
         metrics_metadata = {
             'type_names'   : config["type_names"],
-            'target_names' : config.get('target_names', list(metrics.funcs.keys())),
+            'target_names' : config.get('target_names', list(metrics.keys)),
         }
     except:
         raise Exception("Failed to load Metrics.")
@@ -259,22 +251,11 @@ def main(args=None, running_as_script: bool = True):
         keep_node_types = None
 
     # dataloader
+    per_node_outputs_keys = None
     _indexed_datasets = []
     for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
         _dataset = _dataset.index_select(_test_idcs)
-        
-        if keep_node_types is not None:
-            _data = _dataset.data
-            if AtomicDataDict.NODE_TYPE_KEY in _data:
-                node_types = _data[AtomicDataDict.NODE_TYPE_KEY]
-            else:
-                node_types = _dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
-            _data[AtomicDataDict.NODE_OUTPUT_KEY][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
-            if torch.all(torch.isnan(_data[AtomicDataDict.NODE_OUTPUT_KEY])):
-                _dataset = None
-            else:
-                _dataset.data = _data
-        
+        _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, metrics, keep_node_types)
         if _dataset is not None:
             _indexed_datasets.append(_dataset)
     dataset_test = ConcatDataset(_indexed_datasets)
@@ -289,7 +270,7 @@ def main(args=None, running_as_script: bool = True):
     logger.info("Starting...")
 
     
-    def metrics_callback(pbar, out, ref_data):
+    def metrics_callback(pbar, out, ref_data, **kwargs):
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
 
@@ -303,7 +284,7 @@ def main(args=None, running_as_script: bool = True):
         pbar.set_description(f"Metrics: {desc}")
         del out, ref_data
     
-    infer(dataloader, model, device, chunk_callbacks=[metrics_callback], **config)
+    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
     
@@ -317,7 +298,7 @@ def main(args=None, running_as_script: bool = True):
         )
     )
 
-def infer(dataloader, model, device, chunk_callbacks=[], batch_callbacks=[], **kwargs):
+def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
@@ -328,6 +309,7 @@ def infer(dataloader, model, device, chunk_callbacks=[], batch_callbacks=[], **k
                 device=device,
                 cm=torch.no_grad(),
                 already_computed_nodes=already_computed_nodes,
+                per_node_outputs_keys=per_node_outputs_keys,
                 **kwargs,
             )
 
