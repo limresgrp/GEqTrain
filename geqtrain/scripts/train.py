@@ -42,7 +42,7 @@ def main(args=None, running_as_script: bool = True):
         set_up_script_logger(config.get("log", None), config.verbose)
 
     found_restart_file = isdir(f"{config.root}/{config.run_name}")
-    if found_restart_file and not (config.append or config.fine_tune):
+    if found_restart_file and not (config.append):
         raise RuntimeError(
             f"Training instance exists at {config.root}/{config.run_name}; "
             "either set append to True or use a different root or runname"
@@ -50,10 +50,6 @@ def main(args=None, running_as_script: bool = True):
 
     if not found_restart_file:
         func = fresh_start
-    elif config.fine_tune:
-        if config.use_dt:
-            raise NotImplementedError("Could not fine tune in Distributed Training yet.")
-        func = fine_tune
     else:
         if config.use_dt:
             raise NotImplementedError("Could not restart training in Distributed Training yet.")
@@ -92,11 +88,6 @@ def parse_command_line(args=None):
     parser.add_argument(
         "--equivariance-test",
         help="test the model's equivariance before training on first frame of the validation dataset",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--fine-tune",
-        help="enable the fine-tuning mode. The configuration file should contain the dataset on which to perform fine-tuning",
         action="store_true",
     )
     parser.add_argument(
@@ -140,7 +131,7 @@ def parse_command_line(args=None):
 
     config = Config.from_file(args.config)
 
-    flags = ("device", "equivariance_test", "fine_tune", "grad_anomaly_mode")
+    flags = ("device", "equivariance_test", "grad_anomaly_mode")
     config.update({flag: getattr(args, flag) for flag in flags if getattr(args, flag) is not None})
     config.update({"use_dt": args.world_size is not None})
 
@@ -207,88 +198,6 @@ def fresh_start(rank, world_size, config):
 
     return
 
-
-def fine_tune(rank, world_size, config):
-
-    # load the dictionary
-    restart_file = f"{config.root}/{config.run_name}/trainer.pth"
-    dictionary = load_file(
-        supported_formats=dict(torch=["pt", "pth"]),
-        filename=restart_file,
-        enforced_format="torch",
-    )
-
-    # compare dictionary to config and update stop condition related arguments
-    for k in config.keys():
-        if k == "fine_tuning_run_name":
-            dictionary["run_name"] = config[k]
-            logging.info(f'Update "run_name" to {dictionary["run_name"]}')
-            dictionary["n_train"] = None
-            dictionary["n_val"] = None
-        elif config[k] != dictionary.get(k, ""):
-            if k in [
-                "fine_tune", "dataset_list", "validation_dataset_list", "seed", "max_epochs",
-                "wandb", "wandb_project", "log_batch_freq", "verbose", "append", "keep_type_names",
-                "n_train", "n_val", "batch_size", "validation_batch_size",
-                "max_epochs", "learning_rate", "loss_coeffs", "device",
-                "optimizer_name", "optimizer_params", "metrics_components",
-                "lr_scheduler_name", "lr_scheduler_patience", "lr_scheduler_factor", "noise",
-            ]:
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif k.startswith("early_stop"):
-                dictionary[k] = config[k]
-                logging.info(f'Update "{k}" to {dictionary[k]}')
-            elif isinstance(config[k], type(dictionary.get(k, ""))):
-                raise ValueError(
-                    f'Key "{k}" is different in config and the result trainer.pth file. Please double check'
-                )
-
-    # Remove keys from dictionary that must be recomputed
-    for k in ["train_idcs", "val_idcs"]:
-        dictionary.pop(k)
-
-    config = Config(dictionary, exclude_keys=["state_dict", "progress"])
-
-    _set_global_options(config)
-
-    # = Make the trainer =
-    if config.wandb:
-        import wandb  # noqa: F401
-        # download parameters from wandb in case of sweeping
-        from geqtrain.utils.wandb import init_n_update
-        from geqtrain.train import TrainerWandB
-        config = init_n_update(config)
-        trainer = TrainerWandB.from_dict(dictionary)
-    else:
-        from geqtrain.train import Trainer
-        trainer = Trainer.from_dict(dictionary)
-
-    # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully loaded the data set of type {dataset}...")
-    try:
-        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
-        logging.info(
-            f"Successfully loaded the validation data set of type {validation_dataset}..."
-        )
-    except KeyError:
-        # It couldn't be found
-        validation_dataset = None
-
-    trainer.set_dataset(dataset, validation_dataset)
-    trainer.set_dataloader()
-
-    # reset scheduler
-    trainer.lr_sched._reset()
-
-    # Train
-    trainer.save()
-    trainer.train()
-
-    return
-
-
 def restart(rank, world_size, config):
     try:
         # load the dictionary
@@ -321,7 +230,7 @@ def restart(rank, world_size, config):
             # Setup the process for distributed training
             setup_process(rank, world_size)
 
-        trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary)
+        trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.set_dataset(*load_dataset(config))
         trainer.set_dataloader()
 
@@ -357,7 +266,7 @@ def load_dataset(config):
         validation_dataset = None
     return dataset,validation_dataset
 
-def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionary: Optional[Dict]=None):
+def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionary: Optional[Dict]=None, is_restart=False):
     if dictionary is None:
         dictionary = dict(config)
     if config.use_dt:
@@ -366,9 +275,13 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionar
                 "world_size": world_size,
             })
     if config.wandb:
-        from geqtrain.utils.wandb import resume
         if rank == 0:
-            resume(config)
+            if is_restart:
+                from geqtrain.utils.wandb import resume
+                resume(config)
+            else:
+                from geqtrain.utils.wandb import init_n_update
+                init_n_update(config)
         if config.use_dt:
             from geqtrain.train import DistributedTrainerWandB
             trainer, model = DistributedTrainerWandB.from_dict(dictionary)
@@ -382,7 +295,7 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionar
         else:
             from geqtrain.train import Trainer
             trainer, model = Trainer.from_dict(dictionary)
-    return trainer,model
+    return trainer, model
 
 
 if __name__ == "__main__":

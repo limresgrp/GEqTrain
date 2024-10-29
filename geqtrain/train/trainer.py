@@ -847,7 +847,7 @@ class Trainer:
 
         trainer = cls(**dictionary)
 
-        if state_dict is not None and trainer.model is not None and not dictionary.get("fine_tune"):
+        if state_dict is not None and model is not None:
             logging.debug("Reload optimizer and scheduler states")
             for key in cls.object_keys:
                 item = getattr(trainer, key, None)
