@@ -2,12 +2,6 @@
 """
 
 import torch
-<<<<<<< HEAD
-=======
-# from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils import weight_norm
-
->>>>>>> d7e3ac2 (initial commit before exp)
 from typing import List, Optional
 from collections import OrderedDict
 from e3nn.math import normalize2mom

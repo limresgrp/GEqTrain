@@ -50,7 +50,7 @@ def init_n_update(config):
         notes=conf_dict.get('experiment_description', None),
         resume="allow",
         id=config.run_id,
-        settings=wandb.Settings(_disable_stats=True)
+        settings=wandb.Settings(_disable_stats=config.get("disable_wandb_sys_log", True))
     )
 
     # save config as-is on wandb for experiment relaunching
@@ -92,5 +92,5 @@ def resume(config):
         project=config.wandb_project,
         resume="must",
         id=config.run_id,
-        settings=wandb.Settings(_disable_stats=True),
+        settings=wandb.Settings(_disable_stats=config.get("disable_wandb_sys_log", True)),
     )
