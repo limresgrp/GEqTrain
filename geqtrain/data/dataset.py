@@ -9,12 +9,14 @@ import hashlib
 import torch
 
 from os.path import dirname, basename, abspath
-from typing import Tuple, Dict, Any, List, Union, Optional
+from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
+from torch_geometric.transforms import Compose
 from geqtrain.utils.torch_geometric import Batch, Dataset
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 import geqtrain
+from geqtrain.utils import load_callable
 from geqtrain.data import (
     AtomicData,
     AtomicDataDict,
@@ -25,8 +27,6 @@ from geqtrain.data import (
 )
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
-
-from ._frad_transforms import nosify_mol
 
 def fix_batch_dim(arr):
     if arr is None:
@@ -92,8 +92,15 @@ class AtomicDataset(Dataset):
     def __init__(
         self,
         root: str,
+        transforms: Optional[List[str]] = None,
     ):
-        super().__init__(root=root, transform=nosify_mol) # this takes as input a callable, this can be a composed callable
+        '''
+        transforms: list of strings that point to the callable function e.g. pkgName.moduleName.transformName
+        '''
+        super().__init__(
+            root=root,
+            transform = Compose([load_callable(transf) for transf in transforms]) if transforms else None
+        )
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -183,6 +190,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        transforms: Optional[List[Callable]] = None,
     ):
         self.dataset_id = dataset_id
         self.pbc = pbc
@@ -217,7 +225,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # Initialize the InMemoryDataset, which runs download and process
         # See https://pytorch-geometric.readthedocs.io/en/latest/notes/create_dataset.html#creating-in-memory-datasets
         # Then pre-process the data if disk files are not found
-        super().__init__(root=root)
+        super().__init__(root=root, transforms=transforms)
         if self.data is None:
             self.data, self.fixed_fields, include_frames = torch.load(
                 self.processed_paths[0],
@@ -459,6 +467,7 @@ class NpzDataset(AtomicInMemoryDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        transforms: Optional[List[str]] = None,
     ):
         self.key_mapping = key_mapping
 
@@ -476,6 +485,7 @@ class NpzDataset(AtomicInMemoryDataset):
             edge_attributes=edge_attributes,
             graph_attributes=graph_attributes,
             extra_attributes=extra_attributes,
+            transforms=transforms,
         )
 
     @property

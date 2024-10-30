@@ -153,8 +153,8 @@ class Metrics(Loss):
                 }
             elif per_label:
                 params = {
-                    "accumulate_by": torch.cat(len(ref[key]) * [
-                        torch.arange(ref[key].shape[-1], device=error.device)
+                    "accumulate_by": torch.cat(len(ref[self.remove_suffix(key)]) * [
+                        torch.arange(ref[self.remove_suffix(key)].shape[-1], device=error.device)
                     ])
                 }
             if per_node:
@@ -214,8 +214,6 @@ class Metrics(Loss):
 
         type_names = metrics_metadata.get('type_names', [])
         target_names = metrics_metadata.get('target_names', [])
-        target_names_tmp = deepcopy(target_names)
-
 
         flat_dict = {}
         skip_keys = []
@@ -260,8 +258,7 @@ class Metrics(Loss):
                     for id_ele in range(value.shape[-1]):
                         v = value[id_ele]
                         if target_names:
-                            flat_dict[f"{target_names_tmp[id_ele]}"] = v.item()
-                            target_names_tmp.pop(0)
+                            flat_dict[f"{target_names[id_ele]}"] = v.item()
                         else:
                             flat_dict[f"{id_ele}_{item_name}"] = v.item()
                 else:

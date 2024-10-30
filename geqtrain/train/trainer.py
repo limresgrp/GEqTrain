@@ -1340,6 +1340,14 @@ class Trainer:
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
             self._epoch_lvl_lrscheduler_step()
 
+        for callback in self._end_of_epoch_callbacks:
+            callback(self)
+
+
+    def end_of_batch_log(self, batch_type: str):
+        """
+        store all the loss/mae of each batch
+        """
         if not self.is_master:
             return
 
