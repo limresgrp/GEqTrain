@@ -4,10 +4,6 @@ import argparse
 import logging
 from typing import Union
 from pathlib import Path
-import numpy as np
-import h5py
-from torch_scatter import scatter
-
 from tqdm import tqdm
 
 import torch
@@ -22,7 +18,6 @@ from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
-from sklearn.metrics import confusion_matrix
 
 def main(args=None, running_as_script: bool = True):
     # in results dir, do: geqtrain-deploy build --train-dir . deployed.pth
@@ -54,7 +49,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=16,
+        default=1,
     )
     parser.add_argument(
         "-d",
@@ -163,7 +158,7 @@ def main(args=None, running_as_script: bool = True):
     if args.device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device(args.device) # must be cuda:dev_id
+        device = torch.device(args.device)
 
     # logger
     logger = logging.getLogger("geqtrain-evaluate")
@@ -278,7 +273,6 @@ def main(args=None, running_as_script: bool = True):
 
     # run inference
     logger.info("Starting...")
-    conf_matrix = np.array([0.])
 
 
     def metrics_callback(pbar, out, ref_data, **kwargs): # Keep **kwargs or callback fails
@@ -295,15 +289,10 @@ def main(args=None, running_as_script: bool = True):
         pbar.set_description(f"Metrics: {desc}")
         del out, ref_data
 
-    config.pop('device')
-    save_out_feature = True # TODO: extract this in args
-    observations, gt = infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], save_out_feature=save_out_feature, **config)
-
-    if save_out_feature:
-        filename = './train_data.h5' # TODO: extract this in args + add handling of the .h5 extension
-        write_batched_obs_to_file(len(dataloader), filename, observations, gt)
+    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
+
     logger.info(
         "\n".join(
             f"{k:>20s} = {v:< 20f}"
@@ -314,32 +303,8 @@ def main(args=None, running_as_script: bool = True):
         )
     )
 
-
-# def write_obs_to_file(filename:str='./dataset.h5', observations:List=[], ground_truths:List=[]):
-#     with h5py.File(filename, 'w') as h5_file:
-#         for i, (obs, gt) in enumerate(zip(observations, ground_truths)):
-#             h5_file.create_dataset(f'observation_{i}', data=obs.numpy())
-#             h5_file.create_dataset(f'ground_truth_{i}', data=gt.numpy())
-
-#     # reopen to test consistency
-#     hdf5_file = h5py.File(filename, 'r')
-#     assert len(hdf5_file.keys())//2 == len(observations)
-
-def write_batched_obs_to_file(n_batches, filename:str='./dataset.h5', observations:List=[], ground_truths:List=[]):
-    dset_id = 0
-    with h5py.File(filename, 'w') as h5_file:
-        for batch_idx in range(n_batches):
-            obs_batch, gt_batch = observations[batch_idx], ground_truths[batch_idx]
-            for obs_idx in range(obs_batch.shape[0]): # expected bs first
-                obs, gt = obs_batch[obs_idx], gt_batch[obs_idx]
-                h5_file.create_dataset(f'observation_{dset_id}', data=obs.numpy())
-                h5_file.create_dataset(f'ground_truth_{dset_id}', data=gt.numpy())
-                dset_id+=1
-
-
-def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], save_out_feature:bool=False, **kwargs):
+def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
     pbar = tqdm(dataloader)
-    observations, gt = [] , []
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
         while True:
@@ -353,37 +318,8 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
                 **kwargs,
             )
 
-            if save_out_feature:
-                field = AtomicDataDict.NODE_FEATURES_KEY
-                out_field = AtomicDataDict.GRAPH_OUTPUT_KEY
-                graph_feature = scatter(out[field][...,:32], index = out['batch'], dim=0)
-                # _, counts = out['batch'].unique(return_counts=True)
-                # graph_feature /=counts
-                observations.append(graph_feature.cpu())
-                gt.append(out[out_field].cpu())
-
             for callback in chunk_callbacks:
                 callback(pbar, out, ref_data, **kwargs)
-            # accumulate metrics
-            batch_metrics = metrics(pred=out, ref=ref_data)
-
-            target = ref_data["graph_output"].cpu().bool()
-            prediction = (out["graph_output"].sigmoid()>.5).cpu().bool()
-
-            if np.sum(conf_matrix) == 0:
-                conf_matrix = confusion_matrix(target, prediction)
-            else:
-                conf_matrix += confusion_matrix(target, prediction)
-
-            desc = '\t'.join(
-                f'{k:>20s} = {v:< 20f}'
-                for k, v in metrics.flatten_metrics(
-                    batch_metrics,
-                    metrics_metadata=metrics_metadata,
-                )[0].items()
-            )
-            pbar.set_description(f"Metrics: {desc}")
-            del out, ref_data
 
             # evaluate ending condition
             if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
@@ -397,25 +333,8 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
 
             if already_computed_nodes is None:
                 break
-
         for callback in batch_callbacks:
             callback(batch_index, **kwargs)
-
-    logger.info("\n--- Final result: ---")
-    logger.info(
-        "\n".join(
-            f"{k:>20s} = {v:< 20f}"
-            for k, v in metrics.flatten_metrics(
-                metrics.current_result(),
-                metrics_metadata=metrics_metadata,
-            )[0].items()
-        )
-    )
-    print(conf_matrix)
-    tn, fp, fn, tp = conf_matrix.ravel()
-    print("tn: ", tn, "fp: ", fp, "fn: ", fn, "tp: ", tp)
-
-    return observations, gt
 
 
 def load_model(model: Union[str, Path], device="cpu"):
