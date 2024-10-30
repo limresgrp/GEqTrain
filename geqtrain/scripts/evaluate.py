@@ -4,13 +4,10 @@ import argparse
 import logging
 from typing import Union
 from pathlib import Path
-<<<<<<< HEAD
-=======
 import numpy as np
 import h5py
 from torch_scatter import scatter
 
->>>>>>> 7ac5f32 (WIP frad/halicin)
 from tqdm import tqdm
 
 import torch
