@@ -252,7 +252,7 @@ def main(args=None, running_as_script: bool = True):
         keep_node_types = None
 
     # dataloader
-    per_node_outputs_keys = None
+    per_node_outputs_keys = []
     _indexed_datasets = []
     for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
         _dataset = _dataset.index_select(_test_idcs)

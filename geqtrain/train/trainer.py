@@ -75,18 +75,23 @@ def remove_node_centers_for_NaN_targets(
                 if key_clean not in _NODE_FIELDS:
                     continue
                 if key_clean in data:
+                    if keep_node_types is not None:
+                        remove_node_types_mask_single_batch_elem = ~torch.isin(node_types.flatten(), keep_node_types.cpu())
+                        remove_node_types_mask = remove_node_types_mask_single_batch_elem.repeat(data.__num_graphs__)
+                        data[key_clean][remove_node_types_mask] = torch.nan
                     val: torch.Tensor = data[key_clean]
                     if val.dim() == 1:
                         val = val.reshape(len(val), -1)
-                    if keep_node_types is not None:
-                        data[key_clean][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
 
                     not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
                     data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1] = data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1]
+                    new_edge_index_slices = [0]
+                    for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
+                        new_edge_index_slices.append(not_nan_edge_filter[:slice_to].sum())
+                    data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=val.device)
                     if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
                         data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
-                        data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY][1] = len(data[AtomicDataDict.EDGE_CELL_SHIFT_KEY])
+                        data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
                     per_node_outputs_keys.append(key_clean)
 
     if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
