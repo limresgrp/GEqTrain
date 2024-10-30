@@ -275,7 +275,7 @@ def main(args=None, running_as_script: bool = True):
     logger.info("Starting...")
 
 
-    def metrics_callback(pbar, out, ref_data):
+    def metrics_callback(pbar, out, ref_data, **kwargs): # Keep **kwargs or callback fails
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
 
