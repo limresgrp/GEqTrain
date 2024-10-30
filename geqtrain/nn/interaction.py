@@ -440,6 +440,8 @@ class InteractionLayer(torch.nn.Module):
         self.latent_dim = parent.latent_dim
         self.head_dim = parent.head_dim
         self.isqrtd = math.isqrt(self.head_dim)
+        self.use_attention = parent.use_attention
+        self.use_mace_product = parent.use_mace_product
 
         # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
         self.env_norm = SO3_LayerNorm(
@@ -453,7 +455,7 @@ class InteractionLayer(torch.nn.Module):
         )
 
         self.product, self.reshape_in_module = None, None
-        if parent.use_mace_product:
+        if self.use_mace_product:
             # Perform eq. Atomic Cluster Expansion
             self.product = EquivariantProductBasisBlock(
                 node_feats_irreps=env_embed_irreps,
@@ -592,7 +594,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             zero_init_last_layer_weights= True,
-        ) if parent.use_attention else None
+        ) if self.use_attention else None
 
         # Take the node attrs and obtain a query matrix
         self.latent_to_key = ScalarMLPFunction(
@@ -601,9 +603,9 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension = self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
             zero_init_last_layer_weights = True,
-        ) if parent.use_attention else None
+        ) if self.use_attention else None
 
-        if parent.use_attention:
+        if self.use_attention:
             self.rearrange_qk = Rearrange('e (m d) -> e m d', m=self.env_embed_multiplicity, d=self.head_dim)
         else:
             self.rearrange_qk = None
@@ -611,10 +613,8 @@ class InteractionLayer(torch.nn.Module):
         self.latent_mlp = latent_mlp
         self._env_weighter = env_weighter
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
-        self.use_attention = parent.use_attention
-        self.use_mace_product = parent.use_mace_product
 
-        if not parent.use_attention:
+        if not self.use_attention:
             self.register_buffer(
                 "env_sum_normalization",
                 torch.as_tensor([avg_num_neighbors]).rsqrt(),
