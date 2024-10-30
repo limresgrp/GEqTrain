@@ -351,7 +351,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                     **{
                         **{f: v[i] for f, v in node_fields.items() if v is not None},
                         **{f: v[i] for f, v in edge_fields.items() if v is not None},
-                        **{f: v[i] for f, v in graph_fields.items() if v is not None},
+                        **{f: v[i] if len(v) > 1 else v for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
                 }, pbc=self.pbc)
