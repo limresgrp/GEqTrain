@@ -3,15 +3,14 @@ from geqtrain.data import AtomicDataDict
 
 
 def PerTypeScale(model: GraphModuleMixin, config) -> PerTypeScaleModule:
-    r"""Compute dipole moment.
-
+    r"""
     Args:
         model: the model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
 
     Returns:
         A ``PerTypeScaleModule`` wrapping ``model``.
     """
-    
+
     return PerTypeScaleModule(
         func=model,
         field=AtomicDataDict.NODE_OUTPUT_KEY,
