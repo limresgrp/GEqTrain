@@ -2,7 +2,8 @@ from ._model import Model
 from ._graph import GraphModel
 from ._global_graph_model import GlobalGraphModel
 from ._global_model import GlobalModel
-from ._global_model_graph_lvl_pred import GlobalModelGraphLvlOutput
+from ._scalar_graph_lvl_out_model import ModelScalarGraphLvlOutput
+from ._equivariant_node_lvl_out_model import ModelEquivariantNodeLvlOutput
 from ._scale import PerTypeScale
 from ._weight_init import (
     uniform_initialize_FCs,
@@ -24,5 +25,6 @@ __all__ = [
     model_from_config,
     DipoleMoment,
     GlobalModel,
-    GlobalModelGraphLvlOutput,
+    ModelScalarGraphLvlOutput,
+    ModelEquivariantNodeLvlOutput,
 ]
