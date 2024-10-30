@@ -417,6 +417,7 @@ class Trainer:
         mixed_precision: bool = False,
         hooks: Dict = {},
         use_grokfast: bool = False,
+        debug: bool = False,
         use_warmup: bool = False,
         **kwargs,
     ):
@@ -444,6 +445,11 @@ class Trainer:
             TRAIN:      output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
+
+        # logs for weights update and gradient
+        if self.debug:
+            self.log_updates           = output.open_logfile("log_updates", propagate=False)
+            self.log_ratio             = output.open_logfile("log_ratio", propagate=False)
 
         # --- add filenames if not defined
         self.config_path       = output.generate_file("config.yaml")
@@ -1007,6 +1013,51 @@ class Trainer:
         # hooks_handler.deregister_hooks()
         finish_all_writes()
 
+
+    def _log_updates(self):
+
+        update_log = logging.getLogger(self.log_updates)
+        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
+
+        # build titles for logging file(s)
+        # done only once
+        if not hasattr(self, 'update_logging_titles'):
+            self.update_logging_titles = [
+                param_name
+                for param_name, param in self.model.named_parameters()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                )
+            ]
+            _titles = ""
+            for t in self.update_logging_titles:
+                _titles += f"{t}, "
+            _titles = _titles.strip().rstrip(',')
+            update_log.info(_titles)
+            grad_to_weight_ratio_log.info(_titles)
+
+        # log the values
+        update_speed, grad_ratio = "", ""
+        with torch.no_grad():
+            for param_name, param in self.model.named_parameters():
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                ):
+                    lr = get_latest_lr(self.optim, self.model, param_name)
+                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
+                    grad_to_weight_ratio = param.grad.std()/param.std()
+                    update_speed += f"{update:.4}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
+
+        update_log.info(update_speed.strip().rstrip(','))
+        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
+
     def _batch_lvl_lrscheduler_step(self):
         # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
         if hasattr(self, "using_batch_lvl_lrscheduler"):
@@ -1083,6 +1134,11 @@ class Trainer:
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+
+                # to be commented in production run
+                if self.debug:
+                    self._log_updates()
+
                 self.optim.step()
 
                 if self.use_warmup and not self._is_warmup_period_over():
@@ -1462,9 +1518,8 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # TODO: verify these only when needed, now commented to allow different train/val dset at train restart()
-        # assert len(self.n_train) == len(dataset.datasets)
-        # assert len(self.n_val)   == len(validation_dataset.datasets)
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
