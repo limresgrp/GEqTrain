@@ -72,9 +72,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         num_layers: int,
         r_max:      float,
         # optional params
-        out_irreps: Optional[Union[o3.Irreps, str]] = None,
-        output_ls:  Optional[List[int]]             = None,
-        output_mul: Optional[Union[str, int]]       = None,
+        out_irreps: Optional[Union[o3.Irreps, str]] = None, # if None -> hidden molteplicity del 2body and all ls till lmax; if not passed then out_irreps from yaml is used
+        output_ls:  Optional[List[int]]             = None, # select/indexes in out_irreps: which ls to output from this interaction block (instead of all out out_irreps)
+        output_mul: Optional[Union[str, int]]       = None, # otherwise you can provide output_mul: if None: out_irreps multiplicity is used, if 'hidden' is provided then 2body out dim is used as multiplicity
         avg_num_neighbors: Optional[float]          = None,
         # cutoffs
         TanhCutoff_n: float = 6.,
@@ -581,7 +581,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_output_dimension=generate_n_weights,
             has_bias=False,
         )
-        
+
         # Take the node attrs and obtain a query matrix
         self.edge_attr_to_query = ScalarMLPFunction(
             mlp_input_dimension=(
@@ -703,7 +703,7 @@ class InteractionLayer(torch.nn.Module):
             assert self.edge_attr_to_query is not None
             assert self.latent_to_key is not None
             assert self.rearrange_qk is not None
-            
+
             Q = self.edge_attr_to_query(edge_full_attr)
             Q = self.rearrange_qk(Q)
 
