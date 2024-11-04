@@ -153,7 +153,7 @@ def fresh_start(rank, world_size, config):
         config.update(trainer.params)
 
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader(config)
+        trainer.set_dataloader(None, None, **config)
 
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
@@ -233,7 +233,7 @@ def restart(rank, world_size, config):
 
         trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader(config)
+        trainer.set_dataloader(None, None, **config)
 
         trainer.init(model=model)
 
