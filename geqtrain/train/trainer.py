@@ -358,7 +358,7 @@ class Trainer:
     """
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
-    object_keys = ["lr_sched", "optim", "early_stopping_conds"]
+    object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
     lr_scheduler_module = torch.optim.lr_scheduler
     optim_module = torch.optim
 
@@ -1192,34 +1192,6 @@ class Trainer:
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data)
 
-            # todo, maybe to be commented during production. Create a "debug mode" flag?
-            # log all on wandb
-            # log grad updates
-            # print belows
-            # with torch.no_grad():
-            #     self._count += 1
-            #     fake_preds = torch.zeros_like(ref_data['graph_output'])
-            #     self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-            #     self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-            #     if self.kwargs.get('head_bias', False):
-            #         fake_preds.fill_(self.kwargs['head_bias'][0])
-            #         self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-            #         self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-
-            # todo, maybe to be commented during production. Create a "debug mode" flag?
-            # log all on wandb
-            # log grad updates
-            # print belows
-            # with torch.no_grad():
-            #     self._count += 1
-            #     fake_preds = torch.zeros_like(ref_data['graph_output'])
-            #     self.zero_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-            #     self.zero_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-            #     if self.kwargs.get('head_bias', False):
-            #         fake_preds.fill_(self.kwargs['head_bias'][0])
-            #         self.avg_mean += torch.nn.functional.mse_loss(fake_preds, ref_data['graph_output'])
-            #         self.avg_mae += torch.nn.functional.l1_loss(fake_preds, ref_data['graph_output'])
-
             # update metrics
             with torch.no_grad():
                 self.batch_losses = self.loss_stat(loss, loss_contrib)
@@ -1648,7 +1620,7 @@ class Trainer:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
-    def set_dataloader(self, sampler=None, validation_sampler=None):
+    def set_dataloader(self, sampler=None, validation_sampler=None, **kwargs):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1659,7 +1631,7 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(30 if self.dataloader_num_workers > 0 else 0),
+            timeout=(kwargs.get('dloader_timeout', 30) if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )

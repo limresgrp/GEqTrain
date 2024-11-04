@@ -174,10 +174,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         else:
             assert in_irreps.dim == self.n_scalars_in, (
-                    f"Module input contains features with irreps which are not scalars ({in_irreps})." +
-                    f"However, the irreps of the output is composed of scalars only ({out_irreps})."   +
+                    f"Module input contains features with irreps that are not scalars ({in_irreps}). " +
+                    f"However, the irreps of the output is composed of scalars only ({out_irreps}). "   +
                     "Please remove non-scalar features from the input, which otherwise would remain unused." +
-                    f"If features come from InteractionModule, you can add the parameter 'output_hidden_ls=[0]' in the constructor"
+                    f"If features come from InteractionModule, you can add the parameter 'output_ls=[0]' in the constructor"
                 )
             self.reshape_in = None
 

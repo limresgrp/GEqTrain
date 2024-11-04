@@ -548,5 +548,7 @@ class NpzDataset(AtomicInMemoryDataset):
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
                     fields[key] = fields[key].astype(np.int64)
+                if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
+                    fields[key] = fields[key].astype(np.float32)
 
         return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields
