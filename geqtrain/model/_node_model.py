@@ -17,7 +17,7 @@ from geqtrain.nn import (
 )
 
 
-def Model(
+def NodeModel(
     config, initialize: bool, dataset: Optional[AtomicDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
