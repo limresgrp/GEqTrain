@@ -40,8 +40,9 @@ from geqtrain.utils import (
     gradfilter_ema,
     ForwardHookHandler,
 )
+
 from geqtrain.model import model_from_config
-from geqtrain.train.utils import find_matching_indices
+from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
@@ -1229,16 +1230,7 @@ class Trainer:
             if self.skip_chunking:
                 return True
 
-            # if chunking is active -> if whole struct has been processed then batch is over
-            if already_computed_nodes is None:
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
+            already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
             if already_computed_nodes is None:
                 return True
 
