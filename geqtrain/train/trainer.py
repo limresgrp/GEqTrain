@@ -1168,7 +1168,7 @@ class Trainer:
     def stop_cond(self):
         """kill the training early"""
 
-        if self.early_stopping_conds is not None and hasattr(self, "mae_dict"):
+        if self.early_stopping_conds is not None and hasattr(self, "mae_dict") and self._is_warmup_period_over():
             early_stop, early_stop_args, debug_args = self.early_stopping_conds(
                 self.mae_dict
             )
