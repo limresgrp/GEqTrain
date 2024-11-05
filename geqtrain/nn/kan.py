@@ -35,11 +35,11 @@ class KANLinear(torch.nn.Module):
         self.grid_size = grid_size
         self.spline_order = spline_order
 
-        h = (grid_range[1] - grid_range[0]) / grid_size
+        h = (float(grid_range[1]) - float(grid_range[0])) / grid_size
         grid = (
             (
                 torch.arange(-spline_order, grid_size + spline_order + 1) * h
-                + grid_range[0]
+                + float(grid_range[0])
             )
             .expand(in_features, -1)
             .contiguous()
