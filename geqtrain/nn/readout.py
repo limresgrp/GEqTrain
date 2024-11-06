@@ -92,6 +92,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             if is_valid_irreps_string(out_irreps):
                 out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
             else:
+                assert out_irreps in irreps_in, f"'out_irreps' param is behaving like a key, but '{out_irreps}' is missing from irreps_in"
                 out_irreps = o3.Irreps(irreps_in[out_irreps]) # othewise we expect it to be key for irreps_in[key]
         elif self.out_field in irreps_in:
             out_irreps = irreps_in[self.out_field] # outs same irreps of irreps_in[out_field]
@@ -110,13 +111,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if output_mul is None:
             output_mul = out_irreps[0].mul # take l=0 mul; ok since all ls have same mul
 
-        out_irreps = o3.Irreps(
-            [
-                (output_mul, ir)
-                for _, ir in out_irreps
-                if ir.l in [0] + output_ls # if ir.l in l=0 and "selected ls" i.e. the ls passed via output_ls
-            ]
-        )
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in output_ls])
 
         # --- end out_irreps ls --- #
 
@@ -145,10 +140,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.n_scalars_in = in_irreps.ls.count(0)
         assert self.n_scalars_in > 0
 
-        #?
-        readout_latent_kwargs['use_layer_norm'] = True
-        readout_latent_kwargs.pop('dropout', None)
-
+        readout_latent_kwargs['use_layer_norm'] = readout_latent_kwargs.get('use_layer_norm', True)
         self.n_scalars_out = out_irreps.ls.count(0)
         if self.n_scalars_out > 0:
             self.has_invariant_output = True

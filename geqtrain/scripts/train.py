@@ -153,7 +153,7 @@ def fresh_start(rank, world_size, config):
         config.update(trainer.params)
 
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader(None, None, **config)
+        trainer.set_dataloader(config)
 
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
@@ -213,7 +213,7 @@ def restart(rank, world_size, config):
             if config[k] != dictionary.get(k, ""):
                 # modifiable things if restart
                 if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
-                        "metrics_components", "noise", "use_dt", "dataset_list", "wandb"]:
+                        "metrics_components", "noise", "use_dt", "wandb"]:
                     dictionary[k] = config[k]
                     logging.info(f'Update "{k}" to {dictionary[k]}')
                 elif k.startswith("early_stop"):
@@ -233,7 +233,7 @@ def restart(rank, world_size, config):
 
         trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader(None, None, **config)
+        trainer.set_dataloader(config)
 
         trainer.init(model=model)
 

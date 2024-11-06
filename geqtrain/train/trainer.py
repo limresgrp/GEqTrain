@@ -1206,11 +1206,6 @@ class Trainer:
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
-
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
@@ -1588,9 +1583,8 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # TODO: verify these only when needed
-        # assert len(self.n_train) == len(dataset.datasets)
-        # assert len(self.n_val)   == len(validation_dataset.datasets)
+        assert len(self.n_train) == len(dataset.datasets)
+        assert len(self.n_val)   == len(validation_dataset.datasets)
 
         # build redefined datasets wrt data splitting process above
         # torch_geometric datasets inherantly support subsets using `index_select`
@@ -1612,7 +1606,7 @@ class Trainer:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
-    def set_dataloader(self, sampler=None, validation_sampler=None, **kwargs):
+    def set_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1623,7 +1617,7 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(kwargs.get('dloader_timeout', 30) if self.dataloader_num_workers > 0 else 0),
+            timeout=(config.get('dloader_timeout', 30) if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )
