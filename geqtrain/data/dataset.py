@@ -11,8 +11,7 @@ import torch
 from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
-from torch_geometric.transforms import Compose
-from geqtrain.utils.torch_geometric import Batch, Dataset
+from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 import geqtrain
