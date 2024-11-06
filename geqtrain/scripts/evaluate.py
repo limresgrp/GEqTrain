@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import argparse
 import logging
 from typing import Union
@@ -9,6 +10,7 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import ConcatDataset
 from geqtrain.data._build import dataset_from_config
+from geqtrain.data import AtomicDataDict
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
@@ -24,6 +26,7 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
+        chunk_index = 0
         while True:
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
                 model=model,
@@ -36,8 +39,9 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
             )
 
             for callback in chunk_callbacks:
-                callback(pbar, out, ref_data, **kwargs)
+                callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs)
 
+            chunk_index += 1
             already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
             if already_computed_nodes is None:
                 break
@@ -142,12 +146,12 @@ def main(args=None, running_as_script: bool = True):
         type=bool,
         default=False,
     )
-    parser.add_argument(
-        "--log",
-        help="log file to store all the metrics and screen logging.debug",
-        type=Path,
-        default=None,
-    )
+    # parser.add_argument(
+    #     "--log",
+    #     help="log file to store all the metrics and screen logging.debug",
+    #     type=Path,
+    #     default=None,
+    # )
     # parser.add_argument(
     #     "--output",
     #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
@@ -179,23 +183,66 @@ def main(args=None, running_as_script: bool = True):
 
     args = parser.parse_args(args=args)
 
+    # Logging
+    from geqtrain.utils import Output
+        
+    # Initialize Output with specified settings
+    output = Output.get_output(dict(
+        root='./logs',
+        run_name=time.strftime("%Y%m%d-%H%M%S"),
+        append=False,
+        screen=False,
+        verbose="info",
+    ))
+
+    # Open the log files
+    logfile = output.open_logfile('log', propagate=True)
+    metricsfile = output.open_logfile('metrics.csv', propagate=True)
+    csvfile = output.open_logfile('out.csv', propagate=True)
+    outfile = output.open_logfile('out.xyz', propagate=True)
+    
+    # Set up the main logger to log at INFO level
+    logger = logging.getLogger(logfile)
+    logger.setLevel(logging.INFO)
+
+    # Configure metricslogger to only write to csvfile without stdout
+    metricslogger = logging.getLogger('metricslogger')
+    metricslogger.setLevel(logging.INFO)
+    metrics_handler = logging.FileHandler(metricsfile)  # File handler for csv logger
+    metricslogger.addHandler(metrics_handler)           # Add file handler to metricslogger
+    metricslogger.propagate = False                 # Prevent propagation to the root logger
+
+    # Configure csvlogger to only write to csvfile without stdout
+    csvlogger = logging.getLogger('csvlogger')
+    csvlogger.setLevel(logging.INFO)
+    csv_handler = logging.FileHandler(csvfile)  # File handler for csv logger
+    csvlogger.addHandler(csv_handler)           # Add file handler to csvlogger
+    csvlogger.propagate = False                 # Prevent propagation to the root logger
+
+    # Configure xyzlogger to only write to outfile without stdout
+    xyzlogger = logging.getLogger('xyzlogger')
+    xyzlogger.setLevel(logging.INFO)
+    out_handler = logging.FileHandler(outfile)  # File handler for out logger
+    xyzlogger.addHandler(out_handler)           # Add file handler to xyzlogger
+    xyzlogger.propagate = False                 # Prevent propagation to the root logger
+
     # Do the defaults:
     dataset_is_from_training: bool = False
-    print_best_model_epoch: bool = False
+    # print_best_model_epoch: bool = False
     if args.train_dir:
         if args.test_config is None:
             args.test_config = args.train_dir / "config.yaml"
             dataset_is_from_training = True
         if args.model is None:
-            print_best_model_epoch = True
+            # print_best_model_epoch = True
             args.model = args.train_dir / "best_model.pth"
         if args.test_indexes is None and dataset_is_from_training:
             # Find the remaining indexes that aren't train or val
             trainer = torch.load(
                 str(args.train_dir / "trainer.pth"), map_location="cpu"
             )
-            if print_best_model_epoch:
-                print(f"Loading model from epoch: {trainer.best_model_saved_at_epoch}")
+            # if print_best_model_epoch:
+            #     print(f"Loading model from epoch: {trainer['best_model_saved_at_epoch']}")
             train_idcs = []
             dataset_offset = 0
             for tr_idcs in trainer["train_idcs"]:
@@ -223,10 +270,6 @@ def main(args=None, running_as_script: bool = True):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(args.device)
-
-    # logger
-    logger = logging.getLogger("geqtrain-evaluate")
-    logger.setLevel(logging.INFO)
 
     logger.info(f"Using device: {device}")
     if device.type == "cuda":
@@ -342,21 +385,84 @@ def main(args=None, running_as_script: bool = True):
     # run inference
     logger.info("Starting...")
 
-    def metrics_callback(pbar, out, ref_data, **kwargs): # Keep **kwargs or callback fails
+    def metrics_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
 
-        desc = '\t'.join(
-            f'{k:>20s} = {v:< 20f}'
-            for k, v in metrics.flatten_metrics(
-                batch_metrics,
-                metrics_metadata=metrics_metadata,
-            )[0].items()
+        mat_str = f"{batch_index}, {chunk_index}"
+        header = "batch, chunk"
+        flatten_metrics, skip_keys = metrics.flatten_metrics(
+            metrics=batch_metrics,
+            metrics_metadata=metrics_metadata,
         )
-        pbar.set_description(f"Metrics: {desc}")
+
+        for key, value in flatten_metrics.items(): # log metrics
+            mat_str += f", {value:16.5g}"
+            header += f", {key}"
+        
+        if pbar.n == 0:
+            metricslogger.info(header)
+        metricslogger.info(mat_str)
+
+        del out, ref_data
+    
+    def out_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
+
+        def format_csv(data, ref_data, batch_index, chunk_index):
+            # Extract fields from data
+            node_type = data[AtomicDataDict.NODE_TYPE_KEY]
+            dataset_id = data["dataset_id"].item()  # Scalar
+            node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+            ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+
+            # Initialize lines list for CSV format
+            lines = []
+            if pbar.n == 0:
+                lines.append("dataset_id, batch, chunk, node_type, pred, ref")
+
+            if node_output is not None and ref_node_output is not None:
+                for _node_type, _node_output, _ref_node_output in zip(node_type, node_output, ref_node_output):
+                    lines.append(f"{dataset_id:6}, {batch_index:6}, {chunk_index:4}, {_node_type.item():6}, {_node_output.item():10.4f}, {_ref_node_output.item():10.4f}")
+
+            # Join all lines into a single string for XYZ format
+            return "\n".join(lines)
+        
+        def format_xyz(data, ref_data):
+            # Extract fields from data
+            pos = data[AtomicDataDict.POSITIONS_KEY]
+            node_type = data[AtomicDataDict.NODE_TYPE_KEY]
+            dataset_id = data["dataset_id"].item()  # Scalar
+            node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+            ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+
+            n_atoms = pos.shape[0]
+
+            # Initialize lines list for XYZ format
+            lines = []
+
+            # Line 1: Number of atoms
+            lines.append(f"{n_atoms}")
+
+            # Line 2: Header line (dataset_id)
+            lines.append(f"DatasetID={dataset_id}")
+
+            # Lines 3+: Atom lines with node_type, x, y, z, node_output
+            for i in range(n_atoms):
+                atom_name = str(node_type[i].item())  # Convert node_type to string for atom name
+                x, y, z = pos[i].tolist()  # Get coordinates
+                output = node_output[i].item() if node_output is not None else ''  # Extract scalar from tensor
+                ref_output = ref_node_output[i].item() if ref_node_output is not None else ''  # Extract scalar from tensor
+                lines.append(f"{atom_name:6} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f}")
+
+            # Join all lines into a single string for XYZ format
+            return "\n".join(lines)
+
+        csvlogger.info(format_csv(out, ref_data, batch_index, chunk_index))
+        xyzlogger.info(format_xyz(out, ref_data))
+
         del out, ref_data
 
-    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
+    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback, out_callback], **config)
 
     logger.info("\n--- Final result: ---")
     logger.info(

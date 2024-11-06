@@ -123,6 +123,11 @@ class Metrics(Loss):
     def hash_component(component):
         buffer = yaml.dump(component).encode("ascii")
         return sha1(buffer).hexdigest()
+    
+    @property
+    def clean_keys(self):
+        for key in self.keys:
+            yield self.remove_suffix(key)
 
     def __call__(
         self,
