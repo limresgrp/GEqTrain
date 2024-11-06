@@ -286,11 +286,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]
                 ),
                 mlp_output_dimension=self.latent_dim,
+                use_layer_norm=False,
             )
 
             self.final_readout_mlp = latent(
                 mlp_input_dimension=self.latent_dim,
                 mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_index],
+                use_layer_norm=False,
             )
         else:
             self.has_scalar_output = False
@@ -580,6 +582,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_input_dimension=self.latent_dim,
             mlp_output_dimension=generate_n_weights,
             has_bias=False,
+            use_layer_norm=False,
         )
 
         # Take the node attrs and obtain a query matrix
@@ -593,6 +596,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_latent_dimensions = [],
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
+            use_layer_norm=False,
             zero_init_last_layer_weights= True,
         ) if self.use_attention else None
 
@@ -602,6 +606,7 @@ class InteractionLayer(torch.nn.Module):
             mlp_latent_dimensions = [],
             mlp_output_dimension = self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
+            use_layer_norm=False,
             zero_init_last_layer_weights = True,
         ) if self.use_attention else None
 

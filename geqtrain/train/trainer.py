@@ -1013,7 +1013,6 @@ class Trainer:
         # hooks_handler.deregister_hooks()
         finish_all_writes()
 
-
     def _log_updates(self):
 
         update_log = logging.getLogger(self.log_updates)

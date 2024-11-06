@@ -75,7 +75,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             [
                 (input_mul, ir)
                 for _, ir in in_irreps
-                if ir.l in [0] + input_ls # if ir.l in l=0 and "selected ls" i.e. the ls passed via input_ls
+                if ir.l in input_ls
             ]
         )
 
@@ -140,7 +140,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.n_scalars_in = in_irreps.ls.count(0)
         assert self.n_scalars_in > 0
 
-        readout_latent_kwargs['use_layer_norm'] = readout_latent_kwargs.get('use_layer_norm', True)
         self.n_scalars_out = out_irreps.ls.count(0)
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
