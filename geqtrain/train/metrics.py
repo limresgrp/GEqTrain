@@ -71,11 +71,19 @@ class Metrics(Loss):
             func_params["PerLabel"]   = func_params.get("PerLabel", False)
             func_params["PerNode"]    = func_params.get("PerNode", False)
             func_params["functional"] = func_params.get("functional", "L1Loss")
+            func_params["reduction"]    = func_params.get("reduction", "mean")
 
             # default is to flatten the array
             if key not in self.running_stats:
                 self.kwargs[key] = {}
                 self.params[key] = {}
+
+            reductions = {
+                'mean': Reduction.MEAN,
+                'rms': Reduction.RMS,
+            }
+            reduction = reductions[func_params.get('reduction')]
+            self.kwargs[key] = dict(reduction=reduction)
 
             # store for initialization
             kwargs = deepcopy(func_params)
@@ -83,11 +91,10 @@ class Metrics(Loss):
             kwargs.pop("PerLabel")
             kwargs.pop("PerNode")
             kwargs.pop("functional")
-
-            reduction = getattr(self.funcs[key], "reduction", Reduction.MEAN)
-            self.kwargs[key] = dict(reduction=reduction)
+            kwargs.pop("reduction")
+            
             self.kwargs[key].update(kwargs)
-            self.params[key] = (reduction, func_params)
+            self.params[key] = (reduction.value, func_params)
 
 
     def init_runstat(self, params: Dict, error: torch.Tensor) -> RunningStats:
@@ -126,10 +133,11 @@ class Metrics(Loss):
         metrics = {}
         N = None
         for key in self.keys:
+            clean_key = self.remove_suffix(key)
             error: torch.Tensor = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
                 pred=pred,
                 ref=ref,
-                key=self.remove_suffix(key),
+                key=clean_key,
                 mean=False,
             )
 
@@ -153,8 +161,8 @@ class Metrics(Loss):
                 }
             elif per_label:
                 params = {
-                    "accumulate_by": torch.cat(len(ref[self.remove_suffix(key)]) * [
-                        torch.arange(ref[self.remove_suffix(key)].shape[-1], device=error.device)
+                    "accumulate_by": torch.cat(len(ref[clean_key]) * [
+                        torch.arange(ref[clean_key].shape[-1], device=error.device)
                     ])
                 }
             if per_node:
@@ -220,13 +228,15 @@ class Metrics(Loss):
         for key, value in metrics.items():
             reduction, params = self.params[key]
 
-            short_name = ABBREV.get(key, key)
+            key_clean = self.remove_suffix(key)
+            short_name = ABBREV.get(key_clean, key_clean)
             if hasattr(self.funcs[key], "get_name"):
                 short_name = self.funcs[key].get_name(short_name)
 
             per_node = params["PerNode"]
             suffix = "/N" if per_node else ""
-            item_name = f"{short_name}{suffix}_{reduction}"
+            loss_name = self.funcs[key].func_name
+            item_name = f"{short_name}{suffix}"
 
             stat = self.running_stats[key]
             per_species = params["PerSpecies"]
@@ -238,9 +248,9 @@ class Metrics(Loss):
                         type_names = [i for i in range(len(value))]
                     for id_ele, v in enumerate(value):
                         if type_names is not None:
-                            flat_dict[f"{type_names[id_ele]}_{item_name}"] = v.item()
+                            flat_dict[f"{type_names[id_ele]}_{item_name}.{reduction}"] = v.item()
                         else:
-                            flat_dict[f"{id_ele}_{item_name}"] = v.item()
+                            flat_dict[f"{id_ele}_{item_name}.{reduction}"] = v.item()
 
                     flat_dict[f"psavg_{item_name}"] = value.mean().item()
                 else:
@@ -254,18 +264,16 @@ class Metrics(Loss):
                 if stat.output_dim == tuple():
                     if not target_names:
                         target_names = [i for i in range(len(value))]
-
-                    for id_ele in range(value.shape[-1]):
-                        v = value[id_ele]
-                        if target_names:
-                            flat_dict[f"{target_names[id_ele]}"] = v.item()
+                    for id_ele, v in enumerate(value):
+                        if target_names is not None:
+                            flat_dict[f"{target_names[id_ele]}.{loss_name}.{reduction}"] = v.item()
                         else:
-                            flat_dict[f"{id_ele}_{item_name}"] = v.item()
+                            flat_dict[f"{item_name}.{loss_name}.{reduction}"] = v.item()
                 else:
                     for id_ele, vec in enumerate(value):
                         ele = type_names[id_ele]
                         for idx, v in enumerate(vec):
-                            name = f"{ele}_{item_name}_{idx}"
+                            name = f"{ele}.{item_name}.{idx}"
                             flat_dict[name] = v.item()
                             skip_keys.append(name)
             else:
@@ -275,5 +283,5 @@ class Metrics(Loss):
                 else:
                     # a vector
                     for idx, v in enumerate(value.flatten()):
-                        flat_dict[f"{item_name}_{idx}"] = v.item()
+                        flat_dict[f"{item_name}.{idx}"] = v.item()
         return flat_dict, skip_keys
