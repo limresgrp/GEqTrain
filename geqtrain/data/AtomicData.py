@@ -100,7 +100,7 @@ def register_fields(
         raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
 
 
-def _process_dict(kwargs, ignore_fields=[]):
+def _process_dict(kwargs, ignore_fields=['smiles']):
     """Convert a dict of data into correct dtypes/shapes according to key"""
     # Deal with _some_ dtype issues
     for k, v in kwargs.items():

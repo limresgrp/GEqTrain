@@ -54,7 +54,7 @@ def main(args=None, running_as_script: bool = True):
         if config.use_dt:
             raise NotImplementedError("Could not restart training in Distributed Training yet.")
         func = restart
-    
+
     if config.use_dt:
         # Manually set the environment variables for multi-GPU setup
         world_size = args.world_size
@@ -63,7 +63,7 @@ def main(args=None, running_as_script: bool = True):
             os.environ['MASTER_ADDR'] = str(args.master_addr)
         if args.master_port:
             os.environ['MASTER_PORT'] = str(args.master_port)
-        
+
         # Spawn one process per GPU
         import torch.multiprocessing as mp
         mp.spawn(func, args=(world_size, config.as_dict(),), nprocs=world_size, join=True)
@@ -153,8 +153,8 @@ def fresh_start(rank, world_size, config):
         config.update(trainer.params)
 
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader()
-        
+        trainer.set_dataloader(config)
+
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
@@ -211,6 +211,7 @@ def restart(rank, world_size, config):
         # compare dictionary to config and update stop condition related arguments
         for k in config.keys():
             if config[k] != dictionary.get(k, ""):
+                # modifiable things if restart
                 if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
                         "metrics_components", "noise", "use_dt", "wandb"]:
                     dictionary[k] = config[k]
@@ -232,7 +233,7 @@ def restart(rank, world_size, config):
 
         trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.set_dataset(*load_dataset(config))
-        trainer.set_dataloader()
+        trainer.set_dataloader(config)
 
         trainer.init(model=model)
 

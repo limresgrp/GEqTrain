@@ -10,7 +10,8 @@ from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
 class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
-    """Sum edgewise features.
+    """
+    Sum edgewise features into nodes.
 
     Includes optional per-species-pair edgewise scales.
     """
@@ -29,7 +30,6 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         avg_num_neighbors: Optional[float] = 5.0,
         irreps_in={},
     ):
-        """Sum edges into nodes."""
         super().__init__()
         self.field = field
         self.use_attention = use_attention
@@ -41,6 +41,9 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             my_irreps_in={field: irreps},
             irreps_out={out_field: irreps},
         )
+
+        self.node_attr_to_query = None
+        self.edge_feat_to_key = None
 
         if self.use_attention:
 
@@ -84,15 +87,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
             self.reshape_out = inverse_reshape_irreps(irreps)
-
-            self.irreps_out.update(
-                {
-                    self.out_field: irreps
-                }
-            )
-        else:
-            self.node_attr_to_query = None
-            self.edge_feat_to_key = None
+            self.irreps_out.update({self.out_field: irreps})
 
         if not self.use_attention:
             self.register_buffer(

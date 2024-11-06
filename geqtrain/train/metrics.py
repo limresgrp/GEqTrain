@@ -205,6 +205,21 @@ class Metrics(Loss):
         metrics_metadata: Dict[str, List[str]]=None,
     ):
 
+        '''
+        Flatten the metrics dictionary into a single dictionary
+        This is used to convert the metrics dictionary into a format that is easy to understand and analyze
+        It also allows for easy plotting of the metrics
+
+        The flatten_metrics function is designed to convert a nested dictionary of metrics into a flat dictionary format, making it easier to access and use the metrics. Here's a breakdown of its components:
+        Parameters:
+        metrics: A dictionary containing computed metrics, where keys are tuples of (key, param_hash) and values are the corresponding metric values.
+        metrics_metadata: An optional dictionary that can contain additional information, such as type_names and target_names, which are used to label the metrics.
+
+        Returns:
+        flat_dict: A flat dictionary containing the metrics, with keys and values flattened for easy access.
+        skip_keys: A list of keys that were skipped during the flattening process.
+        '''
+
         type_names = metrics_metadata.get('type_names', [])
         target_names = metrics_metadata.get('target_names', [])
 
@@ -247,7 +262,7 @@ class Metrics(Loss):
                             skip_keys.append(name)
             elif per_label:
                 if stat.output_dim == tuple():
-                    if target_names is None:
+                    if not target_names:
                         target_names = [i for i in range(len(value))]
                     for id_ele, v in enumerate(value):
                         if target_names is not None:

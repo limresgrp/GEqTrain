@@ -40,14 +40,14 @@ from geqtrain.utils import (
     gradfilter_ema,
     ForwardHookHandler,
 )
+
 from geqtrain.model import model_from_config
-from geqtrain.train.utils import find_matching_indices
+from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
-
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
@@ -359,7 +359,7 @@ class Trainer:
     """
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
-    object_keys = ["lr_sched", "optim", "early_stopping_conds"]
+    object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
     lr_scheduler_module = torch.optim.lr_scheduler
     optim_module = torch.optim
 
@@ -1086,10 +1086,85 @@ class Trainer:
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", False)
 
+    def _log_updates(self):
+
+        update_log = logging.getLogger(self.log_updates)
+        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
+
+        # build titles for logging file(s)
+        # done only once
+        if not hasattr(self, 'update_logging_titles'):
+            self.update_logging_titles = [
+                param_name
+                for param_name, param in self.model.named_parameters()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                )
+            ]
+            _titles = ""
+            for t in self.update_logging_titles:
+                _titles += f"{t}, "
+            _titles = _titles.strip().rstrip(',')
+            update_log.info(_titles)
+            grad_to_weight_ratio_log.info(_titles)
+
+        # log the values
+        update_speed, grad_ratio = "", ""
+        with torch.no_grad():
+            for param_name, param in self.model.named_parameters():
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                ):
+                    lr = get_latest_lr(self.optim, self.model, param_name)
+                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
+                    grad_to_weight_ratio = param.grad.std()/param.std()
+                    update_speed += f"{update:.4}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
+
+        update_log.info(update_speed.strip().rstrip(','))
+        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
+
+
+    def _batch_lvl_lrscheduler_step(self):
+        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if not self.using_batch_lvl_lrscheduler:
+                return
+
+        # todo: instead of str comparison could use a dict with k:lr_sched_name, v: 0/1 whether that scheduler is being used + assert check!
+        # idea: for loop on num_of_possible_lr_scheduler is surely faster then str cmpr thru the whole lr scheduler name
+        if self.lr_scheduler_name == "CosineAnnealingLR":
+            self.lr_sched.step()
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+
+    def _epoch_lvl_lrscheduler_step(self):
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
+            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", False)
+
 
     def _is_warmup_period_over(self):
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
+
 
     def batch_step(self, data, validation=False):
 
@@ -1135,7 +1210,6 @@ class Trainer:
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
 
-                # to be commented in production run
                 if self.debug:
                     self._log_updates()
 
@@ -1151,16 +1225,7 @@ class Trainer:
             if self.skip_chunking:
                 return True
 
-            # if chunking is active -> if whole struct has been processed then batch is over
-            if already_computed_nodes is None:
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
+            already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
             if already_computed_nodes is None:
                 return True
 
@@ -1229,7 +1294,6 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        # todo atm not working
         if not self.use_warmup:
             self._epoch_lvl_lrscheduler_step()
         elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
@@ -1237,6 +1301,7 @@ class Trainer:
 
         for callback in self._end_of_epoch_callbacks:
             callback(self)
+
 
     def end_of_batch_log(self, batch_type: str):
         """
@@ -1541,7 +1606,7 @@ class Trainer:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
-    def set_dataloader(self, sampler=None, validation_sampler=None):
+    def set_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1552,7 +1617,7 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(30 if self.dataloader_num_workers > 0 else 0),
+            timeout=(config.get('dloader_timeout', 30) if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )

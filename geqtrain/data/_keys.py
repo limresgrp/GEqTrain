@@ -44,14 +44,14 @@ INPUT_STRUCTURE_KEYS: Final[List[str]] = [
 ]
 
 # [n_nodes, dim] (possibly equivariant) node input attributes
-NODE_ATTRS_KEY: Final[str] = "node_attrs"
+NODE_ATTRS_KEY: Final[str] = "node_attrs" # usually one-hot encoded input category
 # [n_nodes, dim] (possibly equivariant) features of each node
-NODE_FEATURES_KEY: Final[str] = "node_features"
+NODE_FEATURES_KEY: Final[str] = "node_features" # the processed version of NODE_ATTRS_KEY, used to do not overwrite NODE_ATTRS_KEY
 # [n_nodes, dim] (possibly equivariant) output features of each node
 NODE_OUTPUT_KEY: Final[str] = "node_output"
 
 # [n_edges, dim] (possibly equivariant) edge input attributes
-EDGE_ATTRS_KEY: Final[str] = "edge_attrs"
+EDGE_ATTRS_KEY: Final[str] = "edge_attrs" # look at difference between NODE_ATTRS_KEY and NODE_FEATURES_KEY
 # [n_edges, 3] tensor of displacement vectors associated to edges
 EDGE_VECTORS_KEY: Final[str] = "edge_vectors"
 # [n_edges] tensor of the lengths of EDGE_VECTORS
@@ -61,7 +61,7 @@ EDGE_ANGULAR_ATTRS_KEY: Final[str] = "edge_angular_attrs"
 # [n_edges, dim] invariant radial attributes of the edges
 EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
 # [n_edges, dim] (possibly equivariant) features of the edges
-EDGE_FEATURES_KEY: Final[str] = "edge_features"
+EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
 # [n_edges, dim] (possibly equivariant) output features of the edges
 EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 

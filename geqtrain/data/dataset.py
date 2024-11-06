@@ -9,12 +9,14 @@ import hashlib
 import torch
 
 from os.path import dirname, basename, abspath
-from typing import Tuple, Dict, Any, List, Union, Optional
+from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
+from torch_geometric.transforms import Compose
 from geqtrain.utils.torch_geometric import Batch, Dataset
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 import geqtrain
+from geqtrain.utils import load_callable
 from geqtrain.data import (
     AtomicData,
     AtomicDataDict,
@@ -25,7 +27,6 @@ from geqtrain.data import (
 )
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
-
 
 def fix_batch_dim(arr):
     if arr is None:
@@ -91,8 +92,15 @@ class AtomicDataset(Dataset):
     def __init__(
         self,
         root: str,
+        transforms: Optional[List[str]] = None,
     ):
-        super().__init__(root=root)
+        '''
+        transforms: list of strings that point to the callable function e.g. pkgName.moduleName.transformName
+        '''
+        super().__init__(
+            root=root,
+            transform = Compose([load_callable(transf) for transf in transforms]) if transforms else None
+        )
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -119,9 +127,9 @@ class AtomicDataset(Dataset):
                 for k in pnames
                 if k not in IGNORE_KEYS and hasattr(self, k)
             }
-            
+
             return params
-        
+
         params = filter_attributes(self, pnames, IGNORE_KEYS)
         # Add other relevant metadata:
         params["dtype"] = str(torch.float32)
@@ -182,6 +190,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        transforms: Optional[List[Callable]] = None,
     ):
         self.dataset_id = dataset_id
         self.pbc = pbc
@@ -216,7 +225,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # Initialize the InMemoryDataset, which runs download and process
         # See https://pytorch-geometric.readthedocs.io/en/latest/notes/create_dataset.html#creating-in-memory-datasets
         # Then pre-process the data if disk files are not found
-        super().__init__(root=root)
+        super().__init__(root=root, transforms=transforms)
         if self.data is None:
             self.data, self.fixed_fields, include_frames = torch.load(
                 self.processed_paths[0],
@@ -370,7 +379,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         del graph_fields
 
         # type conversion
-        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY])
+        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY, "smiles"])
 
         total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (
             1024 * 1024
@@ -458,6 +467,7 @@ class NpzDataset(AtomicInMemoryDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        transforms: Optional[List[str]] = None,
     ):
         self.key_mapping = key_mapping
 
@@ -475,6 +485,7 @@ class NpzDataset(AtomicInMemoryDataset):
             edge_attributes=edge_attributes,
             graph_attributes=graph_attributes,
             extra_attributes=extra_attributes,
+            transforms=transforms,
         )
 
     @property
@@ -537,5 +548,7 @@ class NpzDataset(AtomicInMemoryDataset):
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
                     fields[key] = fields[key].astype(np.int64)
+                if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
+                    fields[key] = fields[key].astype(np.float32)
 
         return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields

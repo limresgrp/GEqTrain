@@ -14,10 +14,74 @@ from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
 from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets
+from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
+
+def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
+    pbar = tqdm(dataloader)
+    for batch_index, data in enumerate(pbar):
+        already_computed_nodes = None
+        while True:
+            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
+                model=model,
+                data=data,
+                device=device,
+                cm=torch.no_grad(),
+                already_computed_nodes=already_computed_nodes,
+                per_node_outputs_keys=per_node_outputs_keys,
+                **kwargs,
+            )
+
+            for callback in chunk_callbacks:
+                callback(pbar, out, ref_data, **kwargs)
+
+            already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
+            if already_computed_nodes is None:
+                break
+
+        for callback in batch_callbacks:
+            callback(batch_index, **kwargs)
+
+
+def load_model(model: Union[str, Path], device="cpu"):
+    if isinstance(model, str):
+        model = Path(model)
+    logger = logging.getLogger("geqtrain-evaluate")
+    logger.setLevel(logging.INFO)
+
+    logger.info("Loading model... ")
+
+    try:
+        model, metadata = load_deployed_model(
+            model,
+            device=device,
+            set_global_options=True,  # don't warn that setting
+        )
+        logger.info("loaded deployed model.")
+
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile()
+        # Open the file for writing.
+        with open(tmp.name, 'w') as f:
+            f.write(metadata[CONFIG_KEY])
+        model_config = Config.from_file(tmp.name)
+
+        model.eval()
+        return model, model_config
+    except ValueError:  # its not a deployed model
+        pass
+
+    # load a training session model
+    model, model_config = Trainer.load_model_from_training_session(
+        traindir=model.parent, model_name=model.name, device=device
+    )
+    logger.info("loaded model from training session.")
+    model.eval()
+
+    return model, model_config
 
 def main(args=None, running_as_script: bool = True):
     # in results dir, do: geqtrain-deploy build --train-dir . deployed.pth
@@ -112,7 +176,7 @@ def main(args=None, running_as_script: bool = True):
     if len(sys.argv) == 1:
         parser.print_help()
         parser.exit()
-    # Parse args
+
     args = parser.parse_args(args=args)
 
     # Do the defaults:
@@ -176,6 +240,8 @@ def main(args=None, running_as_script: bool = True):
         )
         torch.use_deterministic_algorithms(True)
 
+    ## --- end of set up of arguments --- ##
+
     # Load model
     model, config = load_model(args.model, device=args.device)
 
@@ -184,9 +250,11 @@ def main(args=None, running_as_script: bool = True):
         f"Loading {'training' if dataset_is_from_training else 'test'} dataset...",
     )
 
+    # Load test config
     evaluate_config = Config.from_file(str(args.test_config), defaults={})
     config.update(evaluate_config)
 
+    # Get dataset
     dataset_is_test: bool = False
     dataset_is_validation: bool = False
     try:
@@ -274,7 +342,6 @@ def main(args=None, running_as_script: bool = True):
     # run inference
     logger.info("Starting...")
 
-
     def metrics_callback(pbar, out, ref_data, **kwargs): # Keep **kwargs or callback fails
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
@@ -292,7 +359,6 @@ def main(args=None, running_as_script: bool = True):
     infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback], **config)
 
     logger.info("\n--- Final result: ---")
-
     logger.info(
         "\n".join(
             f"{k:>20s} = {v:< 20f}"
@@ -302,77 +368,10 @@ def main(args=None, running_as_script: bool = True):
             )[0].items()
         )
     )
-
-def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
-    pbar = tqdm(dataloader)
-    for batch_index, data in enumerate(pbar):
-        already_computed_nodes = None
-        while True:
-            out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
-                model=model,
-                data=data,
-                device=device,
-                cm=torch.no_grad(),
-                already_computed_nodes=already_computed_nodes,
-                per_node_outputs_keys=per_node_outputs_keys,
-                **kwargs,
-            )
-
-            for callback in chunk_callbacks:
-                callback(pbar, out, ref_data, **kwargs)
-
-            # evaluate ending condition
-            if already_computed_nodes is None: # already_computed_nodes is the stopping criteria to finish batch step
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
-            if already_computed_nodes is None:
-                break
-        for callback in batch_callbacks:
-            callback(batch_index, **kwargs)
+    logger.info("\n--- End of evaluation ---")
 
 
-def load_model(model: Union[str, Path], device="cpu"):
-    if isinstance(model, str):
-        model = Path(model)
-    logger = logging.getLogger("geqtrain-evaluate")
-    logger.setLevel(logging.INFO)
 
-    logger.info("Loading model... ")
-
-    try:
-        model, metadata = load_deployed_model(
-            model,
-            device=device,
-            set_global_options=True,  # don't warn that setting
-        )
-        logger.info("loaded deployed model.")
-
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile()
-        # Open the file for writing.
-        with open(tmp.name, 'w') as f:
-            f.write(metadata[CONFIG_KEY])
-        model_config = Config.from_file(tmp.name)
-
-        model.eval()
-        return model, model_config
-    except ValueError:  # its not a deployed model
-        pass
-
-    # load a training session model
-    model, model_config = Trainer.load_model_from_training_session(
-        traindir=model.parent, model_name=model.name, device=device
-    )
-    logger.info("loaded model from training session.")
-    model.eval()
-
-    return model, model_config
 
 if __name__ == "__main__":
     main(running_as_script=True)
