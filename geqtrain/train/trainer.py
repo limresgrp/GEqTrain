@@ -516,7 +516,9 @@ class Trainer:
 
         # --- initialize n_train and n_val
 
+        assert isinstance(n_train, (list, int, type(None))), "n_train must be of type list, int, or None"
         self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
+        assert isinstance(n_val, (list, int, type(None))), "n_val must be of type list, int, or None"
         self.n_val   = n_val   if isinstance(n_val,   list) or n_val   is None else [n_val]
 
         # --- load all callbacks
@@ -1161,6 +1163,8 @@ class Trainer:
 
 
     def _is_warmup_period_over(self):
+        if not self.use_warmup:
+            return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
@@ -1214,7 +1218,7 @@ class Trainer:
 
                 self.optim.step()
 
-                if self.use_warmup and not self._is_warmup_period_over():
+                if not self._is_warmup_period_over():
                     with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
                         pass
                 else:
@@ -1529,7 +1533,7 @@ class Trainer:
                         ones = np.copy(n_total[ones_mask])
                         ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
                         n_total[ones_mask] = ones
-                        self.n_train = n_total
+                        self.n_train = n_total.tolist()
                 else:
                     self.n_train = [len(ds) for ds in dataset.datasets]
             if self.n_val is None:
