@@ -22,6 +22,67 @@ from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
 
+def init_logger(log: bool):
+    from geqtrain.utils import Output
+    
+    if log:
+        # Initialize Output with specified settings
+        output = Output.get_output(dict(
+            root='./logs',
+            run_name=time.strftime("%Y%m%d-%H%M%S"),
+            append=False,
+            screen=False,
+            verbose="info",
+        ))
+
+        # Open the log files
+        logfile = output.open_logfile('log', propagate=True)
+        metricsfile = output.open_logfile('metrics.csv', propagate=True)
+        csvfile = output.open_logfile('out.csv', propagate=True)
+        outfile = output.open_logfile('out.xyz', propagate=True)
+        
+        # Set up the main logger to log at INFO level
+        logger = logging.getLogger(logfile)
+        logger.setLevel(logging.INFO)
+
+        # Configure metricslogger to only write to csvfile without stdout
+        metricslogger = logging.getLogger('metricslogger')
+        metricslogger.setLevel(logging.INFO)
+        metrics_handler = logging.FileHandler(metricsfile)  # File handler for csv logger
+        metricslogger.addHandler(metrics_handler)           # Add file handler to metricslogger
+        metricslogger.propagate = False                 # Prevent propagation to the root logger
+
+        # Configure csvlogger to only write to csvfile without stdout
+        csvlogger = logging.getLogger('csvlogger')
+        csvlogger.setLevel(logging.INFO)
+        csv_handler = logging.FileHandler(csvfile)  # File handler for csv logger
+        csvlogger.addHandler(csv_handler)           # Add file handler to csvlogger
+        csvlogger.propagate = False                 # Prevent propagation to the root logger
+
+        # Configure xyzlogger to only write to outfile without stdout
+        xyzlogger = logging.getLogger('xyzlogger')
+        xyzlogger.setLevel(logging.INFO)
+        out_handler = logging.FileHandler(outfile)  # File handler for out logger
+        xyzlogger.addHandler(out_handler)           # Add file handler to xyzlogger
+        xyzlogger.propagate = False                 # Prevent propagation to the root logger
+
+    else:
+        logfile = "EvaluateLogger"
+
+        # Set up a dummy logger that does nothing
+        dummylogger = logging.getLogger("DummyLogger")
+        dummylogger.addHandler(logging.NullHandler())
+        dummylogger.setLevel(logging.CRITICAL)  # Set a high level so nothing gets logged
+        metricslogger = dummylogger
+        csvlogger = dummylogger
+        xyzlogger = dummylogger
+    
+    # Set up the main logger to log at INFO level
+    logger = logging.getLogger(logfile)
+    logger.setLevel(logging.INFO)
+
+    return logger, metricslogger, csvlogger, xyzlogger
+
 def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
@@ -48,7 +109,6 @@ def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], 
 
         for callback in batch_callbacks:
             callback(batch_index, **kwargs)
-
 
 def load_model(model: Union[str, Path], device="cpu"):
     if isinstance(model, str):
@@ -146,12 +206,16 @@ def main(args=None, running_as_script: bool = True):
         type=bool,
         default=False,
     )
-    # parser.add_argument(
-    #     "--log",
-    #     help="log file to store all the metrics and screen logging.debug",
-    #     type=Path,
-    #     default=None,
-    # )
+    parser.add_argument(
+        "--log",
+        help="Use this flag to log all inference results. This creates 4 files inside a logs/[DATETIME] folder: "
+             "\n-- log -- contains the logs that are printed also on std with info on evaaluation script"
+             "\n-- metrics.csv -- contains the metrics evaluation on each chunk of each batch of the test dataset"
+             "\n-- out.csv -- contains predicted and target value for each node in test set graphs"
+             "\n-- out.xyz -- contains xyz formatted file of molecules in test set, together with inferenced outputs",
+        default=False,
+        action='store_true',
+    )
     # parser.add_argument(
     #     "--output",
     #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
@@ -184,47 +248,7 @@ def main(args=None, running_as_script: bool = True):
     args = parser.parse_args(args=args)
 
     # Logging
-    from geqtrain.utils import Output
-        
-    # Initialize Output with specified settings
-    output = Output.get_output(dict(
-        root='./logs',
-        run_name=time.strftime("%Y%m%d-%H%M%S"),
-        append=False,
-        screen=False,
-        verbose="info",
-    ))
-
-    # Open the log files
-    logfile = output.open_logfile('log', propagate=True)
-    metricsfile = output.open_logfile('metrics.csv', propagate=True)
-    csvfile = output.open_logfile('out.csv', propagate=True)
-    outfile = output.open_logfile('out.xyz', propagate=True)
-    
-    # Set up the main logger to log at INFO level
-    logger = logging.getLogger(logfile)
-    logger.setLevel(logging.INFO)
-
-    # Configure metricslogger to only write to csvfile without stdout
-    metricslogger = logging.getLogger('metricslogger')
-    metricslogger.setLevel(logging.INFO)
-    metrics_handler = logging.FileHandler(metricsfile)  # File handler for csv logger
-    metricslogger.addHandler(metrics_handler)           # Add file handler to metricslogger
-    metricslogger.propagate = False                 # Prevent propagation to the root logger
-
-    # Configure csvlogger to only write to csvfile without stdout
-    csvlogger = logging.getLogger('csvlogger')
-    csvlogger.setLevel(logging.INFO)
-    csv_handler = logging.FileHandler(csvfile)  # File handler for csv logger
-    csvlogger.addHandler(csv_handler)           # Add file handler to csvlogger
-    csvlogger.propagate = False                 # Prevent propagation to the root logger
-
-    # Configure xyzlogger to only write to outfile without stdout
-    xyzlogger = logging.getLogger('xyzlogger')
-    xyzlogger.setLevel(logging.INFO)
-    out_handler = logging.FileHandler(outfile)  # File handler for out logger
-    xyzlogger.addHandler(out_handler)           # Add file handler to xyzlogger
-    xyzlogger.propagate = False                 # Prevent propagation to the root logger
+    logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
 
     # Do the defaults:
     dataset_is_from_training: bool = False
@@ -287,6 +311,7 @@ def main(args=None, running_as_script: bool = True):
 
     # Load model
     model, config = load_model(args.model, device=args.device)
+    logger.info(f"\nUsing Model: {args.model}\n")
 
     # Load config file
     logger.info(
@@ -390,15 +415,15 @@ def main(args=None, running_as_script: bool = True):
         batch_metrics = metrics(pred=out, ref=ref_data)
 
         mat_str = f"{batch_index}, {chunk_index}"
-        header = "batch, chunk"
+        header = "batch,chunk"
         flatten_metrics, skip_keys = metrics.flatten_metrics(
             metrics=batch_metrics,
             metrics_metadata=metrics_metadata,
         )
 
         for key, value in flatten_metrics.items(): # log metrics
-            mat_str += f", {value:16.5g}"
-            header += f", {key}"
+            mat_str += f",{value:16.5g}"
+            header += f",{key}"
         
         if pbar.n == 0:
             metricslogger.info(header)
@@ -418,11 +443,11 @@ def main(args=None, running_as_script: bool = True):
             # Initialize lines list for CSV format
             lines = []
             if pbar.n == 0:
-                lines.append("dataset_id, batch, chunk, node_type, pred, ref")
+                lines.append("dataset_id,batch,chunk,node_type,pred,ref")
 
             if node_output is not None and ref_node_output is not None:
                 for _node_type, _node_output, _ref_node_output in zip(node_type, node_output, ref_node_output):
-                    lines.append(f"{dataset_id:6}, {batch_index:6}, {chunk_index:4}, {_node_type.item():6}, {_node_output.item():10.4f}, {_ref_node_output.item():10.4f}")
+                    lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output.item():10.4f}")
 
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
