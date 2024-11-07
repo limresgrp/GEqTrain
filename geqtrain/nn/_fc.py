@@ -6,7 +6,7 @@ from typing import List, Optional
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
+from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule
 from geqtrain.utils import add_tags_to_parameters
 
 
@@ -19,6 +19,8 @@ def select_nonlinearity(nonlinearity):
         non_lin_instance = torch.nn.SELU()
     elif nonlinearity == "relu":
         non_lin_instance = torch.nn.ReLU()
+    elif nonlinearity == "swiglu":
+        non_lin_instance = SwiGLUModule()
     elif nonlinearity:
         raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
     return non_lin_instance
@@ -116,6 +118,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "ssp": ShiftedSoftPlusModule,
             "selu": torch.nn.functional.selu,
             "relu": torch.nn.functional.relu,
+            "swiglu": SwiGLUModule,
         }[mlp_nonlinearity]
 
         nonlin_const = 1.0
@@ -124,22 +127,27 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 nonlin_const = normalize2mom(ShiftedSoftPlus).cst
             elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu":
                 nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
-            else:
+            elif mlp_nonlinearity == "silu":
                 nonlin_const = normalize2mom(nonlinearity).cst
 
         if bias is not None:
             has_bias = True
 
         sequential_dict = OrderedDict()
-
         if self.use_layer_norm:
             sequential_dict['norm'] = torch.nn.LayerNorm(dimensions[0])
 
         for layer_index, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
+
             bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
-            lin_layer = torch.nn.Linear(h_in, h_out, bias=bias_condition)
 
             is_last_layer = layer_index == num_layers - 1
+
+            if mlp_nonlinearity == "swiglu" and not is_last_layer:
+                h_out = 2*h_out
+
+            lin_layer = torch.nn.Linear(h_in, h_out, bias=bias_condition)
+
             if (nonlinearity is None) or is_last_layer:
                 norm_const = 1.
                 modules = [(f"linear_{layer_index}", lin_layer)]
