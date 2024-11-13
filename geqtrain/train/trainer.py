@@ -155,6 +155,7 @@ def run_inference(
 
     if noise is not None:
         input_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        input_data[AtomicDataDict.POSITIONS_KEY] += input_data[AtomicDataDict.NOISE]
 
     with cm, precision:
         out = model(input_data)
