@@ -58,7 +58,7 @@ def NodeModel(
                     output_mul="hidden",
                 ),
             ),
-            "pooling": (
+            "edge_pooling": (
                 EdgewiseReduce,
                 dict(
                     field=AtomicDataDict.EDGE_FEATURES_KEY,
