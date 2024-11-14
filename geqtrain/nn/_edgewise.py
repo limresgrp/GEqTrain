@@ -101,6 +101,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
+        assert num_nodes == data['pos'].shape[0]
 
         if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])
@@ -118,7 +119,5 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         # aggregation step
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
-        if not self.use_attention:
-            data[self.out_field] *= self.env_sum_normalization
-
+        if not self.use_attention: data[self.out_field] *= self.env_sum_normalization
         return data
