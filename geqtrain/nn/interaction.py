@@ -111,9 +111,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
         assert (env_embed_irreps[0].ir == SCALAR), "env_embed_irreps must start with scalars"
 
-        out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
         # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
         if out_irreps is None: out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
+        else: out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
 
         # - [optional] filter out_irreps l degrees
         if output_ls is None: output_ls = out_irreps.ls
@@ -122,7 +122,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # [optional] set out_irreps multiplicity
         if output_mul is None: output_mul = out_irreps[0].mul
         if isinstance(output_mul, str):
-            if output_mul == 'hidden': output_mul = self.latent_dim
+            if output_mul == 'hidden':
+                output_mul = self.latent_dim
 
         out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls]) # always keep the l=0, even if your desired out is l>0
         self.out_multiplicity = output_mul
@@ -458,6 +459,7 @@ class InteractionLayer(torch.nn.Module):
                 mlp_output_dimension=self.latent_dim,
             )
 
+        self.post_norm = torch.nn.LayerNorm(self.latent_dim)
         # the env embed MLP takes the last latent's output as input and outputs enough weights for the env embedder
         self.env_embed_mlp = env_embed(
           mlp_input_dimension=self.latent_dim,
@@ -515,6 +517,7 @@ class InteractionLayer(torch.nn.Module):
 
         # Compute latents
         new_latents = self.latent_mlp(inv_latent_cat)
+        new_latents = self.post_norm(new_latents)
         # Apply cutoff, which propagates through to everything else
         new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
 
