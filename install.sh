@@ -8,6 +8,7 @@ choose_cuda_version() {
     echo "3) CUDA 11.8 (cu118)"
     echo "4) CUDA 12.1 (cu121)"
     echo "5) CUDA 12.4 (cu124)"
+    echo "6) pytorch 2.5 CUDA 11.8 (cu118)"
 
     echo
     read -p "Enter the number corresponding to your CUDA version: " choice
@@ -42,6 +43,12 @@ choose_cuda_version() {
             TORCH_VERSION="2.4.0"
             TORCH_URL="https://download.pytorch.org/whl/cu124"
             SCATTER_URL="https://data.pyg.org/whl/torch-2.4.0+cu124.html"
+            ;;
+        6)
+            CUDA_VERSION="cu118"
+            TORCH_VERSION="2.5.1"
+            TORCH_URL="https://download.pytorch.org/whl/cu118"
+            SCATTER_URL="https://data.pyg.org/whl/torch-2.5.1+cu118.html"
             ;;
         *)
             echo "Invalid choice. Exiting."
