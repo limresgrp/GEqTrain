@@ -45,7 +45,7 @@ def GlobalNodeModel(
                     edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
                     out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                     out_irreps=None,
-                    output_ls=[0],
+                    output_ls=[0], # todo: only scalars supported in *first* interaction module atm
                 ),
             ),
             "local_pooling": (
