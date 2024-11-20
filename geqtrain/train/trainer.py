@@ -154,8 +154,8 @@ def run_inference(
             ref_data[f"{slices_key}_slices"] = val
 
     if noise is not None:
-        input_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
-        input_data[AtomicDataDict.POSITIONS_KEY] += input_data[AtomicDataDict.NOISE]
+        ref_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE]
 
     with cm, precision:
         out = model(input_data)
