@@ -114,6 +114,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
         if out_irreps is None: out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
         else: out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+        if 0 not in out_irreps.ls: # add scalar (l=0) if missing from out_irreps
+            out_irreps = o3.Irreps([(mul, o3.Irrep('0e')) for mul, _ in out_irreps[:1]]) + out_irreps
 
         # - [optional] filter out_irreps l degrees
         if output_ls is None: output_ls = out_irreps.ls
