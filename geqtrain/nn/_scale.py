@@ -60,13 +60,15 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
             self.per_type_std = None
         
         # check and init irreps
+        irreps_out = func.irreps_out
+        irreps_out.update({self.out_field: Irreps("0e")})
         self._init_irreps(
             irreps_in=func.irreps_in,
             my_irreps_in={
                 AtomicDataDict.POSITIONS_KEY: Irreps("1o"),
                 self.field: Irreps("0e"),
                 },
-            irreps_out={self.out_field: Irreps("0e")},
+            irreps_out=irreps_out,
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
