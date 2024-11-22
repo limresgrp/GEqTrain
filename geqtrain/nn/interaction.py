@@ -118,8 +118,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_irreps = o3.Irreps([(mul, o3.Irrep('0e')) for mul, _ in out_irreps[:1]]) + out_irreps
 
         # - [optional] filter out_irreps l degrees
-        if output_ls is None: output_ls = out_irreps.ls
+        if output_ls is None:
+            output_ls = out_irreps.ls + [0] 
         assert isinstance(output_ls, List)
+        assert all([(l in input_edge_eq_irreps.ls) for l in output_ls]), \
+            f"Required output ls {output_ls} cannot be computed using l_max={max(input_edge_eq_irreps.ls)}"
 
         # [optional] set out_irreps multiplicity
         if output_mul is None: output_mul = out_irreps[0].mul
@@ -127,7 +130,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if output_mul == 'hidden':
                 output_mul = self.latent_dim
 
-        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in [0] + output_ls]) # always keep the l=0, even if your desired out is l>0
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in input_edge_eq_irreps if ir.l in output_ls])
         self.out_multiplicity = output_mul
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges (possibly embedded)
