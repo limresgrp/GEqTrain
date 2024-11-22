@@ -83,7 +83,7 @@ def init_logger(log: bool):
 
     return logger, metricslogger, csvlogger, xyzlogger
 
-def infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[], batch_callbacks=[], **kwargs):
+def infer(dataloader, model, device, per_node_outputs_keys=[], chunk_callbacks=[], batch_callbacks=[], **kwargs):
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
