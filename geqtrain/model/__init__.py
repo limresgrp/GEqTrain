@@ -1,3 +1,4 @@
+from .init_utils import update_config
 from ._node_model import NodeModel
 from ._graph_model import GraphModel
 from ._global_graph_model import GlobalGraphModel
@@ -12,6 +13,7 @@ from ._weight_init import (
 from ._build import model_from_config
 
 __all__ = [
+    update_config,
     NodeModel,
     GraphModel,
     GlobalGraphModel,
