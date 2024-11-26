@@ -550,8 +550,10 @@ class Trainer:
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
-            'dampen': {'lr': self.learning_rate * 1.e-1},
-            'nowd':   {'weight_decay': 0.},
+            'dampen':       {'lr': self.learning_rate * 1.e-1},
+            'strengthen':   {'lr': self.learning_rate * 1.e1},
+            'strengthen2x': {'lr': self.learning_rate * 1.e2},
+            'nowd':         {'weight_decay': 0.},
         }
 
         def merge_groups(param, param_groups):
@@ -573,7 +575,7 @@ class Trainer:
             optim_groups.append(group)
 
         # parsing params to build optim groups
-        # atm only ['nowd', 'dampen'] are handled
+        # atm only ['nowd', 'dampen', 'strengthen', 'strengthen2x'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
@@ -935,6 +937,7 @@ class Trainer:
         self.logger.info(f"Number of weights: {self.num_weights}")
         self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
         self.init_objects()
+        self.init_losses()
         self._initialized = True
         self.cumulative_wall = 0
 
@@ -1306,7 +1309,6 @@ class Trainer:
         for callback in self._end_of_epoch_callbacks:
             callback(self)
 
-
     def end_of_batch_log(self, batch_type: str):
         """
         store all the loss/mae of each batch
@@ -1642,6 +1644,21 @@ class Trainer:
             sampler=validation_sampler,
             **dl_kwargs,
         )
+    
+    def init_losses(self):
+
+        def _init(loss_func):
+            init_loss = getattr(loss_func, "init_loss", None)
+            if callable(init_loss):
+                num_data = 0
+                for ds in self.dataset_train:
+                    num_data += len(ds[AtomicDataDict.POSITIONS_KEY])
+                init_loss(self.model, num_data)
+        
+        for loss_func in self.loss.funcs.values():
+            _init(loss_func)
+        for loss_func in self.metrics.funcs.values():
+            _init(loss_func)
 
 
 class TrainerWandB(Trainer):
