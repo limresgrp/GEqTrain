@@ -15,7 +15,7 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets
+from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
@@ -407,6 +407,9 @@ def main(args=None, running_as_script: bool = True):
         batch_size=args.batch_size,
     )
 
+    for loss_func in metrics.funcs.values():
+        _init(loss_func, dataset_test, model)
+
     # run inference
     logger.info("Starting...")
 
@@ -434,51 +437,55 @@ def main(args=None, running_as_script: bool = True):
     def out_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
 
         def format_csv(data, ref_data, batch_index, chunk_index):
-            # Extract fields from data
-            node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-            dataset_id = data["dataset_id"].item()  # Scalar
-            node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
-            ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+            try:
+                # Extract fields from data
+                node_type = data[AtomicDataDict.NODE_TYPE_KEY]
+                dataset_id = data["dataset_id"].item()  # Scalar
+                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+                ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
 
-            # Initialize lines list for CSV format
-            lines = []
-            if pbar.n == 0:
-                lines.append("dataset_id,batch,chunk,node_type,pred,ref")
+                # Initialize lines list for CSV format
+                lines = []
+                if pbar.n == 0:
+                    lines.append("dataset_id,batch,chunk,node_type,pred,ref")
 
-            if node_output is not None and ref_node_output is not None:
-                for _node_type, _node_output, _ref_node_output in zip(node_type, node_output, ref_node_output):
-                    lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output.item():10.4f}")
-
+                if node_output is not None and ref_node_output is not None:
+                    for _node_type, _node_output, _ref_node_output in zip(node_type, node_output, ref_node_output):
+                        lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output.item():10.4f}")
+            except:
+                return ''
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
         
         def format_xyz(data, ref_data):
-            # Extract fields from data
-            pos = data[AtomicDataDict.POSITIONS_KEY]
-            node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-            dataset_id = data["dataset_id"].item()  # Scalar
-            node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
-            ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+            try:
+                # Extract fields from data
+                pos = data[AtomicDataDict.POSITIONS_KEY]
+                node_type = data[AtomicDataDict.NODE_TYPE_KEY]
+                dataset_id = data["dataset_id"].item()  # Scalar
+                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+                ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
 
-            n_atoms = pos.shape[0]
+                n_atoms = pos.shape[0]
 
-            # Initialize lines list for XYZ format
-            lines = []
+                # Initialize lines list for XYZ format
+                lines = []
 
-            # Line 1: Number of atoms
-            lines.append(f"{n_atoms}")
+                # Line 1: Number of atoms
+                lines.append(f"{n_atoms}")
 
-            # Line 2: Header line (dataset_id)
-            lines.append(f"DatasetID={dataset_id}")
+                # Line 2: Header line (dataset_id)
+                lines.append(f"DatasetID={dataset_id}")
 
-            # Lines 3+: Atom lines with node_type, x, y, z, node_output
-            for i in range(n_atoms):
-                atom_name = str(node_type[i].item())  # Convert node_type to string for atom name
-                x, y, z = pos[i].tolist()  # Get coordinates
-                output = node_output[i].item() if node_output is not None else ''  # Extract scalar from tensor
-                ref_output = ref_node_output[i].item() if ref_node_output is not None else ''  # Extract scalar from tensor
-                lines.append(f"{atom_name:6} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f}")
-
+                # Lines 3+: Atom lines with node_type, x, y, z, node_output
+                for i in range(n_atoms):
+                    atom_name = str(node_type[i].item())  # Convert node_type to string for atom name
+                    x, y, z = pos[i].tolist()  # Get coordinates
+                    output = node_output[i].item() if node_output is not None else ''  # Extract scalar from tensor
+                    ref_output = ref_node_output[i].item() if ref_node_output is not None else ''  # Extract scalar from tensor
+                    lines.append(f"{atom_name:6} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f}")
+            except:
+                return ''
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
 

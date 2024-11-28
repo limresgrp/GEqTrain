@@ -234,7 +234,7 @@ class AtomicData(Data):
             if AtomicDataDict.BATCH_KEY in self and self.batch is not None:
                 assert self.batch.dim() == 2 and self.batch.shape[0] == self.num_nodes
             if AtomicDataDict.CELL_KEY in self and self.cell is not None:
-                assert self.cell.shape == (3, 3)
+                assert self.cell.shape == (3, 3), f"Wrong Cell shape: {self.cell.shape}"
 
             # Validate irreps
             # __*__ is the only way to hide from torch_geometric

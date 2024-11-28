@@ -280,6 +280,14 @@ def prepare_chunked_input_data(
 
     return input_data, batch_chunk, batch_chunk_center_nodes
 
+def _init(loss_func, dataset, model):
+    init_loss = getattr(loss_func, "init_loss", None)
+    if callable(init_loss):
+        num_data = 0
+        for ds in dataset:
+            num_data += len(ds[AtomicDataDict.POSITIONS_KEY])
+        init_loss(model, num_data)
+
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
 
@@ -552,7 +560,6 @@ class Trainer:
         param_groups_dict = {
             'dampen':       {'lr': self.learning_rate * 1.e-1},
             'strengthen':   {'lr': self.learning_rate * 1.e1},
-            'strengthen2x': {'lr': self.learning_rate * 1.e2},
             'nowd':         {'weight_decay': 0.},
         }
 
@@ -565,22 +572,31 @@ class Trainer:
 
         # Function to merge a parameter with an existing group or create a new one
         def merge_or_create_group(optim_groups: List[Dict], group: Dict):
-            # Try to find an existing group with the same keys
-            for optim_group in optim_groups:
+
+            def merge_group(group, optim_group):
                 if optim_group.keys() == group.keys():
                     if all([optim_group[key] == group[key] for key in optim_group.keys() if key != 'params']):
                         optim_group['params'].extend(group['params'])  # Append params if found
+                        return True
+                return False
+
+            # Try to find an existing group with the same keys
+            for optim_group in optim_groups:
+                if merge_group(group, optim_group):
                     return
+                
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
         # parsing params to build optim groups
-        # atm only ['nowd', 'dampen', 'strengthen', 'strengthen2x'] are handled
+        # atm only ['nowd', 'dampen', 'strengthen'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
             if getattr(p, 'tags', None) is not None:
                 for tag in getattr(p, 'tags'):
+                    if tag == 'strengthen':
+                        pass
                     param_groups.append(tag)
             if p.dim()<2:
                 param_groups.append('nowd')
@@ -1646,19 +1662,10 @@ class Trainer:
         )
     
     def init_losses(self):
-
-        def _init(loss_func):
-            init_loss = getattr(loss_func, "init_loss", None)
-            if callable(init_loss):
-                num_data = 0
-                for ds in self.dataset_train:
-                    num_data += len(ds[AtomicDataDict.POSITIONS_KEY])
-                init_loss(self.model, num_data)
-        
         for loss_func in self.loss.funcs.values():
-            _init(loss_func)
+            _init(loss_func, self.dataset_train, self.model)
         for loss_func in self.metrics.funcs.values():
-            _init(loss_func)
+            _init(loss_func, self.dataset_train, self.model)
 
 
 class TrainerWandB(Trainer):
