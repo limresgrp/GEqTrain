@@ -40,6 +40,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         field: str,
         out_field: Optional[str] = None,
         out_irreps: Union[o3.Irreps, str] = None,
+        strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
         eq_has_internal_weights: bool = False,
@@ -163,12 +164,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     pad_to_alignment=1,
             )
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
-        else:
+        elif strict_irreps:
             assert in_irreps.dim == self.n_scalars_in, (
                     f"Module input contains features with irreps that are not scalars ({in_irreps}). " +
                     f"However, the irreps of the output is composed of scalars only ({out_irreps}). "   +
                     "Please remove non-scalar features from the input, which otherwise would remain unused." +
-                    f"If features come from InteractionModule, you can add the parameter 'output_ls=[0]' in the constructor"
+                    f"If features come from InteractionModule, you can add the parameter 'output_ls=[0]' in the constructor." +
+                    "If you want to allow this behavior, set 'strict_irreps=False'."
                 )
             self.reshape_in = None
 

@@ -52,6 +52,10 @@ NODE_OUTPUT_KEY: Final[str] = "node_output"
 
 # [n_edges, dim] (possibly equivariant) edge input attributes
 EDGE_ATTRS_KEY: Final[str] = "edge_attrs" # look at difference between NODE_ATTRS_KEY and NODE_FEATURES_KEY
+# [n_edges, dim] (possibly equivariant) features of the edges
+EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
+# [n_edges, dim] (possibly equivariant) output features of the edges
+EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 # [n_edges, 3] tensor of displacement vectors associated to edges
 EDGE_VECTORS_KEY: Final[str] = "edge_vectors"
 # [n_edges] tensor of the lengths of EDGE_VECTORS
@@ -60,14 +64,12 @@ EDGE_LENGTH_KEY: Final[str] = "edge_lengths"
 EDGE_ANGULAR_ATTRS_KEY: Final[str] = "edge_angular_attrs"
 # [n_edges, dim] invariant radial attributes of the edges
 EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
-# [n_edges, dim] (possibly equivariant) features of the edges
-EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
-# [n_edges, dim] (possibly equivariant) output features of the edges
-EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 
 # [n_graphs, dim] invariant graph input attributes
 GRAPH_ATTRS_KEY: Final[str] = "graph_attrs"
-# [n_graphs, dim] (possibly equivariant) output feature of graph
+# [n_graphs, dim] (possibly equivariant) graph features of graph
+GRAPH_FEATURES_KEY: Final[str] = "graph_features"
+# [n_graphs, dim] (possibly equivariant) output features of graph
 GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
 
 NOISE: Final[str] = "noise"

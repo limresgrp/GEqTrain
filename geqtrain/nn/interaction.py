@@ -79,7 +79,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Graph conditioning
         graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
         # Other:
-        irreps_in=None,
+        irreps_in = None,
     ):
         super().__init__()
         assert (num_layers >= 1)
@@ -193,16 +193,21 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # - Start Interaction Layers - #
         self.interaction_layers = torch.nn.ModuleList([])
         self._tp_n_scalar_outs: List[int] = []
-        self._features_n_scalar_outs: List[int] = []
 
         for layer_index, tps_irreps in enumerate(zip(tps_irreps_in, tps_irreps_out)):
+            is_last_layer = layer_index == self.num_layers - 1
             self.interaction_layers.append(
                 InteractionLayer(
                     layer_index=layer_index,
+                    is_last_layer=is_last_layer,
                     parent=self,
                     env_embed_irreps=env_embed_irreps,
                     tps_irreps=tps_irreps,
-                    linear_out_irreps=out_irreps if layer_index == self.num_layers - 1 else env_embed_irreps,
+                    linear_out_irreps=(
+                        o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
+                        if is_last_layer
+                        else env_embed_irreps
+                    ),
                     product_correlation=product_correlation,
                     previous_latent_dim=self.interaction_layers[-1].latent_mlp.out_features if layer_index > 0 else None,
                     graph_conditioning_field=graph_conditioning_field,
@@ -221,7 +226,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Equivariant out features
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
         self.has_scalar_output, self.final_latent_mlp, self.final_readout_mlp = False, None, None
-        if self._features_n_scalar_outs[layer_index] > 0:
+        self.out_n_scalars = out_irreps.count(SCALAR) // self.out_multiplicity
+        if self.out_n_scalars > 0:
             self.has_scalar_output = True
             # Invariant out features
             self.final_latent_mlp = latent(
@@ -236,7 +242,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             self.final_readout_mlp = latent(
                 mlp_input_dimension=self.latent_dim,
-                mlp_output_dimension=self.out_multiplicity * self._features_n_scalar_outs[layer_index],
+                mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
             )
 
         # - End build modules - #
@@ -295,20 +301,17 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 this_layer_update_coeff=layer_update_coefficients[layer_index - 1] if layer_index > 0 else None,
             )
 
-        # - final layer - #
-        features_n_scalars = self._features_n_scalar_outs[layer_index]
+        # --- final layer --- #
 
         # - Output equivariant values - #
         if eq_features is not None:
-            out_features[..., features_n_scalars:] = eq_features[..., features_n_scalars:]
+            out_features[..., self.out_n_scalars:] = eq_features
         out_features = self.reshape_back_features(out_features)
 
+        # - Output invariant values - #
         if self.has_scalar_output:
-            # - Output invariant values - #
             cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
-            # - Compute latents - #
             new_latents = self.final_latent_mlp(inv_latent_cat)
-            # Apply cutoff, which propagates through to everything else
             new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
             coefficient_old = torch.rsqrt(layer_update_coefficients[layer_index].square() + 1)
             coefficient_new = layer_update_coefficients[layer_index] * coefficient_old
@@ -318,7 +321,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 active_edges,
                 coefficient_new * new_latents,
             )
-            out_features[..., :self.out_multiplicity * features_n_scalars] = self.final_readout_mlp(latents)
+            out_features[..., :self.out_multiplicity * self.out_n_scalars] = self.final_readout_mlp(latents)
 
         data[self.out_field] = out_features
         return data
@@ -329,6 +332,7 @@ class InteractionLayer(torch.nn.Module):
     def __init__(
         self,
         layer_index: int,
+        is_last_layer: bool,
         parent: InteractionModule,
         env_embed_irreps: o3.Irreps,
         tps_irreps: Tuple[o3.Irreps],
@@ -344,6 +348,7 @@ class InteractionLayer(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.layer_index = layer_index
+        self.is_last_layer = is_last_layer
         self.env_embed_multiplicity = parent.env_embed_multiplicity
         self.latent_dim = parent.latent_dim
         self.head_dim = parent.head_dim
@@ -427,15 +432,12 @@ class InteractionLayer(torch.nn.Module):
                 mlp_nonlinearity=None,
             )
 
-        _features_n_scalar_outs = linear_out_irreps.count(SCALAR) // linear_out_irreps[0].mul
-        parent._features_n_scalar_outs.append(_features_n_scalar_outs)
-
         self.linear = Linear(
-            full_out_irreps,
+            o3.Irreps([(mul, ir) for mul, ir in full_out_irreps if ir.l in linear_out_irreps.ls]),
             linear_out_irreps,
             internal_weights=True,
             shared_weights=True,
-        ) if len(set(linear_out_irreps.ls)) != 1 else None
+        ) if len(set(linear_out_irreps.ls)) > 0 else None
 
         if self.layer_index == 0:
             assert previous_latent_dim is None
@@ -624,12 +626,13 @@ class InteractionLayer(torch.nn.Module):
         # Get invariants
         # features has shape [z][mul][k]
         # we know scalars are first
-        scalars = self.rearrange_scalars(eq_features[:, :, :self.tp_n_scalar_out])
+        scalars, equivariant = torch.split(eq_features, [self.tp_n_scalar_out, eq_features.size(-1) - self.tp_n_scalar_out], dim=-1)
+        scalars = self.rearrange_scalars(scalars)
 
         inv_latent = torch.cat([latents, scalars],dim=-1)
 
         if self.linear is None: return latents, inv_latent, None
 
         # do the linear for eq. features
-        eq_features = self.linear(eq_features)
+        eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         return latents, inv_latent, eq_features
