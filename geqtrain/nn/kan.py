@@ -23,11 +23,11 @@ class KANLinear(torch.nn.Module):
         self,
         in_features,
         out_features,
-        grid_size=16,
-        spline_order=3,
-        scale_noise=0.1,
-        grid_eps=0.1,
-        grid_range=[-4, 4],
+        grid_size,
+        spline_order,
+        scale_noise,
+        grid_eps,
+        grid_range,
     ):
         super(KANLinear, self).__init__()
         self.in_features = in_features
@@ -60,21 +60,14 @@ class KANLinear(torch.nn.Module):
 
     def reset_parameters(self):
         with torch.no_grad():
-            noise = (
-                (
-                    torch.rand(self.grid_size + 1, self.in_features, self.out_features)
-                    - 1 / 2
-                )
-                * self.scale_noise
-                / self.grid_size
-            )
+            noise = (torch.rand(self.grid_size + 1, self.in_features, self.out_features) - 1 / 2) * self.scale_noise / self.grid_size
             self.spline_weight.data.copy_(
                 self.curve2coeff(
                     self.grid.T[self.spline_order : -self.spline_order],
                     noise,
                 )
             )
-            self.spline_weight.data = self.spline_weight.data / self.spline_weight.data.std().pow(2/3)
+            self.spline_weight.data = self.spline_weight.data / self.spline_weight.data.std()#.pow(1/3)
             torch.nn.init.kaiming_uniform_(self.spline_scaler, a=1./math.sqrt(self.in_features))
 
     def b_splines(self, x: torch.Tensor):
@@ -247,7 +240,7 @@ class KAN(torch.nn.Module):
         spline_order=3,
         scale_noise=0.1,
         grid_eps=0.1,
-        grid_range=[-4, 4],
+        grid_range=[-1., 1.],
         use_layer_norm: bool = False,
         has_bias: bool = False,
         bias: Optional[List] = None,
