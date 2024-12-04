@@ -161,9 +161,18 @@ class Metrics(Loss):
 
             params = {}
             if per_species:
-                params = {
-                    "accumulate_by": ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-                }
+                num_pred_nodes = len(error)
+                node_idcs = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+                num_nudes = len(node_idcs)
+                if num_pred_nodes == num_nudes: # All nodes have a prediction
+                    params = {
+                        "accumulate_by": node_idcs
+                    }
+                else: # Only nodes for which target is not NaN were predicted
+                    params = {
+                        "accumulate_by": node_idcs[torch.unique(ref[AtomicDataDict.EDGE_INDEX_KEY][0])]
+                    }
+
             elif per_label:
                 params = {
                     "accumulate_by": torch.cat(len(ref[clean_key]) * [
