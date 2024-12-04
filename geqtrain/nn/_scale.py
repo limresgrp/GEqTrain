@@ -70,8 +70,6 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
         self.irreps_out.update({self.out_field: Irreps("0e")})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = self.func(data)
-
         edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
         node_features = data[self.field]
