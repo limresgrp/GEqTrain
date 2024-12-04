@@ -2,7 +2,7 @@ from typing import Optional, Union, List
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
-from geqtrain.data import AtomicDataDict
+from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
@@ -190,6 +190,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
         self.out_irreps_dim = self.out_irreps.dim
 
+        self.act_on_nodes = self.field in _NODE_FIELDS
+
         if dampen:
             add_tags_to_parameters(self, 'dampen')
 
@@ -203,19 +205,24 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             device=features.device
         )
 
+        if self.act_on_nodes:
+            active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        else:
+            active_nodes = torch.arange(len(features), device=features.device)
+
         if self.has_invariant_output: # invariant output may be present or not
-            out_features[:, :self.n_scalars_out] += self.inv_readout(features[:, :self.n_scalars_in]) # normal mlp on scalar component (if any)
+            out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
 
         # vectorial handling
         if self.has_equivariant_output and self.reshape_in is not None:
-            eq_features = self.reshape_in(features[:, self.n_scalars_in:])
+            eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
             if self.eq_has_internal_weights: # eq linear layer with its own inner weights
                 eq_features = self.eq_readout(eq_features)
             else:
                 # else the weights are computed via mlp using scalars
-                weights = self.weights_emb(features[:, :self.n_scalars_in])
+                weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
                 eq_features = self.eq_readout(eq_features, weights)
-            out_features[:, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
+            out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
 
         if self.resnet:
             assert self._resnet_update_coeff is not None
