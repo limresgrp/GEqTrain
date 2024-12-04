@@ -56,16 +56,31 @@ def get_latest_lr(optimizer, model, param_name: str) -> float:
                 return param_group['lr']
     raise ValueError(f"Parameter {param_name} not found in optimizer.")
 
-def remove_node_centers_for_NaN_targets(
+def remove_node_centers_for_NaN_targets_and_edges(
     dataset: AtomicInMemoryDataset,
     loss_func: Loss,
     keep_node_types: Optional[List[str]] = None,
+    exclude_node_types_from_edges: Optional[List[str]] = None,
 ):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
         node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
     else:
         node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+    
+    def get_node_types_mask(node_types, filter, data):
+        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
+
+    def update_edge_index(data, edge_filter: torch.Tensor):
+        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
+        new_edge_index_slices = [0]
+        for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
+            new_edge_index_slices.append(edge_filter[:slice_to].sum())
+        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
+        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
+            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
+
     # - Remove edges of atoms whose result is NaN - #
     per_node_outputs_keys = []
     if loss_func is not None:
@@ -76,26 +91,25 @@ def remove_node_centers_for_NaN_targets(
                     continue
                 if key_clean in data:
                     if keep_node_types is not None:
-                        remove_node_types_mask_single_batch_elem = ~torch.isin(node_types.flatten(), keep_node_types.cpu())
-                        remove_node_types_mask = remove_node_types_mask_single_batch_elem.repeat(data.__num_graphs__)
+                        remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
                         data[key_clean][remove_node_types_mask] = torch.nan
                     val: torch.Tensor = data[key_clean]
                     if val.dim() == 1:
                         val = val.reshape(len(val), -1)
 
                     not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
-                    data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    new_edge_index_slices = [0]
-                    for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
-                        new_edge_index_slices.append(not_nan_edge_filter[:slice_to].sum())
-                    data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=val.device)
-                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-                        data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
-                        data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
+                    update_edge_index(data, not_nan_edge_filter)
                     per_node_outputs_keys.append(key_clean)
+    
+    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
+    if exclude_node_types_from_edges is not None:
+        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
+        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+        update_edge_index(data, keep_edges_filter)
 
     if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
         return None, per_node_outputs_keys
+
     dataset.data = data
     return dataset, per_node_outputs_keys
 
@@ -385,6 +399,8 @@ class Trainer:
         type_names: Optional[List[str]] = None,
         keep_type_names: Optional[List[str]] = None,
         keep_node_types: Optional[List[int]] = None,
+        exclude_type_names_from_edges: Optional[List[str]] = None,
+        exclude_node_types_from_edges: Optional[List[int]] = None,
         metrics_components: Optional[Union[dict, str]] = None,
         metrics_key: str = f"{VALIDATION}_" + ABBREV.get(LOSS_KEY, LOSS_KEY),
         early_stopping: Optional[Callable] = None,
@@ -407,7 +423,7 @@ class Trainer:
         dataloader_num_workers: int = 0,
         train_idcs: Optional[Union[List, List[List]]] = None,
         val_idcs: Optional[Union[List, List[List]]] = None,
-        train_val_split: str = "random",
+        train_val_split: str = "random", # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
@@ -490,7 +506,13 @@ class Trainer:
         if self.keep_type_names is not None:
             self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
         if self.keep_node_types is not None:
-            self.keep_node_types = torch.tensor(self.keep_node_types, device=self.torch_device)
+            self.keep_node_types = torch.as_tensor(self.keep_node_types, device=self.torch_device)
+        
+        # --- exclude edges from center node to specified node types
+        if self.exclude_type_names_from_edges is not None:
+            self.exclude_node_types_from_edges = torch.tensor(find_matching_indices(self.type_names, exclude_type_names_from_edges))
+        if self.exclude_node_types_from_edges is not None:
+            self.exclude_node_types_from_edges = torch.as_tensor(self.exclude_node_types_from_edges, device=self.torch_device)
 
         # --- sort out all the other parameters
         # for samplers, optimizer and scheduler
@@ -1613,7 +1635,7 @@ class Trainer:
         indexed_datasets_train = []
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
             _dataset = _dataset.index_select(train_idcs)
-            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
             if self.per_node_outputs_keys is None:
                 self.per_node_outputs_keys = per_node_outputs_keys
             if _dataset is not None:
@@ -1623,10 +1645,12 @@ class Trainer:
         indexed_datasets_val = []
         for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
             _dataset = _dataset.index_select(val_idcs)
-            _dataset, _ = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            _dataset, _ = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
             if _dataset is not None:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
+
+        print(len(self.dataset_train), len(self.dataset_val))
 
     def set_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from

@@ -15,7 +15,7 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets, _init
+from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets_and_edges, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config
 from geqtrain.utils.auto_init import instantiate
@@ -390,13 +390,21 @@ def main(args=None, running_as_script: bool = True):
         keep_node_types = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
     else:
         keep_node_types = None
+    
+    # --- exclude edges from center node to specified node types
+    exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
+    if exclude_type_names_from_edges is not None:
+        from geqtrain.train.utils import find_matching_indices
+        exclude_node_types_from_edges = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
+    else:
+        exclude_node_types_from_edges = None
 
     # dataloader
     per_node_outputs_keys = []
     _indexed_datasets = []
     for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
         _dataset = _dataset.index_select(_test_idcs)
-        _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, metrics, keep_node_types)
+        _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(_dataset, metrics, keep_node_types, exclude_node_types_from_edges)
         if _dataset is not None:
             _indexed_datasets.append(_dataset)
     dataset_test = ConcatDataset(_indexed_datasets)
