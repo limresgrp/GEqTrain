@@ -24,7 +24,7 @@ from geqtrain.utils.savenload import load_file
 
 def init_logger(log: bool):
     from geqtrain.utils import Output
-    
+
     if log:
         # Initialize Output with specified settings
         output = Output.get_output(dict(
@@ -40,7 +40,7 @@ def init_logger(log: bool):
         metricsfile = output.open_logfile('metrics.csv', propagate=True)
         csvfile = output.open_logfile('out.csv', propagate=True)
         outfile = output.open_logfile('out.xyz', propagate=True)
-        
+
         # Set up the main logger to log at INFO level
         logger = logging.getLogger(logfile)
         logger.setLevel(logging.INFO)
@@ -76,7 +76,7 @@ def init_logger(log: bool):
         metricslogger = dummylogger
         csvlogger = dummylogger
         xyzlogger = dummylogger
-    
+
     # Set up the main logger to log at INFO level
     logger = logging.getLogger(logfile)
     logger.setLevel(logging.INFO)
@@ -252,21 +252,19 @@ def main(args=None, running_as_script: bool = True):
 
     # Do the defaults:
     dataset_is_from_training: bool = False
-    # print_best_model_epoch: bool = False
     if args.train_dir:
         if args.test_config is None:
             args.test_config = args.train_dir / "config.yaml"
             dataset_is_from_training = True
         if args.model is None:
-            # print_best_model_epoch = True
             args.model = args.train_dir / "best_model.pth"
         if args.test_indexes is None and dataset_is_from_training:
             # Find the remaining indexes that aren't train or val
             trainer = torch.load(
                 str(args.train_dir / "trainer.pth"), map_location="cpu"
             )
-            # if print_best_model_epoch:
-            #     print(f"Loading model from epoch: {trainer['best_model_saved_at_epoch']}")
+            if 'best_model_saved_at_epoch' in trainer['state_dict'].keys():
+              print(f"Loading model from epoch: {trainer['state_dict']['best_model_saved_at_epoch']}")
             train_idcs = []
             dataset_offset = 0
             for tr_idcs in trainer["train_idcs"]:
@@ -427,13 +425,13 @@ def main(args=None, running_as_script: bool = True):
         for key, value in flatten_metrics.items(): # log metrics
             mat_str += f",{value:16.5g}"
             header += f",{key}"
-        
+
         if pbar.n == 0:
             metricslogger.info(header)
         metricslogger.info(mat_str)
 
         del out, ref_data
-    
+
     def out_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
 
         def format_csv(data, ref_data, batch_index, chunk_index):
@@ -456,7 +454,7 @@ def main(args=None, running_as_script: bool = True):
                 return ''
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
-        
+
         def format_xyz(data, ref_data):
             try:
                 # Extract fields from data
