@@ -99,5 +99,5 @@ def buildGlobalGraphModelLayers(config):
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
         )),
     })
-    
+
     return layers

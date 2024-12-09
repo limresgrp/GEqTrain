@@ -87,6 +87,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
         dampen: bool = False,
+        gain:Optional[float] = None,
     ):
         super().__init__()
         dimensions = (
@@ -101,6 +102,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
         self.use_layer_norm = use_layer_norm
+        self.gain = gain
 
         nonlinearity = {
             None: None,
@@ -116,7 +118,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             if mlp_nonlinearity == "ssp": nonlin_const = normalize2mom(ShiftedSoftPlus).cst
             elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu": nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
             elif mlp_nonlinearity == "silu": nonlin_const = normalize2mom(nonlinearity).cst
-            elif mlp_nonlinearity == "swiglu": nonlin_const = 2.02
+            elif mlp_nonlinearity == "swiglu": nonlin_const = 2.02 # avoids variance explosion in interaction layers
 
         if bias is not None: has_bias = True
 
@@ -129,6 +131,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             lin_layer = torch.nn.Linear(h_in, h_out, bias=False if self.use_layer_norm else bias_condition)
 
             if (nonlinearity is None) or is_last_layer:
+                self.gain = None
                 norm_const = 1.
                 modules = [(f"linear_{layer_index}", lin_layer)]
             else:
@@ -144,7 +147,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
             # initialize weights
             with torch.no_grad():
-                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const)
+                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const if not self.gain else self.gain)
                 if lin_layer.bias is not None:
                     if is_last_layer and bias is not None: lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
                     else: torch.nn.init.zeros_(lin_layer.bias)

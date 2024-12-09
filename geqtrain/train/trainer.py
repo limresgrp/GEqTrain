@@ -446,10 +446,10 @@ class Trainer:
         use_warmup: bool = False,
         **kwargs,
     ):
-
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
+        self.best_model_saved_at_epoch = -1
         self.model = None
         logging.debug("* Initialize Trainer")
 
@@ -775,6 +775,7 @@ class Trainer:
                     device=self.torch_device
                 )
             dictionary["state_dict"]["cumulative_wall"] = self.cumulative_wall
+            dictionary["state_dict"]["best_model_saved_at_epoch"] = self.best_model_saved_at_epoch
 
         if training_progress:
             dictionary["progress"] = {}

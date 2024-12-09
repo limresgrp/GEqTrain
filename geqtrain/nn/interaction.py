@@ -1,6 +1,7 @@
 import math
 import functools
 import torch
+import wandb
 
 from typing import Optional, List, Tuple, Union
 from torch_scatter import scatter
@@ -33,6 +34,7 @@ from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
     '''
     ctor args: match yaml keys with keys in ctor kwargs
+    always outputs scalars
     Nomenclature and dims:
     "node_attrs"            [n_nodes, dim]      node_invariant_field            atom types (embedded?)
     "edge_radial_attrs"     [n_edge, dim]       edge_invariant_field            radial embedding of displacement vectors BESSEL
@@ -51,9 +53,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         num_layers: int,
         r_max:      float,
         # optional params
-        out_irreps: Optional[Union[o3.Irreps, str]] = None, # if None -> hidden molteplicity del 2body and all ls till lmax; if not passed then out_irreps from yaml is used
-        output_ls:  Optional[List[int]]             = None, # select/indexes in out_irreps: which ls to output from this interaction block (instead of all out out_irreps)
-        output_mul: Optional[Union[str, int]]       = None, # otherwise you can provide output_mul: if None: out_irreps multiplicity is used, if 'hidden' is provided then 2body out dim is used as multiplicity
+        out_irreps: Optional[Union[o3.Irreps, str]] = None, #! out_irreps: if None: (yaml.latent_dim x lmax), else yaml.out_irreps
+        output_ls:  Optional[List[int]]             = None,
+        output_mul: Optional[Union[str, int]]       = None, #! 3 options: 1) None: don't change out_irreps mul, 2) 'hidden': mul=yaml.latent_dim, 3) int
         avg_num_neighbors: Optional[float]          = None,
         # cutoffs
         TanhCutoff_n: float = 6.,
@@ -79,10 +81,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Graph conditioning
         graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
         # Other:
-        irreps_in = None,
+        irreps_in=None,
+        debug: bool = False,
     ):
         super().__init__()
         assert (num_layers >= 1)
+        self.debug = debug
         # save parameters
         self.num_layers             = num_layers
         self.node_invariant_field   = node_invariant_field
@@ -119,7 +123,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # - [optional] filter out_irreps l degrees
         if output_ls is None:
-            output_ls = out_irreps.ls + [0] 
+            output_ls = out_irreps.ls + [0]
         assert isinstance(output_ls, List)
         assert all([(l in input_edge_eq_irreps.ls) for l in output_ls]), \
             f"Required output ls {output_ls} cannot be computed using l_max={max(input_edge_eq_irreps.ls)}"
@@ -130,7 +134,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if output_mul == 'hidden':
                 output_mul = self.latent_dim
 
-        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in input_edge_eq_irreps if ir.l in output_ls])
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in input_edge_eq_irreps if ir.l in output_ls]) #! always keep the l=0, even if your desired out is l>0
         self.out_multiplicity = output_mul
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges (possibly embedded)
@@ -324,6 +328,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             out_features[..., :self.out_multiplicity * self.out_n_scalars] = self.final_readout_mlp(latents)
 
         data[self.out_field] = out_features
+        if self.debug and wandb.run is not None: wandb.log({"out_features_STD": out_features.std().item(),"out_features_MEAN": out_features.mean().item()})
         return data
 
 

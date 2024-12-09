@@ -89,5 +89,5 @@ def buildHeadlessGlobalNodeModelLayers(config):
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
     })
-    
+
     return layers
