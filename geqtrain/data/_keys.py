@@ -27,6 +27,8 @@ EDGE_CELL_SHIFT_KEY: Final[str] = "edge_cell_shift"
 # [n_batch, 3, 3] or [3, 3] tensor where rows are the cell vectors
 CELL_KEY: Final[str] = "cell"
 # [n_nodes] long tensor
+ATOM_NUMBER_KEY: Final[str] = "atom_numbers"
+# [n_nodes] long tensor
 NODE_TYPE_KEY: Final[str] = "node_types"
 # [n_edge] long tensor
 EDGE_TYPE_KEY: Final[str] = "edge_types"

@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 from hashlib import sha1
+import inspect
 from typing import Dict, List, Union
 
 import yaml
@@ -115,7 +116,11 @@ class Metrics(Loss):
             if not kwargs.pop("report_per_component", False):
                 kwargs["reduce_dims"] = tuple(range(len(error.shape) - 1))
 
-        rs = RunningStats(**kwargs)
+        # Inspect the function's signature
+        sig = inspect.signature(RunningStats)
+        # Filter kwargs based on the function's parameters
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        rs = RunningStats(**filtered_kwargs)
         rs.to(device=error.device)
         return rs
 

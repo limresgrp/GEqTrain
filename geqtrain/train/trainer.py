@@ -1237,7 +1237,7 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
             )
 
-            loss, loss_contrib = self.loss(pred=out, ref=ref_data)
+            loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
 
             # update metrics
             with torch.no_grad():
@@ -1651,7 +1651,19 @@ class Trainer:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
-        print(len(self.dataset_train), len(self.dataset_val))
+        self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
+        
+        def log_data_points(dataset, prefix: str):
+            loss_clean_keys = [self.loss.remove_suffix(key) for key in self.loss.keys]
+            counts = {}
+            for data in dataset:
+                for loss_clean_key in loss_clean_keys:
+                    counts[loss_clean_key] = counts.get(loss_clean_key, 0) + torch.sum(~torch.isnan(data[loss_clean_key])).item()
+            for k, v in counts.items():
+                self.logger.info(f"{prefix} data points: for field {k}: {v}")
+        
+        log_data_points(self.dataset_train, prefix='Training')
+        log_data_points(self.dataset_val  , prefix='Validation')
 
     def set_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from

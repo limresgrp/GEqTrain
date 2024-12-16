@@ -67,7 +67,7 @@ class Loss:
                 f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}"
             )
 
-    def __call__(self, pred: dict, ref: dict):
+    def __call__(self, pred: dict, ref: dict, **kwargs):
         '''
         returns:
         total loss for this batch
@@ -81,6 +81,7 @@ class Loss:
                 ref=ref,
                 key=self.remove_suffix(key),
                 mean=True,
+                **kwargs,
             )
             contrib[key] = _loss
             loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i

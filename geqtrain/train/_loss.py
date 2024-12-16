@@ -1,15 +1,12 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-import logging
 import inspect
 import torch.nn
 
 from typing import Dict
 from importlib import import_module
-from torch_scatter import scatter, scatter_mean
 from geqtrain.utils import instantiate_from_cls_name
-from geqtrain.data import AtomicDataDict
 
 
 class SimpleLoss:
@@ -57,8 +54,9 @@ class SimpleLoss:
         ref: dict,
         key: str, # first row of each element listed under loss_coeffs:
         mean: bool = True,
+        **kwargs,
     ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key)
+        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key, **kwargs)
 
         if has_nan:
             not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
