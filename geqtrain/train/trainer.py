@@ -100,7 +100,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
                     not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
                     update_edge_index(data, not_nan_edge_filter)
                     per_node_outputs_keys.append(key_clean)
-    
+
     # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
     if exclude_node_types_from_edges is not None:
         exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
@@ -504,7 +504,7 @@ class Trainer:
             self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
         if self.keep_node_types is not None:
             self.keep_node_types = torch.as_tensor(self.keep_node_types, device=self.torch_device)
-        
+
         # --- exclude edges from center node to specified node types
         if self.exclude_type_names_from_edges is not None:
             self.exclude_node_types_from_edges = torch.tensor(find_matching_indices(self.type_names, exclude_type_names_from_edges))
@@ -603,7 +603,7 @@ class Trainer:
             for optim_group in optim_groups:
                 if merge_group(group, optim_group):
                     return
-                
+
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
@@ -654,7 +654,7 @@ class Trainer:
                 #! for now it has been tested only with CosineAnnealingLR
                 import pytorch_warmup as warmup
                 steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", self.max_epochs//20) # Default: 5% of max epochs
+                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", int((self.max_epochs/100)*5)) # Default: 5% of max epochs
                 self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
                 self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
 
@@ -1687,7 +1687,7 @@ class Trainer:
             sampler=validation_sampler,
             **dl_kwargs,
         )
-    
+
     def init_losses(self):
         for loss_func in self.loss.funcs.values():
             _init(loss_func, self.dataset_train, self.model)
