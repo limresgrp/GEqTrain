@@ -78,6 +78,7 @@ class SimpleLoss:
         pred: Dict,
         ref:  Dict,
         key:  str,
+        **kwargs,
     ):
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
