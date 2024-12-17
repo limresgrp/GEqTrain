@@ -75,9 +75,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         two_body_latent        = ScalarMLPFunction,
         two_body_latent_kwargs = {},
         env_embed              = ScalarMLPFunction,
-        env_embed_kwargs       = {'use_layer_norm': False}, # false by default s.t. avoid overriding dist-based reweigthing of features via cutoff
+        env_embed_kwargs       = {},
         latent                 = ScalarMLPFunction,
-        latent_kwargs          = {'use_layer_norm': False}, # false by default s.t. avoid overriding dist-based reweigthing of features via cutoff
+        latent_kwargs          = {},
         # Graph conditioning
         graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
         # Other:
@@ -316,7 +316,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         if self.has_scalar_output:
             cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
             new_latents = self.final_latent_mlp(inv_latent_cat)
-            new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
+            new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
             coefficient_old = torch.rsqrt(layer_update_coefficients[layer_index].square() + 1)
             coefficient_new = layer_update_coefficients[layer_index] * coefficient_old
             latents = torch.index_add(
@@ -531,7 +531,7 @@ class InteractionLayer(torch.nn.Module):
         new_latents = self.latent_mlp(inv_latent_cat)
         new_latents = self.post_norm(new_latents)
         # Apply cutoff, which propagates through to everything else
-        new_latents = cutoff_coeffs.unsqueeze(-1) * new_latents
+        new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
 
         if self.layer_index > 0:
             assert this_layer_update_coeff is not None
