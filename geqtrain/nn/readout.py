@@ -28,9 +28,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
     out_irreps options evaluated in the following order:
         1) o3.Irreps obj
         2) str castable to o3.Irreps obj (eg: 1x0e)
-        3) an AtomicDataDict.__FIELD_NAME__ taken from GraphModuleMixin.irreps_in dict
-        4) same irreps of out_field if out_field in GraphModuleMixin.irreps_in dict
-        5) if none of the above outs irreps of same size of field
+        3) a irreps_in key (and get its o3.Irreps)
+        4) same irreps of out_field (if out_field in GraphModuleMixin.irreps_in dict)
+        5) if none of the above: outs irreps of same size of field
         if out_irreps=None is passed, then option 4 is triggered is valid, else 5)
         if out_irreps is not provided it takes out_irreps from yaml
     '''
@@ -224,7 +224,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 eq_features = self.eq_readout(eq_features, weights)
             out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
 
-        if self.resnet:
+        if self.resnet: # eq. 2 from https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-023-36329-y/MediaObjects/41467_2023_36329_MOESM1_ESM.pdf
             assert self._resnet_update_coeff is not None
             old_features = data[self.out_field]
             _coeff = self._resnet_update_coeff.sigmoid()

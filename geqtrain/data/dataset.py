@@ -39,6 +39,10 @@ def parse_attrs(
     _fields: Dict,
     _fixed_fields: Dict = {},
 ) -> Dict[str, Any]:
+    '''
+    parses field properties
+    todo: describe logic
+    '''
     for key, options in _attributes.items():
         if key in _fields or key in _fixed_fields:
 
@@ -340,7 +344,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             assert all([len(v) == num_examples for v in node_fields.values() if v is not None])
             # assert all([len(v) == num_examples for v in edge_fields.values() if v is not None]) !!! TODO
 
-            include_frames = self.include_frames
+            include_frames = self.include_frames # all frames by default
             if include_frames is None:
                 include_frames = range(num_examples)
 
@@ -354,7 +358,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.R_MAX_KEY in all_keys
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
-            data_list = [
+            data_list = [ # list of AtomicData-pyg-object objects
                 constructor(
                     **{
                         **{f: v[i] for f, v in node_fields.items() if v is not None},
@@ -550,4 +554,4 @@ class NpzDataset(AtomicInMemoryDataset):
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
-        return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields
+        return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields # k:v k field, v the value grabbed from the npz

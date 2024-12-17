@@ -67,7 +67,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
         node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
     else:
         node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
-    
+
     def get_node_types_mask(node_types, filter, data):
         return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
 
@@ -1398,7 +1398,7 @@ class Trainer:
             return
 
         with atomic_write_group():
-            current_metrics = self.mae_dict[self.metrics_key]
+            current_metrics = self.mae_dict[self.metrics_key] # keys are the list of metrics listed in yaml under metrics_components
             if current_metrics < self.best_metrics:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch

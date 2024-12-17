@@ -30,6 +30,13 @@ from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
+def log_feature_on_wandb(name:str, t:torch.tensor):
+  #todo: do we need to differenciate scalars with geom tensors?
+  wandb.log({
+      f"activations_dists/{name}.mean": t.mean().item(),
+      f"activations_dists/{name}.std":  t.std().item(),})
+
+
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
     '''
@@ -83,8 +90,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Other:
         irreps_in=None,
         debug: bool = False,
+        name:str = "",
     ):
         super().__init__()
+        self.name = name
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -235,12 +244,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.has_scalar_output = True
             # Invariant out features
             self.final_latent_mlp = latent(
-                mlp_input_dimension=(
-                    # the embedded latent invariants from the previous layer(s)
-                    self.latent_dim
-                    # and the invariants extracted from the last layer's TP:
-                    + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]
-                ),
+                # embedded latent invariants from the previous layer(s) + invariants extracted from the last layer's TP
+                mlp_input_dimension=(self.latent_dim + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]),
                 mlp_output_dimension=self.latent_dim,
             )
 
@@ -314,6 +319,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # - Output invariant values - #
         if self.has_scalar_output:
+            # update latents and apply residual connection
             cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
             new_latents = self.final_latent_mlp(inv_latent_cat)
             new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
@@ -325,10 +331,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 active_edges,
                 coefficient_new * new_latents,
             )
+            # the finally do last update on residued features
             out_features[..., :self.out_multiplicity * self.out_n_scalars] = self.final_readout_mlp(latents)
 
         data[self.out_field] = out_features
-        if self.debug and wandb.run is not None: wandb.log({"out_features_STD": out_features.std().item(),"out_features_MEAN": out_features.mean().item()})
+        if self.debug and wandb.run is not None: log_feature_on_wandb(f"{self.name}.out_features", out_features)
         return data
 
 
@@ -352,6 +359,9 @@ class InteractionLayer(torch.nn.Module):
         avg_num_neighbors: float,
     ) -> None:
         super().__init__()
+        #! cannot store self.parent = parent due to nn recursive loops
+        self.parent_name = parent.name
+        self.debug = parent.debug
         self.layer_index = layer_index
         self.is_last_layer = is_last_layer
         self.env_embed_multiplicity = parent.env_embed_multiplicity
@@ -634,10 +644,22 @@ class InteractionLayer(torch.nn.Module):
         scalars, equivariant = torch.split(eq_features, [self.tp_n_scalar_out, eq_features.size(-1) - self.tp_n_scalar_out], dim=-1)
         scalars = self.rearrange_scalars(scalars)
 
-        inv_latent = torch.cat([latents, scalars],dim=-1)
+        inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
 
-        if self.linear is None: return latents, inv_latent, None
+        if self.debug and wandb.run is not None:
+          log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.latents", latents)
+          log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.inv_latent", inv_latent)
+
+        if self.linear is None:
+          return latents, inv_latent, None
 
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
+        log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.eq_features", eq_features)
         return latents, inv_latent, eq_features
+
+
+
+        if self.debug and wandb.run is not None:
+          log_feature_on_wandb(f"{self.name}.{self.parent_name}.{self.layer_index}", out_features)
+

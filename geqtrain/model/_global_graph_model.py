@@ -65,6 +65,7 @@ def buildGlobalGraphModelLayers(config):
 
     layers.update({
         "local_interaction": (InteractionModule, dict(
+            name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
@@ -79,11 +80,13 @@ def buildGlobalGraphModelLayers(config):
         )),
         "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            out_irreps=None,
+            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
         )),
+        #TODO: if one wants to play with updated scalars, you can create a module to be added here
         "context_aware_interaction": (InteractionModule, dict(
+            name = "context_aware_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
