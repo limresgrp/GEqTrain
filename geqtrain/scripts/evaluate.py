@@ -425,7 +425,7 @@ def main(args=None, running_as_script: bool = True):
 
         mat_str = f"{batch_index}, {chunk_index}"
         header = "batch,chunk"
-        flatten_metrics, skip_keys = metrics.flatten_metrics(
+        flatten_metrics = metrics.flatten_metrics(
             metrics=batch_metrics,
             metrics_metadata=metrics_metadata,
         )

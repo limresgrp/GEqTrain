@@ -438,7 +438,7 @@ class Trainer:
         report_init_validation: bool = True,
         verbose="INFO",
         sanitize_gradients: bool = False,
-        target_names: List = None,
+        target_names: Optional[List] = None,
         mixed_precision: bool = False,
         hooks: Dict = {},
         use_grokfast: bool = False,
@@ -494,9 +494,6 @@ class Trainer:
         self.torch_device = torch.device(self.device)
 
         # --- loss/logger printing info
-        self.type_names = self.type_names or []
-        self.target_names = self.target_names or []
-
         self.metrics_metadata = {
             'type_names'   : self.type_names,
             'target_names' : self.target_names,
@@ -1369,7 +1366,7 @@ class Trainer:
             log_header += f" {name:>12.12}"
 
         # append details from metrics
-        metrics, skip_keys = self.metrics.flatten_metrics(
+        metrics = self.metrics.flatten_metrics(
             metrics=self.batch_metrics,
             metrics_metadata=self.metrics_metadata,
         )
@@ -1377,9 +1374,8 @@ class Trainer:
         for key, value in metrics.items(): # log metrics
             mat_str += f", {value:16.5g}"
             header += f", {key}"
-            if key not in skip_keys:
-                log_str += f" {value:12.3g}"
-                log_header += f" {key:>12.12}"
+            log_str += f" {value:12.3g}"
+            log_header += f" {key:>12.12}"
 
         batch_logger = logging.getLogger(self.batch_log[batch_type])
 
@@ -1482,7 +1478,7 @@ class Trainer:
 
         for category in categories:
 
-            met, skip_keys = self.metrics.flatten_metrics(
+            met = self.metrics.flatten_metrics(
                 metrics=self.metrics_dict[category],
                 metrics_metadata=self.metrics_metadata,
             )
@@ -1499,9 +1495,8 @@ class Trainer:
             for key, value in met.items():
                 mat_str += f", {value:12.3g}"
                 header += f",{category}_{key}"
-                if key not in skip_keys:
-                    log_str[category] += f" {value:12.3g}"
-                    log_header[category] += f" {key:>12.12}"
+                log_str[category] += f" {value:12.3g}"
+                log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
 
         self.norm_dict = dict(Grad_norm=self.norms)
