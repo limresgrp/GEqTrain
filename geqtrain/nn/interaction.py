@@ -657,9 +657,3 @@ class InteractionLayer(torch.nn.Module):
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.eq_features", eq_features)
         return latents, inv_latent, eq_features
-
-
-
-        if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.name}.{self.parent_name}.{self.layer_index}", out_features)
-
