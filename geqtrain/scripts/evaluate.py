@@ -22,13 +22,13 @@ from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
 
-def init_logger(log: bool):
+def init_logger(log: str = None):
     from geqtrain.utils import Output
 
-    if log:
+    if log is not None:
         # Initialize Output with specified settings
         output = Output.get_output(dict(
-            root='./logs',
+            root=log,
             run_name=time.strftime("%Y%m%d-%H%M%S"),
             append=False,
             screen=False,
@@ -206,40 +206,20 @@ def main(args=None, running_as_script: bool = True):
         type=bool,
         default=False,
     )
+
     parser.add_argument(
+        "-l",
         "--log",
-        help="Use this flag to log all inference results. This creates 4 files inside a logs/[DATETIME] folder: "
+        nargs='?',
+        const='./logs',
+        default=None,
+        help="Use this flag to log all inference results. This creates 4 files: "
              "\n-- log -- contains the logs that are printed also on std with info on evaaluation script"
              "\n-- metrics.csv -- contains the metrics evaluation on each chunk of each batch of the test dataset"
              "\n-- out.csv -- contains predicted and target value for each node in test set graphs"
-             "\n-- out.xyz -- contains xyz formatted file of molecules in test set, together with inferenced outputs",
-        default=False,
-        action='store_true',
+             "\n-- out.xyz -- contains xyz formatted file of molecules in test set, together with inferenced outputs"
+             "\n\nIf this argument is not specified, no logging is performed. If it is specified without a directory name, logs to the ./logs directory.",
     )
-    # parser.add_argument(
-    #     "--output",
-    #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
-    #     type=Path,
-    #     default=None,
-    # )
-    # parser.add_argument(
-    #     "--output-fields",
-    #     help="Extra fields (names[:field] comma separated with no spaces) to write to the `--output`.\n"
-    #          "Field options are: [node, edge, graph, long].\n"
-    #          "If [:field] is omitted, the field with that name is assumed to be already registered by default.",
-    #     type=str,
-    #     default="",
-    # )
-        # parser.add_argument(
-    #     "--repeat",
-    #     help=(
-    #         "Number of times to repeat evaluating the test dataset. "
-    #         "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
-    #         "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
-    #     ),
-    #     type=int,
-    #     default=1,
-    # )
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -249,6 +229,9 @@ def main(args=None, running_as_script: bool = True):
 
     # Logging
     logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
+    if args.log is not None and args.batch_size > 1:
+        logger.warning("Logging with batch_size > 1 does not support storing 'out.csv' and 'out.xyz' logs."
+                       "\nIf you want to log that information, use the default batch_size of 1.")
 
     # Do the defaults:
     dataset_is_from_training: bool = False
