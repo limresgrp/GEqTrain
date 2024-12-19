@@ -139,6 +139,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
                 modules = [
                         (f"linear_{layer_index}", lin_layer),
+                        (f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)),
                         (f"activation_{layer_index}", non_lin_instance),
                 ]
 
