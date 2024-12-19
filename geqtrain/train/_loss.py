@@ -51,28 +51,19 @@ class SimpleLoss:
     def __call__(
         self,
         pred: dict,
-        ref: dict,
-        key: str, # first row of each element listed under loss_coeffs:
+        ref : dict,
+        key : str ,
         mean: bool = True,
         **kwargs,
     ):
-        pred_key, ref_key, has_nan, not_zeroes = self.prepare(pred, ref, key, **kwargs)
+        pred_key, ref_key, not_nan_filter = self.prepare(pred, ref, key, **kwargs)
 
-        if has_nan:
-            not_nan_zeroes = (ref_key == ref_key).int() * (pred_key == pred_key).int() * not_zeroes
-            loss = self.func(torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.)) * not_nan_zeroes
-            if mean:
-                return loss.sum() / not_nan_zeroes.sum()
-            else:
-                loss[~not_nan_zeroes.bool()] = torch.nan
-                return loss
-        else:
-            loss = self.func(pred_key, ref_key) * not_zeroes
-            if mean:
-                return loss.mean(dim=-1).sum() / not_zeroes.sum()
-            else:
-                return loss
-
+        loss = self.func(pred_key, ref_key) * not_nan_filter
+        if mean:
+            return loss.sum() / not_nan_filter.sum()
+        loss[~not_nan_filter.bool()] = torch.nan
+        return loss
+    
     def prepare(
         self,
         pred: Dict,
@@ -82,21 +73,23 @@ class SimpleLoss:
     ):
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
+        not_nan_filter = self._get_not_nan(ref_key, key)
+
         pred_key = pred.get(key, None)
         assert isinstance(pred_key, torch.Tensor)
         pred_key = pred_key.view_as(ref_key)
 
-        has_nan = torch.isnan(ref_key.sum()) or torch.isnan(pred_key.sum())
+        return torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.), not_nan_filter
+    
+    def _get_not_nan(self, ref_key: torch.Tensor, key: str):
+        self._check_nan(ref_key, key)
+        return (ref_key == ref_key).int()
+    
+    def _check_nan(self, ref_key: torch.Tensor, key: str):
+        has_nan = torch.isnan(ref_key.sum())
         if has_nan and not (hasattr(self, "ignore_nan") and self.ignore_nan):
-            raise Exception(f"Either the predicted or true property '{key}' has nan values. "
-                             "If this is intended, set 'ignore_nan' to true in config file for this loss.")
-
-        if hasattr(self, "ignore_zeroes") and self.ignore_zeroes:
-            not_zeroes = (~torch.all(ref_key == 0., dim=-1)).int() if len(ref_key.shape) > 1 else (ref_key != 0)
-        else:
-            not_zeroes = torch.ones(*ref_key.shape[:max(1, len(ref_key.shape)-1)], device=ref_key.device).int()
-        not_zeroes = not_zeroes.reshape(*([-1] + [1] * (len(pred_key.shape)-1)))
-        return pred_key, ref_key, has_nan, not_zeroes
+            raise Exception(f"Target field '{key}' has nan values."
+                             "\nIf this is intended, set 'ignore_nan' to true in config file for this loss.")
 
 
 def instantiate_loss_function(name: str, params: Dict):
