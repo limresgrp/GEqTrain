@@ -213,7 +213,7 @@ def restart(rank, world_size, config):
             if config[k] != dictionary.get(k, ""):
                 # modifiable things if restart
                 if k in ["max_epochs", "loss_coeffs", "learning_rate", "device",
-                        "metrics_components", "noise", "use_dt", "wandb"]:
+                        "metrics_components", "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]:
                     dictionary[k] = config[k]
                     logging.info(f'Update "{k}" to {dictionary[k]}')
                 elif k.startswith("early_stop"):
