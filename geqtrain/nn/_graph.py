@@ -47,7 +47,7 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
         if not self.attr_modules: return data
         out = []
         for attribute_name, emb_layer in self.attr_modules.items():
-            x = data[attribute_name].squeeze()
+            x = data[attribute_name].squeeze(-1)
             x = emb_layer(x)
             out.append(x)
 

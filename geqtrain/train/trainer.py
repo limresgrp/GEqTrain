@@ -168,8 +168,8 @@ def run_inference(
             ref_data[f"{slices_key}_slices"] = val
 
     if noise is not None:
-        ref_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
-        input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE]
+        ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
 
     with cm, precision:
         out = model(input_data)
@@ -1171,7 +1171,6 @@ class Trainer:
         update_log.info(update_speed.strip().rstrip(','))
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
 
-
     def _batch_lvl_lrscheduler_step(self):
         # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
         if hasattr(self, "using_batch_lvl_lrscheduler"):
@@ -1190,7 +1189,6 @@ class Trainer:
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", True)
 
-
     def _epoch_lvl_lrscheduler_step(self):
         if hasattr(self, "using_batch_lvl_lrscheduler"):
             if self.using_batch_lvl_lrscheduler:
@@ -1201,16 +1199,13 @@ class Trainer:
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", False)
 
-
     def _is_warmup_period_over(self):
         if not self.use_warmup:
             return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
-
     def batch_step(self, data, validation=False):
-
         self.optim.zero_grad(set_to_none=True)
 
         if validation: self.model.eval()

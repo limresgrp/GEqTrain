@@ -74,7 +74,7 @@ GRAPH_FEATURES_KEY: Final[str] = "graph_features"
 # [n_graphs, dim] (possibly equivariant) output features of graph
 GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
 
-NOISE: Final[str] = "noise"
+NOISE_KEY: Final[str] = "noise"
 
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [

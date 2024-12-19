@@ -498,7 +498,5 @@ def main(args=None, running_as_script: bool = True):
     logger.info("\n--- End of evaluation ---")
 
 
-
-
 if __name__ == "__main__":
     main(running_as_script=True)

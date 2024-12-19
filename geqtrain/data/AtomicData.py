@@ -32,7 +32,7 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.ATOM_NUMBER_KEY,
     AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
-    AtomicDataDict.NOISE,
+    AtomicDataDict.NOISE_KEY,
 }
 _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_VECTORS_KEY,
