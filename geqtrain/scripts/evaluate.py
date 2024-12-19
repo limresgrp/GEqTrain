@@ -509,7 +509,7 @@ def main(args=None, running_as_script: bool = True):
             for k, v in metrics.flatten_metrics(
                 metrics.current_result(),
                 metrics_metadata=metrics_metadata,
-            )[0].items()
+            ).items()
         )
     )
     logger.info("\n--- End of evaluation ---")
