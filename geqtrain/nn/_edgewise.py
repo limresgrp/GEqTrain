@@ -90,10 +90,10 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             self.irreps_out.update({self.out_field: irreps})
 
         if not self.use_attention:
-            self.register_buffer(
-                "env_sum_normalization",
-                torch.as_tensor([avg_num_neighbors]).rsqrt(),
-            )
+          if self.avg_num_neighbors_is_learnable:
+            self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
+        else:
+          self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -119,5 +119,6 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         # aggregation step
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
-        if not self.use_attention: data[self.out_field] *= self.env_sum_normalization
+        if not self.use_attention:
+          data[self.out_field] *= self.env_sum_normalization + torch.as_tensor([1.e-6], device=self.env_sum_normalization.device)
         return data

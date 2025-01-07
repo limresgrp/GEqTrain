@@ -60,6 +60,7 @@ def buildHeadlessGlobalNodeModelLayers(config):
 
     layers.update({
         "local_interaction": (InteractionModule, dict(
+            name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
@@ -78,6 +79,7 @@ def buildHeadlessGlobalNodeModelLayers(config):
             resnet=True,
         )),
         "context_aware_interaction": (InteractionModule, dict(
+            name = "context_aware_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
