@@ -1549,7 +1549,7 @@ class Trainer:
         """
 
         if validation_dataset is None:
-            logging.warn("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+            logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
 
         if self.train_idcs is None or self.val_idcs is None:
             if self.n_train is None:
@@ -1557,7 +1557,7 @@ class Trainer:
                     if self.n_val is not None:
                         self.n_train = [len(ds) - n_valid for ds, n_valid in zip(dataset.datasets, self.n_val)]
                     else:
-                        logging.warn("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
+                        logging.warning("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
                         n_total = np.array([len(ds) for ds in dataset.datasets])
                         ones_mask = n_total == 1
                         n_total[~ones_mask] = (0.8 * n_total[~ones_mask]).astype(int)

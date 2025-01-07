@@ -11,7 +11,7 @@ from .savenload import (
     finish_all_writes,
     atomic_write_group,
 )
-from .config import Config
+from .config import Config, ATOMIC_NUMBER_MAP, INVERSE_ATOMIC_NUMBER_MAP
 from .output import Output
 from ._cuda_utils import clean_cuda
 from ._hooks import ForwardHookHandler, print_stats
@@ -29,6 +29,8 @@ __all__ = [
     finish_all_writes,
     atomic_write_group,
     Config,
+    ATOMIC_NUMBER_MAP,
+    INVERSE_ATOMIC_NUMBER_MAP,
     Output,
     clean_cuda,
     ForwardHookHandler,
