@@ -1,21 +1,25 @@
-from geqtrain.nn import GraphModuleMixin, PerTypeScaleModule
+import logging
+from typing import Optional
+from torch.utils.data import ConcatDataset
 from geqtrain.data import AtomicDataDict
+from geqtrain.nn import (
+    SequentialGraphNetwork,
+    PerTypeScaleModule,
+)
 
 
-def PerTypeScale(model: GraphModuleMixin, config) -> PerTypeScaleModule:
-    r"""
-    Args:
-        model: the model to wrap. Must have ``AtomicDataDict.NODE_OUTPUT_KEY`` as an output.
+def PerTypeScale(model, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
+    logging.info("--- Building PerTypeScale Module ---")
 
-    Returns:
-        A ``PerTypeScaleModule`` wrapping ``model``.
-    """
+    layers = {
+        "wrapped_model": model,
+        "scale": (PerTypeScaleModule, dict(
+            field=AtomicDataDict.NODE_OUTPUT_KEY,
+            out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+        )),
+    }
 
-    return PerTypeScaleModule(
-        func=model,
-        field=AtomicDataDict.NODE_OUTPUT_KEY,
-        out_field=AtomicDataDict.NODE_OUTPUT_KEY,
-        num_types=config.get('num_types', 0),
-        per_type_bias=config.get('per_type_bias', None),
-        per_type_std=config.get('per_type_std', None),
+    return SequentialGraphNetwork.from_parameters(
+        shared_params=config,
+        layers=layers,
     )

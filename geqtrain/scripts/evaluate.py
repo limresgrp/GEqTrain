@@ -1,4 +1,3 @@
-import os
 import sys
 import time
 import argparse
@@ -15,20 +14,20 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets, _init
+from geqtrain.train.trainer import run_inference, remove_node_centers_for_NaN_targets_and_edges, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
-from geqtrain.utils import Config
+from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.utils.savenload import load_file
 
 
-def init_logger(log: bool):
+def init_logger(log: str = None):
     from geqtrain.utils import Output
 
-    if log:
+    if log is not None:
         # Initialize Output with specified settings
         output = Output.get_output(dict(
-            root='./logs',
+            root=log,
             run_name=time.strftime("%Y%m%d-%H%M%S"),
             append=False,
             screen=False,
@@ -206,40 +205,20 @@ def main(args=None, running_as_script: bool = True):
         type=bool,
         default=False,
     )
+
     parser.add_argument(
+        "-l",
         "--log",
-        help="Use this flag to log all inference results. This creates 4 files inside a logs/[DATETIME] folder: "
+        nargs='?',
+        const='./logs',
+        default=None,
+        help="Use this flag to log all inference results. This creates 4 files: "
              "\n-- log -- contains the logs that are printed also on std with info on evaaluation script"
              "\n-- metrics.csv -- contains the metrics evaluation on each chunk of each batch of the test dataset"
              "\n-- out.csv -- contains predicted and target value for each node in test set graphs"
-             "\n-- out.xyz -- contains xyz formatted file of molecules in test set, together with inferenced outputs",
-        default=False,
-        action='store_true',
+             "\n-- out.xyz -- contains xyz formatted file of molecules in test set, together with inferenced outputs"
+             "\n\nIf this argument is not specified, no logging is performed. If it is specified without a directory name, logs to the ./logs directory.",
     )
-    # parser.add_argument(
-    #     "--output",
-    #     help="ExtXYZ (.xyz) file to write out the test set and model predictions to.",
-    #     type=Path,
-    #     default=None,
-    # )
-    # parser.add_argument(
-    #     "--output-fields",
-    #     help="Extra fields (names[:field] comma separated with no spaces) to write to the `--output`.\n"
-    #          "Field options are: [node, edge, graph, long].\n"
-    #          "If [:field] is omitted, the field with that name is assumed to be already registered by default.",
-    #     type=str,
-    #     default="",
-    # )
-        # parser.add_argument(
-    #     "--repeat",
-    #     help=(
-    #         "Number of times to repeat evaluating the test dataset. "
-    #         "This can help compensate for CUDA nondeterminism, or can be used to evaluate error on models whose inference passes are intentionally nondeterministic. "
-    #         "Note that `--repeat`ed passes over the dataset will also be `--output`ed if an `--output` is specified."
-    #     ),
-    #     type=int,
-    #     default=1,
-    # )
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -249,6 +228,9 @@ def main(args=None, running_as_script: bool = True):
 
     # Logging
     logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
+    if args.log is not None and args.batch_size > 1:
+        logger.warning("Logging with batch_size > 1 does not support storing 'out.csv' and 'out.xyz' logs."
+                       "\nIf you want to log that information, use the default batch_size of 1.")
 
     # Do the defaults:
     dataset_is_from_training: bool = False
@@ -362,22 +344,23 @@ def main(args=None, running_as_script: bool = True):
         )
 
     test_idcs = [torch.as_tensor(idcs, dtype=torch.long)[::args.stride] for idcs in test_idcs]
-    # test_idcs = test_idcs.tile((args.repeat,))
 
     # Figure out what metrics we're actually computing
     try:
+        metrics = None
         metrics_components = config.get("metrics_components", None)
-        metrics, _ = instantiate(
-            builder=Metrics,
-            prefix="metrics",
-            positional_args=dict(components=metrics_components),
-            all_args=config,
-        )
-        metrics.to(device=device)
-        metrics_metadata = {
-            'type_names'   : config["type_names"],
-            'target_names' : config.get('target_names', list(metrics.keys)),
-        }
+        if metrics_components is not None:
+            metrics, _ = instantiate(
+                builder=Metrics,
+                prefix="metrics",
+                positional_args=dict(components=metrics_components),
+                all_args=config,
+            )
+            metrics.to(device=device)
+            metrics_metadata = {
+                'type_names'   : config["type_names"],
+                'target_names' : config.get('target_names', list(metrics.keys)),
+            }
     except:
         raise Exception("Failed to load Metrics.")
 
@@ -388,13 +371,21 @@ def main(args=None, running_as_script: bool = True):
         keep_node_types = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
     else:
         keep_node_types = None
+    
+    # --- exclude edges from center node to specified node types
+    exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
+    if exclude_type_names_from_edges is not None:
+        from geqtrain.train.utils import find_matching_indices
+        exclude_node_types_from_edges = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
+    else:
+        exclude_node_types_from_edges = None
 
     # dataloader
     per_node_outputs_keys = []
     _indexed_datasets = []
     for _dataset, _test_idcs in zip(dataset.datasets, test_idcs):
         _dataset = _dataset.index_select(_test_idcs)
-        _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, metrics, keep_node_types)
+        _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(_dataset, metrics, keep_node_types, exclude_node_types_from_edges)
         if _dataset is not None:
             _indexed_datasets.append(_dataset)
     dataset_test = ConcatDataset(_indexed_datasets)
@@ -405,8 +396,9 @@ def main(args=None, running_as_script: bool = True):
         batch_size=args.batch_size,
     )
 
-    for loss_func in metrics.funcs.values():
-        _init(loss_func, dataset_test, model)
+    if metrics is not None:
+        for loss_func in metrics.funcs.values():
+            _init(loss_func, dataset_test, model)
 
     # run inference
     logger.info("Starting...")
@@ -417,7 +409,7 @@ def main(args=None, running_as_script: bool = True):
 
         mat_str = f"{batch_index}, {chunk_index}"
         header = "batch,chunk"
-        flatten_metrics, skip_keys = metrics.flatten_metrics(
+        flatten_metrics = metrics.flatten_metrics(
             metrics=batch_metrics,
             metrics_metadata=metrics_metadata,
         )
@@ -438,18 +430,20 @@ def main(args=None, running_as_script: bool = True):
             try:
                 # Extract fields from data
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-                dataset_id = data["dataset_id"].item()  # Scalar
+                atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
+                dataset_id = data[AtomicDataDict.DATASET_INDEX_KEY].item()  # Scalar
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
 
                 # Initialize lines list for CSV format
                 lines = []
                 if pbar.n == 0:
-                    lines.append("dataset_id,batch,chunk,node_type,pred,ref")
+                    lines.append("dataset_id,batch,chunk,atom_number,node_type,pred,ref")
 
-                if node_output is not None and ref_node_output is not None:
-                    for _node_type, _node_output, _ref_node_output in zip(node_type, node_output, ref_node_output):
-                        lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output.item():10.4f}")
+                if node_output is not None:
+                    for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number,node_type, node_output)):
+                        _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
+                        lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f}")
             except:
                 return ''
             # Join all lines into a single string for XYZ format
@@ -460,7 +454,8 @@ def main(args=None, running_as_script: bool = True):
                 # Extract fields from data
                 pos = data[AtomicDataDict.POSITIONS_KEY]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-                dataset_id = data["dataset_id"].item()  # Scalar
+                atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
+                dataset_id = data[AtomicDataDict.DATASET_INDEX_KEY].item()  # Scalar
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
 
@@ -477,11 +472,12 @@ def main(args=None, running_as_script: bool = True):
 
                 # Lines 3+: Atom lines with node_type, x, y, z, node_output
                 for i in range(n_atoms):
-                    atom_name = str(node_type[i].item())  # Convert node_type to string for atom name
+                    atom_name = INVERSE_ATOMIC_NUMBER_MAP.get(atom_number[i].item(), 'X')
+                    atom_type = str(node_type[i].item())
                     x, y, z = pos[i].tolist()  # Get coordinates
                     output = node_output[i].item() if node_output is not None else ''  # Extract scalar from tensor
-                    ref_output = ref_node_output[i].item() if ref_node_output is not None else ''  # Extract scalar from tensor
-                    lines.append(f"{atom_name:6} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f}")
+                    ref_output = ref_node_output[i].item() if ref_node_output is not None else 0  # Extract scalar from tensor
+                    lines.append(f"{atom_name:2} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f} {atom_type:6}")
             except:
                 return ''
             # Join all lines into a single string for XYZ format
@@ -492,21 +488,23 @@ def main(args=None, running_as_script: bool = True):
 
         del out, ref_data
 
-    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=[metrics_callback, out_callback], **config)
+    chunk_callbacks = [out_callback]
+    if metrics is not None:
+        chunk_callbacks.append(metrics_callback)
+    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
 
-    logger.info("\n--- Final result: ---")
-    logger.info(
-        "\n".join(
-            f"{k:>20s} = {v:< 20f}"
-            for k, v in metrics.flatten_metrics(
-                metrics.current_result(),
-                metrics_metadata=metrics_metadata,
-            )[0].items()
+    if metrics is not None:
+        logger.info("\n--- Final result: ---")
+        logger.info(
+            "\n".join(
+                f"{k:>20s} = {v:< 20f}"
+                for k, v in metrics.flatten_metrics(
+                    metrics.current_result(),
+                    metrics_metadata=metrics_metadata,
+                ).items()
+            )
         )
-    )
     logger.info("\n--- End of evaluation ---")
-
-
 
 
 if __name__ == "__main__":

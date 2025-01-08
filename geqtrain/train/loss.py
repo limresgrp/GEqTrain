@@ -45,6 +45,7 @@ class Loss:
         self.coeffs: Dict  = {} # coefficients to weight losses
         self.funcs: Dict = {} # call key-associated (custom) callable defined in _loss.py. Classes in _loss.py acts as wrapper of torch.nn loss func (to provide further options)
         self.func_params = {}
+        self.key_pattern = r"\_\d+"
 
         self._parse_components_from_yaml(components)
 
@@ -67,7 +68,7 @@ class Loss:
                 f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}"
             )
 
-    def __call__(self, pred: dict, ref: dict):
+    def __call__(self, pred: dict, ref: dict, **kwargs):
         '''
         returns:
         total loss for this batch
@@ -81,6 +82,7 @@ class Loss:
                 ref=ref,
                 key=self.remove_suffix(key),
                 mean=True,
+                **kwargs,
             )
             contrib[key] = _loss
             loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
@@ -112,10 +114,12 @@ class Loss:
         return key
 
     def remove_suffix(self, key):
-        return re.sub('_suffix_\d+', '', key)
+        return re.sub(self.key_pattern, '', key)
 
     def add_suffix(self, key: str, suffix_id: int):
-        return f"{key}_suffix_{str(suffix_id)}"
+        if re.search(self.key_pattern, key):
+            raise AssertionError(f"Loss name must not contain '_[$int]' in name: {key}")
+        return f"{key}_{str(suffix_id)}"
 
 
 

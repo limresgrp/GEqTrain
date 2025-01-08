@@ -27,6 +27,8 @@ EDGE_CELL_SHIFT_KEY: Final[str] = "edge_cell_shift"
 # [n_batch, 3, 3] or [3, 3] tensor where rows are the cell vectors
 CELL_KEY: Final[str] = "cell"
 # [n_nodes] long tensor
+ATOM_NUMBER_KEY: Final[str] = "atom_numbers"
+# [n_nodes] long tensor
 NODE_TYPE_KEY: Final[str] = "node_types"
 # [n_edge] long tensor
 EDGE_TYPE_KEY: Final[str] = "edge_types"
@@ -52,6 +54,10 @@ NODE_OUTPUT_KEY: Final[str] = "node_output"
 
 # [n_edges, dim] (possibly equivariant) edge input attributes
 EDGE_ATTRS_KEY: Final[str] = "edge_attrs" # look at difference between NODE_ATTRS_KEY and NODE_FEATURES_KEY
+# [n_edges, dim] (possibly equivariant) features of the edges
+EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
+# [n_edges, dim] (possibly equivariant) output features of the edges
+EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 # [n_edges, 3] tensor of displacement vectors associated to edges
 EDGE_VECTORS_KEY: Final[str] = "edge_vectors"
 # [n_edges] tensor of the lengths of EDGE_VECTORS
@@ -60,17 +66,15 @@ EDGE_LENGTH_KEY: Final[str] = "edge_lengths"
 EDGE_ANGULAR_ATTRS_KEY: Final[str] = "edge_angular_attrs"
 # [n_edges, dim] invariant radial attributes of the edges
 EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
-# [n_edges, dim] (possibly equivariant) features of the edges
-EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
-# [n_edges, dim] (possibly equivariant) output features of the edges
-EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 
 # [n_graphs, dim] invariant graph input attributes
 GRAPH_ATTRS_KEY: Final[str] = "graph_attrs"
-# [n_graphs, dim] (possibly equivariant) output feature of graph
+# [n_graphs, dim] (possibly equivariant) graph features of graph
+GRAPH_FEATURES_KEY: Final[str] = "graph_features"
+# [n_graphs, dim] (possibly equivariant) output features of graph
 GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
 
-NOISE: Final[str] = "noise"
+NOISE_KEY: Final[str] = "noise"
 
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [

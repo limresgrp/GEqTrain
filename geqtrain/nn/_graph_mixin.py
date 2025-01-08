@@ -1,14 +1,17 @@
-from typing import Dict, Tuple, Callable, Any, Sequence, Union, Mapping, Optional
+from typing import Dict, Iterator, Tuple, Callable, Any, Sequence, Union, Mapping, Optional
 from collections import OrderedDict
+from torch._jit_internal import _copy_to_script_wrapper
 
 import torch
 import random
-from torch.nn.modules.module import T
-
 from e3nn import o3
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import instantiate
+
+
+def is_instance_of_class(obj):
+    return isinstance(obj, object) and not isinstance(obj, type(object))
 
 
 class GraphModuleMixin:
@@ -150,7 +153,32 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             modules = OrderedDict(modules)
         else:
             modules = OrderedDict((f"module{i}", m) for i, m in enumerate(module_list))
+        
         super().__init__(modules)
+
+        flat_modules = OrderedDict()
+
+        def recursive_flatten(module: torch.nn.Module, prefix=''):
+            """
+            Recursively extracts modules from Sequential and nested Sequential,
+            replacing `.` with `_` in module names to avoid conflicts.
+            """
+            for name, submodule in module.named_children():
+                safe_name = name.replace('.', '_')  # Replace dots in names
+                # If the submodule is another Sequential, recurse into it
+                if isinstance(submodule, SequentialGraphNetwork):
+                    recursive_flatten(submodule, prefix)
+                else:
+                    # Add non-sequential modules to the flat dictionary
+                    flat_modules[prefix + safe_name] = submodule
+
+        # Start the recursive flattening
+        for name, module in self:
+            if isinstance(module, SequentialGraphNetwork):
+                recursive_flatten(self)
+            else:
+                flat_modules[name] = module
+        super().__init__(flat_modules)
 
     @classmethod
     def from_parameters(
@@ -190,22 +218,25 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                 raise TypeError(
                     f"The builder has to be a class or a function. got {type(builder)}"
                 )
-
-            instance, _ = instantiate(
-                builder=builder,
-                prefix=name,
-                positional_args=(
-                    dict(
-                        irreps_in=(
-                            built_modules[-1].irreps_out
-                            if len(built_modules) > 0
-                            else irreps_in
+            
+            if is_instance_of_class(builder):
+                instance = builder
+            else:
+                instance, _ = instantiate(
+                    builder=builder,
+                    prefix=name,
+                    positional_args=(
+                        dict(
+                            irreps_in=(
+                                built_modules[-1].irreps_out
+                                if len(built_modules) > 0
+                                else irreps_in
+                            )
                         )
-                    )
-                ),
-                optional_args=params,
-                all_args=shared_params,
-            )
+                    ),
+                    optional_args=params,
+                    all_args=shared_params,
+                )
 
             if not isinstance(instance, GraphModuleMixin):
                 raise TypeError(
@@ -350,9 +381,36 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         self.insert(after=after, before=before, name=name, module=instance)
         return
 
+    def get_param(self, name):
+        """
+        Retrieves the first occurrence of a parameter with the given name
+        from the submodules of this SequentialGraphNetwork.
+        """
+        for module in self.modules():
+            if hasattr(module, name):
+                return getattr(module, name)
+        # Raise an error if the parameter is not found
+        raise AttributeError(f"No submodule contains the parameter '{name}'")
+    
+    def get_module(self, name):
+        """
+        Retrieves a module by its name from the OrderedDict of this Sequential container.
+        """
+        # Use the built-in dictionary-like access of nn.Sequential
+        try:
+            return self._modules[name]
+        except KeyError:
+            raise KeyError(f"Module with name '{name}' not found in the Sequential container.")
+
+    # Copied from https://pytorch.org/docs/stable/_modules/torch/nn/modules/container.html#Sequential
+    # returning also module names
+    @_copy_to_script_wrapper
+    def __iter__(self) -> Iterator[torch.nn.Module]:
+        return iter(self._modules.items())
+    
     # Copied from https://pytorch.org/docs/stable/_modules/torch/nn/modules/container.html#Sequential
     # with type annotations added
     def forward(self, input: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        for module in self:
+        for name, module in self:
             input = module(input)
         return input

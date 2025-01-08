@@ -32,13 +32,13 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
             n_types = values.get('actual_num_types', num_types)
             embedding_dim = values['embedding_dimensionality']
             emb_module = torch.nn.Embedding(n_types, embedding_dim)
-            torch.nn.init.normal_(emb_module.weight, mean=0, std=math.isqrt(embedding_dim))
+            torch.nn.init.normal_(emb_module.weight, mean=0, std=1) # std 1 or math.isqrt(embedding_dim), 1 could be better
 
             attr_modules[field] = emb_module
             output_embedding_dim += embedding_dim
 
         self.attr_modules = attr_modules
-        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])}
+        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
 
