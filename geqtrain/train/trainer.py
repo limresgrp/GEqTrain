@@ -1127,78 +1127,6 @@ class Trainer:
             if hasattr(self, "using_batch_lvl_lrscheduler"): return
             setattr(self, "using_batch_lvl_lrscheduler", False)
 
-    def _log_updates(self):
-
-        update_log = logging.getLogger(self.log_updates)
-        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
-
-        # build titles for logging file(s)
-        # done only once
-        if not hasattr(self, 'update_logging_titles'):
-            self.update_logging_titles = [
-                param_name
-                for param_name, param in self.model.named_parameters()
-                if (
-                    param.grad is not None and
-                    param.dim() > 1 and
-                    "bias" not in param_name and
-                    "norm" not in param_name
-                )
-            ]
-            _titles = ""
-            for t in self.update_logging_titles:
-                _titles += f"{t}, "
-            _titles = _titles.strip().rstrip(',')
-            update_log.info(_titles)
-            grad_to_weight_ratio_log.info(_titles)
-
-        # log the values
-        update_speed, grad_ratio = "", ""
-        with torch.no_grad():
-            for param_name, param in self.model.named_parameters():
-                if (
-                    param.grad is not None and
-                    param.dim() > 1 and
-                    "bias" not in param_name and
-                    "norm" not in param_name
-                ):
-                    lr = get_latest_lr(self.optim, self.model, param_name)
-                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
-                    grad_to_weight_ratio = param.grad.std()/param.std()
-                    update_speed += f"{update:.4}, "
-                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
-
-        update_log.info(update_speed.strip().rstrip(','))
-        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
-
-    def _batch_lvl_lrscheduler_step(self):
-        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
-        if hasattr(self, "using_batch_lvl_lrscheduler"):
-            if not self.using_batch_lvl_lrscheduler:
-                return
-
-        # todo: instead of str comparison could use a dict with k:lr_sched_name, v: 0/1 whether that scheduler is being used + assert check!
-        # idea: for loop on num_of_possible_lr_scheduler is surely faster then str cmpr thru the whole lr scheduler name
-        if self.lr_scheduler_name == "CosineAnnealingLR":
-            self.lr_sched.step()
-            if hasattr(self, "using_batch_lvl_lrscheduler"): return
-            setattr(self, "using_batch_lvl_lrscheduler", True)
-
-        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
-            if hasattr(self, "using_batch_lvl_lrscheduler"): return
-            setattr(self, "using_batch_lvl_lrscheduler", True)
-
-    def _epoch_lvl_lrscheduler_step(self):
-        if hasattr(self, "using_batch_lvl_lrscheduler"):
-            if self.using_batch_lvl_lrscheduler:
-                return
-
-        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
-            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
-            if hasattr(self, "using_batch_lvl_lrscheduler"): return
-            setattr(self, "using_batch_lvl_lrscheduler", False)
-
     def _is_warmup_period_over(self):
         if not self.use_warmup:
             return True
@@ -1642,7 +1570,7 @@ class Trainer:
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
         self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
-        
+
         def log_data_points(dataset, prefix: str):
             loss_clean_keys = [self.loss.remove_suffix(key) for key in self.loss.keys]
             counts = {}
@@ -1651,7 +1579,7 @@ class Trainer:
                     counts[loss_clean_key] = counts.get(loss_clean_key, 0) + torch.sum(~torch.isnan(data[loss_clean_key])).item()
             for k, v in counts.items():
                 self.logger.info(f"{prefix} data points for field {k}: {v}")
-        
+
         log_data_points(self.dataset_train, prefix='Training')
         log_data_points(self.dataset_val  , prefix='Validation')
 
