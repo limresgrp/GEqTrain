@@ -121,5 +121,5 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
         if not self.use_attention:
-          data[self.out_field] *= self.env_sum_normalization + torch.as_tensor([1.], device=self.env_sum_normalization.device)
+          data[self.out_field] = data[self.out_field] * self.env_sum_normalization
         return data

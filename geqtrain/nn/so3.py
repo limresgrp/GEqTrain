@@ -15,6 +15,8 @@ class SO3_Linear(torch.nn.Module):
             bias: bool = True,
         ):
         '''
+        FOR DOCUMENTATION purposes: UNDERSTAND EQUIVARIANT LINEAR LAYER
+
         Initializes the SO3_Linear layer.
 
         Args:
@@ -52,6 +54,7 @@ class SO3_Linear(torch.nn.Module):
         self.mul_out = out_irreps[0].mul
         self.bias = None
         
+        scalars = 0
         params = {}
         lengths = []
         rearrange_in_list  = []
@@ -78,8 +81,10 @@ class SO3_Linear(torch.nn.Module):
             rearrange_out_list.append(Rearrange('b l (m o) -> b m (o l)', m=self.mul_out, l=_l_dims_out[0], o=len(_l_dims_out)))
 
             if l == 0 and bias:
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, len(l_out_irr)))
+                scalars = len(l_out_irr)
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, scalars))
         
+        self.scalars            = scalars
         self.lengths            = lengths
         self.params             = torch.nn.ParameterDict(params)
         self.rearrange_in_list  = torch.nn.ModuleList(rearrange_in_list)
@@ -110,7 +115,7 @@ class SO3_Linear(torch.nn.Module):
         
         out = torch.cat(out, dim=-1)
         if self.bias is not None:
-            out[..., :sum(self.l_dims_out[0])] += self.bias.unsqueeze(0)
+            out[..., :self.scalars] += self.bias.unsqueeze(0)
 
         return out
 

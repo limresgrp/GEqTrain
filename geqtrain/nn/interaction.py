@@ -628,8 +628,7 @@ class InteractionLayer(torch.nn.Module):
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
         if not self.use_attention:
-          # local_env_per_node = local_env_per_node * (self.env_sum_normalization + torch.as_tensor([1.], device=self.env_sum_normalization.device))
-          local_env_per_node *= self.env_sum_normalization + torch.as_tensor([1.], device=self.env_sum_normalization.device)
+            local_env_per_node = local_env_per_node * self.env_sum_normalization
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
