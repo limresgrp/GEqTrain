@@ -3,7 +3,7 @@ import torch
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
-from einops import rearrange
+from einops.layers.torch import Rearrange
 
 
 @compile_mode("script")
@@ -15,6 +15,8 @@ class SO3_Linear(torch.nn.Module):
             bias: bool = True,
         ):
         '''
+        FOR DOCUMENTATION purposes: UNDERSTAND EQUIVARIANT LINEAR LAYER
+
         Initializes the SO3_Linear layer.
 
         Args:
@@ -52,9 +54,11 @@ class SO3_Linear(torch.nn.Module):
         self.mul_out = out_irreps[0].mul
         self.bias = None
         
+        scalars = 0
         params = {}
-        l_dims_in = []
-        l_dims_out = []
+        lengths = []
+        rearrange_in_list  = []
+        rearrange_out_list = []
 
         for l in set(out_irreps.ls):
             l_in_irr = [irr for irr in in_irreps if irr.ir.l == l]
@@ -69,16 +73,22 @@ class SO3_Linear(torch.nn.Module):
             torch.nn.init.uniform_(l_weight, -bound, bound)
             params[f'l{l}_weight'] = l_weight
 
-            l_dims_in.append([2 * l + 1] * len(l_in_irr))
-            l_dims_out.append([2 * l + 1] * len(l_out_irr))
+            _l_dims_in = [2 * l + 1] * len(l_in_irr)
+            _l_dims_out = [2 * l + 1] * len(l_out_irr)
+            lengths.append(sum(_l_dims_in))
+
+            rearrange_in_list.append(Rearrange('b m (i l) -> b l (m i)', m=self.mul_in, l=_l_dims_in[0],  i=len(_l_dims_in)))
+            rearrange_out_list.append(Rearrange('b l (m o) -> b m (o l)', m=self.mul_out, l=_l_dims_out[0], o=len(_l_dims_out)))
 
             if l == 0 and bias:
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, len(l_out_irr)))
+                scalars = len(l_out_irr)
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, scalars))
         
-        self.params     = torch.nn.ParameterDict(params)
-        self.l_dims_in  = l_dims_in
-        self.l_dims_out = l_dims_out
-
+        self.scalars            = scalars
+        self.lengths            = lengths
+        self.params             = torch.nn.ParameterDict(params)
+        self.rearrange_in_list  = torch.nn.ModuleList(rearrange_in_list)
+        self.rearrange_out_list = torch.nn.ModuleList(rearrange_out_list)
 
     def forward(self, x: torch.Tensor):
         '''
@@ -93,19 +103,19 @@ class SO3_Linear(torch.nn.Module):
 
         out = []
         start = 0
-        for _weight, _l_dims_in, _l_dims_out in zip(self.params.values(), self.l_dims_in, self.l_dims_out):
-            length = sum(_l_dims_in)
-            feature = x.narrow(dim=-1, start=start, length=length)
-            feature = rearrange(feature, 'b m (i l) -> b l (m i)', m=self.mul_in, l=_l_dims_in[0],  i=len(_l_dims_in))
+        for idx, (_weight, rearrange_in, rearrange_out) in enumerate(zip(self.params.values(), self.rearrange_in_list, self.rearrange_out_list)):
+            _length = self.lengths[idx]
+            feature = x.narrow(dim=-1, start=start, length=_length)
+            feature = rearrange_in(feature)
             feature = torch.einsum('bli, oi -> blo', feature, _weight)
-            feature = rearrange(feature, 'b l (m o) -> b m (o l)', m=self.mul_out, l=_l_dims_out[0], o=len(_l_dims_out))
+            feature = rearrange_out(feature)
 
             out.append(feature)
-            start += length
+            start += _length
         
         out = torch.cat(out, dim=-1)
         if self.bias is not None:
-            out[..., :sum(self.l_dims_out[0])] += self.bias.unsqueeze(0)
+            out[..., :self.scalars] += self.bias.unsqueeze(0)
 
         return out
 
@@ -167,6 +177,10 @@ class SO3_LayerNorm(torch.nn.Module):
         self.eps = eps
         
         l_dims = []
+        lengths = []
+        l_dim0_list = []
+        rearrange_in_list  = []
+        rearrange_out_list = []
 
         if self.normalization == 'std':
             self.register_buffer('balance_degree_weight', torch.zeros(sum([(2*l+1) for l in set(irreps.ls)]), 1))
@@ -180,17 +194,26 @@ class SO3_LayerNorm(torch.nn.Module):
 
             _l_dims = [2 * l + 1] * len(l_irr)
             l_dims.append(_l_dims)
-            length = _l_dims[0]
+            lengths.append(sum(_l_dims))
+            _l_dim0 = _l_dims[0]
+            l_dim0_list.append(_l_dim0)
+
+            rearrange_in_list.append( Rearrange('b m (i l) -> b l (m i)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
+            rearrange_out_list.append(Rearrange('b l (m i) -> b m (i l)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
             
             if self.normalization == 'std':
-                self.balance_degree_weight[start : (start + length), :] = (1.0 / (length * len(set(irreps.ls))))
+                self.balance_degree_weight[start : (start + _l_dim0), :] = (1.0 / (_l_dim0 * len(set(irreps.ls))))
             
-            start += length
+            start += _l_dim0
 
             if l == 0 and bias:
                 self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_irr)))
         
         self.l_dims = l_dims
+        self.lengths            = tuple(lengths)
+        self.l_dim0_list        = tuple(l_dim0_list)
+        self.rearrange_in_list  = torch.nn.ModuleList(rearrange_in_list)
+        self.rearrange_out_list = torch.nn.ModuleList(rearrange_out_list)
 
         self.l_dim_norm = 1.
         if self.normalization == 'std':
@@ -215,10 +238,11 @@ class SO3_LayerNorm(torch.nn.Module):
         out = []
         start = 0
         l_start = 0
-        for _l_dims in self.l_dims:
-            length = sum(_l_dims)
-            feature = x.narrow(dim=-1, start=start, length=length)
-            feature = rearrange(feature, 'b m (i l) -> b l (m i)', m=self.mul, l=_l_dims[0], i=len(_l_dims))
+        for idx, (rearrange_in, rearrange_out) in enumerate(zip(self.rearrange_in_list, self.rearrange_out_list)):
+            _length, _l_dim0 = self.lengths[idx], self.l_dim0_list[idx]
+            
+            feature = x.narrow(dim=-1, start=start, length=_length)
+            feature = rearrange_in(feature)
 
             if self.normalization == 'norm':
                 feature_norm = feature.pow(2).sum(dim=1, keepdim=True)      # [N, 1, C]
@@ -226,26 +250,32 @@ class SO3_LayerNorm(torch.nn.Module):
                 feature_norm = feature.pow(2).mean(dim=1, keepdim=True)     # [N, 1, C]
             elif self.normalization == 'std':
                 feature_norm = feature.pow(2)                               # [N, (2 * l) + 1, C]
-                balance_degree_weight = self.balance_degree_weight.narrow(dim=0, start=l_start, length=_l_dims[0])
+                balance_degree_weight = self.balance_degree_weight.narrow(dim=0, start=l_start, length=_l_dim0)
                 feature_norm = torch.einsum('blc, la -> bac', feature_norm, balance_degree_weight) # [N, 1, C]
+            else:
+                raise Exception(f'Invalid normalization: {self.normalization}. Use one among [norm, component, std]')
 
             feature_norm = torch.mean(feature_norm, dim=2, keepdim=True)    # [N, 1, 1]
-            # Feattures whose feature_norm is < 1.e-3 are not normalized (thus they are let die)
             feature_norm = (feature_norm + self.eps).pow(-0.5) * self.l_dim_norm
             feature = feature * feature_norm
 
-            feature = rearrange(feature, 'b l (m i) -> b m (i l)', m=self.mul, l=_l_dims[0], i=len(_l_dims))
+            feature = rearrange_out(feature)
 
             out.append(feature)
-            start += length
-            l_start += _l_dims[0]
+            start += _length
+            l_start += _l_dim0
         
         out = torch.cat(out, dim=-1)
         if self.bias is not None:
             out[..., :sum(self.l_dims[0])] += self.bias.unsqueeze(0)
 
         if out.shape != orig_shape:
-            out = out.reshape(*orig_shape)
+            if len(orig_shape) == 2:
+                a, b = orig_shape
+                out = out.reshape(a, b)
+            else:
+                a, b, c = orig_shape
+                out = out.reshape(a, b, c)
         return out
 
     def __repr__(self):

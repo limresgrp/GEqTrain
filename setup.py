@@ -26,9 +26,11 @@ setup(
         ]
     },
     install_requires=[
+        "ase",
         "numpy",
         "einops",
         "tqdm",
+        "pytorch-warmup",
         "wandb>=0.13",
         "e3nn>=0.4.4",
         "pyyaml",

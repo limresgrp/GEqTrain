@@ -2,26 +2,21 @@
 """
 
 import torch
-from torch.nn.utils.parametrizations import weight_norm
 from typing import List, Optional
-from math import sqrt
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule
+from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule, SwiGLU
+from geqtrain.utils import add_tags_to_parameters
 
 
 def select_nonlinearity(nonlinearity):
-    if nonlinearity == 'ssp':
-        non_lin_instance = ShiftedSoftPlusModule()
-    elif nonlinearity == "silu":
-        non_lin_instance = torch.nn.SiLU()
-    elif nonlinearity == "selu":
-        non_lin_instance = torch.nn.SELU()
-    elif nonlinearity == "relu":
-        non_lin_instance = torch.nn.ReLU()
-    elif nonlinearity:
-        raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
+    if nonlinearity == 'ssp': non_lin_instance = ShiftedSoftPlusModule()
+    elif nonlinearity == "silu": non_lin_instance = torch.nn.SiLU()
+    elif nonlinearity == "selu": non_lin_instance = torch.nn.SELU()
+    elif nonlinearity == "relu": non_lin_instance = torch.nn.ReLU()
+    elif nonlinearity == "swiglu": non_lin_instance = SwiGLUModule()
+    elif nonlinearity: raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
     return non_lin_instance
 
 
@@ -73,29 +68,28 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             )
             output = mlp(torch.randn(32, 128))
     """
-
     in_features: int
     out_features: int
     use_layer_norm: bool
     use_weight_norm: bool
     dim_weight_norm: int
-
     def __init__(
         self,
         mlp_input_dimension: Optional[int],
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
         mlp_nonlinearity: Optional[str] = "silu",
-        use_layer_norm: bool = False,
-        use_weight_norm: bool = True,
+        use_layer_norm: bool = True,
+        use_weight_norm: bool = False,
         dim_weight_norm: int = 0,
         has_bias: bool = False,
         bias: Optional[List] = None,
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
+        dampen: bool = False,
+        gain:Optional[float] = None,
     ):
         super().__init__()
-
         dimensions = (
             ([mlp_input_dimension] if mlp_input_dimension is not None else [])
             + mlp_latent_dimensions
@@ -103,12 +97,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         )
         assert len(dimensions) >= 2  # Must have input and output dim_weight_norm
         num_layers = len(dimensions) - 1
-
         self.in_features = dimensions[0]
         self.out_features = dimensions[-1]
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
         self.use_layer_norm = use_layer_norm
+        self.gain = gain
 
         nonlinearity = {
             None: None,
@@ -116,52 +110,52 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "ssp": ShiftedSoftPlusModule,
             "selu": torch.nn.functional.selu,
             "relu": torch.nn.functional.relu,
+            "swiglu": SwiGLUModule,
         }[mlp_nonlinearity]
 
         nonlin_const = 1.0
         if nonlinearity is not None:
-            if mlp_nonlinearity == "ssp":
-                nonlin_const = normalize2mom(ShiftedSoftPlus).cst
-            elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu":
-                nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
-            else:
-                nonlin_const = normalize2mom(nonlinearity).cst
+            if mlp_nonlinearity == "ssp": nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+            elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu": nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
+            elif mlp_nonlinearity == "silu": nonlin_const = normalize2mom(nonlinearity).cst
+            elif mlp_nonlinearity == "swiglu": nonlin_const = 2.02 # avoids variance explosion in interaction layers
 
-        if bias is not None:
-            has_bias = True
+        if bias is not None: has_bias = True
 
         sequential_dict = OrderedDict()
-
-        if self.use_layer_norm:
-            sequential_dict['norm'] = torch.nn.LayerNorm(dimensions[0])
-
         for layer_index, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
-            bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
-            lin_layer = torch.nn.Linear(h_in, h_out, bias=bias_condition)
 
+            bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
             is_last_layer = layer_index == num_layers - 1
+            if mlp_nonlinearity == "swiglu" and not is_last_layer: h_out = 2*h_out
+            lin_layer = torch.nn.Linear(h_in, h_out, bias=False if self.use_layer_norm else bias_condition)
+
             if (nonlinearity is None) or is_last_layer:
+                self.gain = None
                 norm_const = 1.
                 modules = [(f"linear_{layer_index}", lin_layer)]
             else:
                 norm_const = nonlin_const
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
-                modules = [
-                        (f"linear_{layer_index}", lin_layer),
-                        (f"activation_{layer_index}", non_lin_instance),
-                ]
+                modules = [(f"linear_{layer_index}", lin_layer)]
+                if self.use_layer_norm:
+                  modules.append((f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)))
+                modules.append((f"activation_{layer_index}", non_lin_instance))
 
+            if self.use_layer_norm: modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
+            if zero_init_last_layer_weights: norm_const = norm_const * 1.e-1
+
+            # initialize weights
             with torch.no_grad():
-                if is_last_layer:
-                    if has_bias and bias is not None:
-                        lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
-                    if zero_init_last_layer_weights:
-                        norm_const = norm_const * 1.e-1
-                # as in: https://pytorch.org/docs/stable/nn.init.html#torch.nn.init.kaiming_normal_
-                lin_layer.weight = lin_layer.weight.normal_(0, norm_const / sqrt(float(h_in)))
+                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const if not self.gain else self.gain)
+                if lin_layer.bias is not None:
+                    if is_last_layer and bias is not None: lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
+                    else: torch.nn.init.zeros_(lin_layer.bias)
 
             # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:
+                if int(torch.__version__.split('.')[0]) >= 2: from torch.nn.utils.parametrizations import weight_norm
+                else: from torch.nn.utils import weight_norm
                 lin_layer = weight_norm(lin_layer, name='weight', dim=self.dim_weight_norm)
 
             for module in modules:
@@ -173,6 +167,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             sequential_dict["dropout"] = torch.nn.Dropout(dropout)
 
         self.sequential = torch.nn.Sequential(sequential_dict)
+
+        if dampen:
+            add_tags_to_parameters(self, 'dampen')
 
     def forward(self, x):
         return self.sequential(x)

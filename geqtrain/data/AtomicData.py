@@ -29,8 +29,10 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.NODE_TYPE_KEY,
+    AtomicDataDict.ATOM_NUMBER_KEY,
     AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
+    AtomicDataDict.NOISE_KEY,
 }
 _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_VECTORS_KEY,
@@ -47,10 +49,12 @@ _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.GRAPH_OUTPUT_KEY,
     AtomicDataDict.CELL_KEY,
 }
+_DEFAULT_EXTRA_FIELDS: Set[str] = {}
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
 _EDGE_FIELDS:  Set[str] = set(_DEFAULT_EDGE_FIELDS)
 _GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
+_EXTRA_FIELDS: Set[str] = set(_DEFAULT_EXTRA_FIELDS)
 _LONG_FIELDS:  Set[str] = set(_DEFAULT_LONG_FIELDS)
 
 
@@ -58,6 +62,7 @@ def register_fields(
     node_fields:  Sequence[str] = [],
     edge_fields:  Sequence[str] = [],
     graph_fields: Sequence[str] = [],
+    extra_fields: Sequence[str] = [],
     long_fields:  Sequence[str] = [],
 ) -> None:
     r"""
@@ -67,6 +72,7 @@ def register_fields(
     - _NODE_FIELDS
     - _EDGE_FIELDS
     - _GRAPH_FIELDS
+    - _EXTRA_FIELDS
     - _LONG_FIELDS
     that are used to parse the yaml and thus the data from source.
 
@@ -77,23 +83,26 @@ def register_fields(
         - node_fields
         - edge_fields
         - graph_fields
+        - extra_fields
         - long_fields
     """
     node_fields:  set = set(node_fields)
     edge_fields:  set = set(edge_fields)
     graph_fields: set = set(graph_fields)
-    allfields = node_fields.union(edge_fields, graph_fields)
-    assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields)
+    extra_fields: set = set(extra_fields)
+    allfields = node_fields.union(edge_fields, graph_fields, extra_fields)
+    assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields)
 
     _NODE_FIELDS.update(node_fields)
     _EDGE_FIELDS.update(edge_fields)
     _GRAPH_FIELDS.update(graph_fields)
+    _EXTRA_FIELDS.update(extra_fields)
     _LONG_FIELDS.update(long_fields)
-    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS)):
-        raise ValueError("At least one key was registered as more than one of node, edge, or graph!")
+    if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _EXTRA_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS) + len(_EXTRA_FIELDS)):
+        raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
 
 
-def _process_dict(kwargs, ignore_fields=[]):
+def _process_dict(kwargs, ignore_fields=['smiles']):
     """Convert a dict of data into correct dtypes/shapes according to key"""
     # Deal with _some_ dtype issues
     for k, v in kwargs.items():
@@ -108,19 +117,19 @@ def _process_dict(kwargs, ignore_fields=[]):
             kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, np.ndarray):
             if np.issubdtype(v.dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, list):
             ele_dtype = np.array(v).dtype
             if np.issubdtype(ele_dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif np.issubdtype(type(v), np.floating):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
-            kwargs[k] = torch.as_tensor(v, dtype=torch.get_default_dtype())
+            kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
         elif np.issubdtype(type(v), int):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
@@ -226,7 +235,7 @@ class AtomicData(Data):
             if AtomicDataDict.BATCH_KEY in self and self.batch is not None:
                 assert self.batch.dim() == 2 and self.batch.shape[0] == self.num_nodes
             if AtomicDataDict.CELL_KEY in self and self.cell is not None:
-                assert self.cell.shape == (3, 3)
+                assert self.cell.shape == (3, 3), f"Wrong Cell shape: {self.cell.shape}"
 
             # Validate irreps
             # __*__ is the only way to hide from torch_geometric
@@ -240,6 +249,8 @@ class AtomicData(Data):
         cls,
         pos=None,
         r_max: float = None,
+        cell = None,
+        pbc = None,
         **kwargs,
     ):
         """Build neighbor graph from points.
@@ -251,12 +262,37 @@ class AtomicData(Data):
         """
         if pos is None or r_max is None:
             raise ValueError("pos and r_max must be given.")
+        
+        if pbc is None:
+            if cell is not None:
+                raise ValueError(
+                    "A cell was provided, but pbc weren't. Please explicitly provide PBC."
+                )
+            # there are no PBC if cell and pbc are not provided
+            pbc = False
+        
+        if isinstance(pbc, bool):
+            pbc = (pbc,) * 3
+        else:
+            assert len(pbc) == 3
 
-        pos = torch.as_tensor(pos, dtype=torch.get_default_dtype())
+        pos = torch.as_tensor(pos, dtype=torch.float32)
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
+        edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
 
         if edge_index is None:
-            edge_index = neighbor_list(pos=pos, r_max=r_max)
+            edge_index, edge_cell_shift, cell = neighbor_list(
+                pos=pos,
+                r_max=r_max,
+                cell=cell,
+                pbc=pbc,
+            )
+        
+        if cell is not None:
+            kwargs[AtomicDataDict.CELL_KEY] = cell.view(3, 3)
+            kwargs[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = edge_cell_shift
+        if pbc is not None:
+            kwargs[AtomicDataDict.PBC_KEY] = torch.as_tensor(pbc, dtype=torch.bool).view(3)
 
         return cls(pos=pos, edge_index=edge_index, **kwargs)
 
@@ -302,6 +338,8 @@ class AtomicData(Data):
 def neighbor_list(
     pos: torch.Tensor,
     r_max: float,
+    cell=None,
+    pbc=False,
 ):
     """Create neighbor list (``edge_index``) based on radial cutoff.
 
@@ -327,5 +365,79 @@ def neighbor_list(
         edge_index (torch.tensor shape [2, num_edges]): List of edges.
     """
 
-    dist_matrix = torch.norm(pos[:, None, ...] - pos[None, ...], dim=-1).fill_diagonal_(torch.inf)
-    return torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device)
+    if any(pbc):
+        import ase.geometry
+        import ase.neighborlist
+
+        if isinstance(pbc, bool):
+            pbc = (pbc,) * 3
+        
+        # Either the position or the cell may be on the GPU as tensors
+        if isinstance(pos, torch.Tensor):
+            temp_pos = pos.detach().cpu().numpy()
+            out_device = pos.device
+            out_dtype = pos.dtype
+        else:
+            temp_pos = np.asarray(pos)
+            out_device = torch.device("cpu")
+            out_dtype = torch.float32
+        
+        if isinstance(cell, torch.Tensor):
+            temp_cell = cell.detach().cpu().numpy()
+            cell_tensor = cell.to(device=out_device, dtype=out_dtype)
+        elif cell is not None:
+            temp_cell = np.asarray(cell)
+            cell_tensor = torch.as_tensor(temp_cell, device=out_device, dtype=out_dtype)
+        else:
+            # ASE will "complete" this correctly.
+            temp_cell = np.zeros((3, 3), dtype=temp_pos.dtype)
+            cell_tensor = torch.as_tensor(temp_cell, device=out_device, dtype=out_dtype)
+
+        # ASE dependent part
+        temp_cell = ase.geometry.complete_cell(temp_cell)
+        
+        first_idex, second_idex, edge_cell_shift = ase.neighborlist.primitive_neighbor_list(
+            "ijS",
+            pbc,
+            temp_cell,
+            temp_pos,
+            cutoff=r_max,
+            self_interaction=False,  # we want edges from atom to itself in different periodic images!
+            use_scaled_positions=False,
+        )
+        # Remove self-node edges (a node with itself)
+        bad_edge = first_idex == second_idex
+        bad_edge &= np.all(edge_cell_shift == 0, axis=1)
+        keep_edge = ~bad_edge
+        if not np.any(keep_edge):
+            raise ValueError(
+                f"Every single atom has no neighbors within the cutoff r_max={r_max} (after eliminating self edges, no edges remain in this system)"
+            )
+        first_idex = first_idex[keep_edge]
+        second_idex = second_idex[keep_edge]
+        edge_cell_shift = edge_cell_shift[keep_edge]
+
+        edge_index = torch.vstack(
+            (torch.LongTensor(first_idex), torch.LongTensor(second_idex))
+        ).to(device=out_device)
+
+        edge_cell_shift = torch.as_tensor(
+            edge_cell_shift,
+            dtype=out_dtype,
+            device=out_device,
+        )
+        # Check pbc consistency
+        x = pos[edge_index]
+        dist_vec = x[1] - x[0]
+        z = dist_vec + torch.einsum(
+                "ni,ij->nj",
+                edge_cell_shift,
+                cell_tensor,
+            )
+        assert torch.norm(z, dim=-1).max() < r_max
+    else:
+        dist_matrix = torch.norm(pos[:, None, ...] - pos[None, ...], dim=-1).fill_diagonal_(torch.inf)
+        edge_index = torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device)
+        edge_cell_shift, cell_tensor = None, None
+    
+    return edge_index, edge_cell_shift, cell_tensor

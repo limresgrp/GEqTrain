@@ -1,7 +1,7 @@
 import torch
 import math
 from typing import Optional
-from einops import rearrange
+from einops.layers.torch import Rearrange
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 from geqtrain.data import AtomicDataDict
@@ -10,7 +10,8 @@ from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
 class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
-    """Sum edgewise features.
+    """
+    Sum edgewise features into nodes.
 
     Includes optional per-species-pair edgewise scales.
     """
@@ -22,14 +23,14 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         self,
         field: str,
         out_field: Optional[str] = None,
+        use_attention: bool = False,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
         head_dim: int = 32,
-        use_attention: bool = True,
-        irreps_in={},
         avg_num_neighbors: Optional[float] = 5.0,
+        irreps_in={},
+        avg_num_neighbors_is_learnable: bool = True,
     ):
-        """Sum edges into nodes."""
         super().__init__()
         self.field = field
         self.use_attention = use_attention
@@ -41,6 +42,9 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             my_irreps_in={field: irreps},
             irreps_out={out_field: irreps},
         )
+
+        self.node_attr_to_query = None
+        self.edge_feat_to_key = None
 
         if self.use_attention:
 
@@ -81,22 +85,16 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                 **readout_latent_kwargs,
             )
 
-            self.reshape_out = inverse_reshape_irreps(irreps)
+            self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
 
-            self.irreps_out.update(
-                {
-                    self.out_field: irreps
-                }
-            )
-        else:
-            self.node_attr_to_query = None
-            self.edge_feat_to_key = None
+            self.reshape_out = inverse_reshape_irreps(irreps)
+            self.irreps_out.update({self.out_field: irreps})
 
         if not self.use_attention:
-            self.register_buffer(
-                "env_sum_normalization",
-                torch.as_tensor([avg_num_neighbors]).rsqrt(),
-            )
+          if avg_num_neighbors_is_learnable:
+            self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
+          else:
+            self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -104,13 +102,14 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
         num_nodes = len(species)
+        assert num_nodes == len(data[AtomicDataDict.POSITIONS_KEY])
 
         if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])
-            Q = rearrange(Q, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+            Q = self.rearrange_qk(Q)
 
             K = self.edge_feat_to_key(edge_feat[..., :self.n_scalars])
-            K = rearrange(K, 'e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+            K = self.rearrange_qk(K)
 
             W = torch.einsum('ecd,ecd -> ec', Q, K) * self.isqrtd
 
@@ -122,6 +121,5 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
         if not self.use_attention:
-            data[self.out_field] *= self.env_sum_normalization
-
+          data[self.out_field] = data[self.out_field] * self.env_sum_normalization
         return data

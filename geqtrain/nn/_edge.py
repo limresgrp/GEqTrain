@@ -28,7 +28,7 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
         self,
         irreps_edge_sh: Union[int, str, o3.Irreps],
         edge_sh_normalize: bool = True,
-        edge_sh_normalization: str = "norm",
+        edge_sh_normalization: str = "norm", # with norm each l has norm=1
         irreps_in = None,
         out_field: str = AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
     ):
@@ -49,7 +49,7 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if data.get(self.out_field, None) is None:
+        if self.out_field not in data:
             data = AtomicDataDict.with_edge_vectors(data, with_lengths=False)
             edge_vec = data[AtomicDataDict.EDGE_VECTORS_KEY]
             edge_sh = self.sh(edge_vec)
@@ -80,7 +80,7 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
         )
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if data.get(self.out_field, None) is None:
+        if self.out_field not in data:
             data = AtomicDataDict.with_edge_vectors(data, with_lengths=True)
             edge_length = data[AtomicDataDict.EDGE_LENGTH_KEY]
             edge_length_embedded = self.basis(edge_length) * self.cutoff(edge_length)[:, None]

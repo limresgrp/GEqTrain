@@ -6,7 +6,6 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
-from geqtrain.utils._global_options import DTYPE
 
 
 @compile_mode("script")
@@ -28,15 +27,15 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
 
     def __init__(
         self,
-        func: GraphModuleMixin,
         field: str,
         out_field: str,
         num_types: int,
         per_type_bias: Optional[List] = None,
-        per_type_std: Optional[List] = None,
+        per_type_std:  Optional[List] = None,
+        # Other:
+        irreps_in = None,
     ):
         super().__init__()
-        self.func = func
         self.field = field
         self.out_field = out_field
 
@@ -45,7 +44,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_bias to have length {num_types}, "
                 f"but got {len(per_type_bias)}"
             )
-            per_type_bias = torch.tensor(per_type_bias, dtype=DTYPE)
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
             self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
         else:
             self.per_type_bias = None
@@ -55,24 +54,22 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_std to have length {num_types}, "
                 f"but got {len(per_type_std)}"
             )
-            per_type_std = torch.tensor(per_type_std, dtype=DTYPE)
+            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
             self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
         else:
             self.per_type_std = None
         
         # check and init irreps
         self._init_irreps(
-            irreps_in=func.irreps_in,
+            irreps_in=irreps_in,
             my_irreps_in={
                 AtomicDataDict.POSITIONS_KEY: Irreps("1o"),
                 self.field: Irreps("0e"),
                 },
-            irreps_out={self.out_field: Irreps("0e")},
         )
+        self.irreps_out.update({self.out_field: Irreps("0e")})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        data = self.func(data)
-
         edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
         node_features = data[self.field]

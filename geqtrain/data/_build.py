@@ -80,8 +80,9 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         inpup_key = f"{prefix}_input" # get input path
         assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
         f_name = _config_dataset.get(inpup_key)
+
         if isdir(f_name): # can be dir
-            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if isfile(join(f_name, f))]
+            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
         else:
             dataset_file_names = [f_name] # can be 1 file
 
@@ -98,8 +99,8 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             arg_dicts=_config
         )
 
-        _config[prefixed_eff_key]["r_max"] = get_w_prefix(
-            "r_max",
+        _config[prefixed_eff_key][AtomicDataDict.R_MAX_KEY] = get_w_prefix(
+            AtomicDataDict.R_MAX_KEY,
             prefix=prefix,
             arg_dicts=[_config[prefixed_eff_key], _config],
         )

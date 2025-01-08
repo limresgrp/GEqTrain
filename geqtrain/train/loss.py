@@ -4,7 +4,7 @@ from typing import Union, List, Dict
 import torch.nn
 
 from geqtrain.train.utils import parse_dict
-from ._loss import instanciate_loss_function
+from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
 from torch_runstats import RunningStats, Reduction
@@ -39,24 +39,21 @@ class Loss:
 
     def __init__(
         self,
-        coeffs: Union[dict, str, List[str]],
-        coeff_schedule: str = "constant",
+        components: Union[str, List[str], List[dict]],
     ):
-
-        self.coeff_schedule = coeff_schedule
-        self.coeffs: Dict  = {}
-        self.funcs: Dict = {} # call key-associated (custom) callable defined in _loss.py. Classes in _loss.py acts as wrapper of torch.nn loss func (to provide further options)
         self.keys: List = [] # loss names
+        self.coeffs: Dict  = {} # coefficients to weight losses
+        self.funcs: Dict = {} # call key-associated (custom) callable defined in _loss.py. Classes in _loss.py acts as wrapper of torch.nn loss func (to provide further options)
+        self.func_params = {}
+        self.key_pattern = r"\_\d+"
 
-        self._parse_losses_from_yaml(coeffs)
+        self._parse_components_from_yaml(components)
 
-        self.keys = list(self.coeffs.keys()) # casting to list is required for pickling
-
-    def _parse_losses_from_yaml(self, coeffs):
-        if isinstance(coeffs, str):
-            self.register_coeffs_and_loss(key=coeffs, coeff=1.0, func="MSELoss", func_params={})
-        elif isinstance(coeffs, list):
-            for elem in coeffs:
+    def _parse_components_from_yaml(self, components):
+        if isinstance(components, str):
+            self.register_coeffs_and_loss(key=components, coeff=1.0, func="MSELoss", func_params={})
+        elif isinstance(components, list):
+            for elem in components:
                 if isinstance(elem, str):
                     self.register_coeffs_and_loss(key=elem, coeff=1.0, func="MSELoss", func_params={})
                 elif isinstance(elem, dict):
@@ -64,17 +61,14 @@ class Loss:
                         self.register_coeffs_and_loss(key=key, coeff=coeff, func=func, func_params=func_params)
                 else:
                     raise NotImplementedError(
-                        f"loss_coeffs can only a list of str or dict. got {type(coeffs)}"
+                        f"loss_coeffs can only a list of str or dict. got {type(components)}"
                     )
-        elif isinstance(coeffs, dict):
-            for key, coeff, func, func_params in parse_dict(coeffs):
-                parse_dict(coeffs)
         else:
             raise NotImplementedError(
-                f"loss_coeffs can only be str, list and dict. got {type(coeffs)}"
+                f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}"
             )
 
-    def __call__(self, pred: dict, ref: dict):
+    def __call__(self, pred: dict, ref: dict, **kwargs):
         '''
         returns:
         total loss for this batch
@@ -88,6 +82,7 @@ class Loss:
                 ref=ref,
                 key=self.remove_suffix(key),
                 mean=True,
+                **kwargs,
             )
             contrib[key] = _loss
             loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
@@ -104,23 +99,27 @@ class Loss:
         func_params: Dict dictionary of kwarded args to be passed
         '''
         key = self.suffix_key(key)
-        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
-        self.funcs[key] = instanciate_loss_function(func, func_params)
+        self.keys.append(key)
+        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
+        self.funcs[key] = instantiate_loss_function(func, func_params)
+        self.func_params[key] = func_params
 
     def suffix_key(self, key):
         suffix_id = 0
         key = self.add_suffix(key, suffix_id)
-        while key in self.coeffs.keys():
+        while key in self.keys:
             key = self.remove_suffix(key)
             key = self.add_suffix(key, suffix_id)
             suffix_id += 1
         return key
 
     def remove_suffix(self, key):
-        return re.sub('_suffix_\d+', '', key)
+        return re.sub(self.key_pattern, '', key)
 
     def add_suffix(self, key: str, suffix_id: int):
-        return f"{key}_suffix_{str(suffix_id)}"
+        if re.search(self.key_pattern, key):
+            raise AssertionError(f"Loss name must not contain '_[$int]' in name: {key}")
+        return f"{key}_{str(suffix_id)}"
 
 
 

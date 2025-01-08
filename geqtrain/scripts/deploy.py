@@ -12,7 +12,6 @@ import argparse
 import pathlib
 import logging
 import yaml
-import itertools
 import torch
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
@@ -21,10 +20,12 @@ import numpy as np  # noqa: F401
 
 from e3nn.util.jit import script
 
-from geqtrain.model import model_from_config
 from geqtrain.train import Trainer
 from geqtrain.utils import Config
 from geqtrain.utils._global_options import _set_global_options
+
+from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
+allow_ops_in_compiled_graph() # needed to compile einops. See https://github.com/arogozhnikov/einops/wiki/Using-torch.compile-with-einops
 
 CONFIG_KEY: Final[str] = "config"
 TORCH_VERSION_KEY: Final[str] = "torch_version"
@@ -102,13 +103,7 @@ def load_deployed_model(
         else:
             strategy = [("STATIC", 2)]
         global_config_dict[JIT_FUSION_STRATEGY] = strategy
-        # JIT bailout
-        # _set_global_options will check torch version
-        jit_bailout: int = metadata.get(JIT_BAILOUT_KEY, "")
-        if jit_bailout == "":
-            jit_bailout = 2
-        jit_bailout = int(jit_bailout)
-        global_config_dict[JIT_BAILOUT_KEY] = jit_bailout
+        
         # call to actually set the global options
         _set_global_options(
             global_config_dict,
@@ -169,7 +164,6 @@ def main(args=None):
     metadata: dict = {}
 
     metadata[R_MAX_KEY] = str(float(config["r_max"]))
-    metadata[JIT_BAILOUT_KEY] = str(config[JIT_BAILOUT_KEY])
     
     if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
         metadata[JIT_FUSION_STRATEGY] = ";".join(

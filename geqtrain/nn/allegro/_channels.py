@@ -6,7 +6,7 @@ from math import ceil
 import torch
 
 from e3nn.util.jit import compile_mode
-from einops import rearrange
+from einops.layers.torch import Rearrange
 
 
 @compile_mode("script")
@@ -43,6 +43,12 @@ class MakeWeightedChannels(torch.nn.Module):
         self.multiplicity_out = multiplicity_out
         self.weight_numel = len(irreps_in) * multiplicity_out
 
+        self.rearrange_weights = Rearrange(
+            'e (m d) -> e m d',
+            m=self.multiplicity_out,
+            d=self._num_irreps
+        )
+
     def forward(self, edge_attr, weights):
         # weights are [e, m, d], tensor of scalars
         # edge_attr are [e, d], geometric tensor
@@ -52,10 +58,5 @@ class MakeWeightedChannels(torch.nn.Module):
         return torch.einsum(
             "ed,emd->emd",
             edge_attr,
-            rearrange(
-                weights,
-                'e (m d) -> e m d',
-                m=self.multiplicity_out,
-                d=self._num_irreps
-            )[..., self._w_index],
+            self.rearrange_weights(weights)[:, :, self._w_index],
         )

@@ -71,7 +71,7 @@ class BesselBasisVec(nn.Module):
         self.register_buffer("bessel_values", bessel_values)
 
         bessel_weights = (
-            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
+            torch.ones(self.num_basis, dtype=torch.float32)
         )
         if self.trainable:
             self.bessel_weights = nn.Parameter(bessel_weights)
@@ -118,7 +118,7 @@ class GaussianBasis(nn.Module):
         self.register_buffer("gaussian_values", gaussian_values)
 
         gaussian_weights = (
-            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
+            torch.ones(self.num_basis, dtype=torch.float32)
         )
         if self.trainable:
             self.gaussian_weights = nn.Parameter(gaussian_weights)
@@ -137,3 +137,47 @@ class GaussianBasis(nn.Module):
         x = torch.clip(x, max=self.r_values.max())
         idcs = torch.searchsorted(self.r_values, x)
         return torch.einsum("i,ji->ji", self.gaussian_weights, self.gaussian_values[idcs])
+
+
+class PolyBasisVec(nn.Module):
+
+    def __init__(self, r_max, num_basis=8, accuracy=1e-3, trainable=True):
+        super(PolyBasisVec, self).__init__()
+
+        self.trainable = trainable
+        self.num_basis = num_basis
+        self.num_points = int(r_max / accuracy)
+        
+        r_values = torch.linspace(0., r_max, self.num_points)
+
+        def poly(x, power):
+            return torch.pow(x, -power)
+        
+        P_values = []
+        for power in range(1, num_basis + 1):
+            P_values.append(poly(r_values, power=power))
+        poly_values = torch.stack(P_values, dim=0).float().T
+
+        self.register_buffer("r_values", r_values)
+        self.register_buffer("poly_values", poly_values)
+
+        poly_weights = (
+            torch.ones(self.num_basis, dtype=torch.float32)
+        )
+        if self.trainable:
+            self.poly_weights = nn.Parameter(poly_weights)
+        else:
+            self.register_buffer("poly_weights", poly_weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluate Poly Basis for input x.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input
+        """
+        x = torch.clip(x, max=self.r_values.max())
+        idcs = torch.searchsorted(self.r_values, x)
+        return torch.einsum("i,ji->ji", self.poly_weights, self.poly_values[idcs])

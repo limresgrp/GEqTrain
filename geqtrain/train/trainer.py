@@ -20,6 +20,8 @@ from geqtrain.data import (
     DataLoader,
     AtomicData,
     AtomicDataDict,
+    AtomicInMemoryDataset,
+    _NODE_FIELDS,
     _EDGE_FIELDS,
 )
 from geqtrain.utils import (
@@ -38,41 +40,76 @@ from geqtrain.utils import (
     gradfilter_ema,
     ForwardHookHandler,
 )
+
 from geqtrain.model import model_from_config
-from geqtrain.train.utils import find_matching_indices
+from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+def get_latest_lr(optimizer, model, param_name: str) -> float:
+    for param_group in optimizer.param_groups:
+        for param in param_group['params']:
+            if param_name == [name for name, p in model.named_parameters() if p is param][0]:
+                return param_group['lr']
+    raise ValueError(f"Parameter {param_name} not found in optimizer.")
 
-def remove_node_centers_for_NaN_targets(dataset, loss_func, keep_node_types):
+def remove_node_centers_for_NaN_targets_and_edges(
+    dataset: AtomicInMemoryDataset,
+    loss_func: Loss,
+    keep_node_types: Optional[List[str]] = None,
+    exclude_node_types_from_edges: Optional[List[str]] = None,
+):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
-        node_types = data[AtomicDataDict.NODE_TYPE_KEY]
+        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
     else:
-        node_types = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+
+    def get_node_types_mask(node_types, filter, data):
+        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
+
+    def update_edge_index(data, edge_filter: torch.Tensor):
+        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
+        new_edge_index_slices = [0]
+        for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
+            new_edge_index_slices.append(edge_filter[:slice_to].sum())
+        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
+        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
+            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
+
     # - Remove edges of atoms whose result is NaN - #
     per_node_outputs_keys = []
     if loss_func is not None:
-        for key in loss_func.coeffs:
+        for key in loss_func.keys:
             if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
                 key_clean = loss_func.remove_suffix(key)
+                if key_clean not in _NODE_FIELDS:
+                    continue
                 if key_clean in data:
-                    val = data[key_clean].reshape(len(data[key_clean]), -1)
                     if keep_node_types is not None:
-                        data[key_clean][~torch.isin(node_types.flatten(), keep_node_types.cpu())] = torch.nan
+                        remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
+                        data[key_clean][remove_node_types_mask] = torch.nan
+                    val: torch.Tensor = data[key_clean]
+                    if val.dim() == 1:
+                        val = val.reshape(len(val), -1)
 
-                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=1)).flatten())
-                    data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, not_nan_edge_filter]
-                    data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1] = data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1]
-                    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-                        data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][not_nan_edge_filter]
+                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
+                    update_edge_index(data, not_nan_edge_filter)
                     per_node_outputs_keys.append(key_clean)
+
+    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
+    if exclude_node_types_from_edges is not None:
+        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
+        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+        update_edge_index(data, keep_edges_filter)
 
     if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
         return None, per_node_outputs_keys
+
     dataset.data = data
     return dataset, per_node_outputs_keys
 
@@ -97,6 +134,7 @@ def run_inference(
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
+    **kwargs,
 ):
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
     batch = AtomicData.to_AtomicDataDict(data.to(device)) # AtomicDataDict is the dstruct that is taken as input from each forward
@@ -110,10 +148,10 @@ def run_inference(
             for k, v in batch.items()
             if k not in per_node_outputs_keys
         }
-        batch_chunk = batch
-        batch_chunk_center_nodes = batch_index[0].unique()
+        ref_data = batch
+        batch_center_nodes = batch_index[0].unique()
     else:
-        input_data, batch_chunk, batch_chunk_center_nodes = prepare_chunked_input_data(
+        input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
             already_computed_nodes=already_computed_nodes,
             batch=batch,
             data=data,
@@ -123,17 +161,21 @@ def run_inference(
             device=device,
         )
 
-    if input_data is None:
-        return False
+    if hasattr(data, "__slices__"):
+        for slices_key, slices in data.__slices__.items():
+            val = torch.tensor(slices, dtype=int, device=device)
+            input_data[f"{slices_key}_slices"] = val
+            ref_data[f"{slices_key}_slices"] = val
 
     if noise is not None:
-        input_data[AtomicDataDict.NOISE] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
 
     with cm, precision:
         out = model(input_data)
         del input_data
 
-    return out, batch_chunk, batch_chunk_center_nodes, num_batch_center_nodes
+    return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
@@ -210,9 +252,6 @@ def prepare_chunked_input_data(
     # === ---------------------------------------------------- === #
     # === ---------------------------------------------------- === #
 
-    if hasattr(data, "__slices__"):
-        for slices_key, slices in data.__slices__.items():
-            batch_chunk[f"{slices_key}_slices"] = torch.tensor(slices, dtype=int)
     batch_chunk["ptr"] = torch.nn.functional.pad(torch.bincount(batch_chunk.get(AtomicDataDict.BATCH_KEY)).flip(dims=[0]), (0, 1), mode='constant').flip(dims=[0])
 
     edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
@@ -254,6 +293,14 @@ def prepare_chunked_input_data(
     }
 
     return input_data, batch_chunk, batch_chunk_center_nodes
+
+def _init(loss_func, dataset, model):
+    init_loss = getattr(loss_func, "init_loss", None)
+    if callable(init_loss):
+        num_data = 0
+        for ds in dataset:
+            num_data += len(ds[AtomicDataDict.POSITIONS_KEY])
+        init_loss(model, num_data)
 
 class Trainer:
     """Customizable class used to train a model to minimise a set of loss functions.
@@ -335,7 +382,7 @@ class Trainer:
     """
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
-    object_keys = ["lr_sched", "optim", "early_stopping_conds"]
+    object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
     lr_scheduler_module = torch.optim.lr_scheduler
     optim_module = torch.optim
 
@@ -352,6 +399,8 @@ class Trainer:
         type_names: Optional[List[str]] = None,
         keep_type_names: Optional[List[str]] = None,
         keep_node_types: Optional[List[int]] = None,
+        exclude_type_names_from_edges: Optional[List[str]] = None,
+        exclude_node_types_from_edges: Optional[List[int]] = None,
         metrics_components: Optional[Union[dict, str]] = None,
         metrics_key: str = f"{VALIDATION}_" + ABBREV.get(LOSS_KEY, LOSS_KEY),
         early_stopping: Optional[Callable] = None,
@@ -374,7 +423,7 @@ class Trainer:
         dataloader_num_workers: int = 0,
         train_idcs: Optional[Union[List, List[List]]] = None,
         val_idcs: Optional[Union[List, List[List]]] = None,
-        train_val_split: str = "random",
+        train_val_split: str = "random", # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
         ignore_chunk_keys: List[str] = [],
@@ -389,16 +438,18 @@ class Trainer:
         report_init_validation: bool = True,
         verbose="INFO",
         sanitize_gradients: bool = False,
-        target_names: List = None,
+        target_names: Optional[List] = None,
         mixed_precision: bool = False,
         hooks: Dict = {},
         use_grokfast: bool = False,
+        debug: bool = False,
+        use_warmup: bool = False,
         **kwargs,
     ):
-
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
+        self.best_model_saved_at_epoch = -1
         self.model = None
         logging.debug("* Initialize Trainer")
 
@@ -420,6 +471,11 @@ class Trainer:
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
         }
 
+        # logs for weights update and gradient
+        if self.debug:
+            self.log_updates           = output.open_logfile("log_updates", propagate=False)
+            self.log_ratio             = output.open_logfile("log_ratio", propagate=False)
+
         # --- add filenames if not defined
         self.config_path       = output.generate_file("config.yaml")
         self.best_model_path   = output.generate_file("best_model.pth")
@@ -438,9 +494,6 @@ class Trainer:
         self.torch_device = torch.device(self.device)
 
         # --- loss/logger printing info
-        self.type_names = self.type_names or []
-        self.target_names = self.target_names or []
-
         self.metrics_metadata = {
             'type_names'   : self.type_names,
             'target_names' : self.target_names,
@@ -450,7 +503,13 @@ class Trainer:
         if self.keep_type_names is not None:
             self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
         if self.keep_node_types is not None:
-            self.keep_node_types = torch.tensor(self.keep_node_types, device=self.torch_device)
+            self.keep_node_types = torch.as_tensor(self.keep_node_types, device=self.torch_device)
+
+        # --- exclude edges from center node to specified node types
+        if self.exclude_type_names_from_edges is not None:
+            self.exclude_node_types_from_edges = torch.tensor(find_matching_indices(self.type_names, exclude_type_names_from_edges))
+        if self.exclude_node_types_from_edges is not None:
+            self.exclude_node_types_from_edges = torch.as_tensor(self.exclude_node_types_from_edges, device=self.torch_device)
 
         # --- sort out all the other parameters
         # for samplers, optimizer and scheduler
@@ -470,7 +529,7 @@ class Trainer:
         self.loss, _ = instantiate(
             builder=Loss,
             prefix="loss", # look in yaml for all things that begin with "loss_*"
-            positional_args=dict(coeffs=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
+            positional_args=dict(components=self.loss_coeffs), # looks for "loss_coeffs" key in yaml, u can have many
             # and from these it creates loss funcs
             all_args=self.kwargs, # self.kwargs are all the things in yaml...
         )
@@ -485,7 +544,9 @@ class Trainer:
 
         # --- initialize n_train and n_val
 
+        assert isinstance(n_train, (list, int, type(None))), "n_train must be of type list, int, or None"
         self.n_train = n_train if isinstance(n_train, list) or n_train is None else [n_train]
+        assert isinstance(n_val, (list, int, type(None))), "n_val must be of type list, int, or None"
         self.n_val   = n_val   if isinstance(n_val,   list) or n_val   is None else [n_val]
 
         # --- load all callbacks
@@ -495,6 +556,11 @@ class Trainer:
         self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in final_callbacks]
+
+    def _get_num_of_steps_per_epoch(self):
+        if hasattr(self, "dl_train"):
+            return len(self.dl_train)
+        raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
         '''
@@ -508,14 +574,54 @@ class Trainer:
 
         # get all params that require grad
         param_dict = {name:param for name, param in self.model.named_parameters() if param.requires_grad}
+        # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
+        # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
+        param_groups_dict = {
+            'dampen':       {'lr': self.learning_rate * 1.e-1},
+            'strengthen':   {'lr': self.learning_rate * 1.e1},
+            'nowd':         {'weight_decay': 0.},
+        }
 
-        # split them according to their shape (which implies wheter to apply wd on them or not)
-        params_to_be_decayed = [p for p in param_dict.values() if p.dim()>=2]
-        params_NOT_to_be_decayed = [p for p in param_dict.values() if p.dim()<2]
-        optim_groups = [
-            {'params': params_to_be_decayed, 'weight_decay': self.kwargs.get('optimizer_params', {}).get('weight_decay', 0.)},
-            {'params': params_NOT_to_be_decayed, 'weight_decay': 0.},
-        ]
+        def merge_groups(param, param_groups):
+            # overrides default dict for optim
+            merged_kwargs = {}
+            for param_group in param_groups:
+                merged_kwargs.update(param_groups_dict[param_group])
+            return {'params': [param], **merged_kwargs}
+
+        # Function to merge a parameter with an existing group or create a new one
+        def merge_or_create_group(optim_groups: List[Dict], group: Dict):
+
+            def merge_group(group, optim_group):
+                if optim_group.keys() == group.keys():
+                    if all([optim_group[key] == group[key] for key in optim_group.keys() if key != 'params']):
+                        optim_group['params'].extend(group['params'])  # Append params if found
+                        return True
+                return False
+
+            # Try to find an existing group with the same keys
+            for optim_group in optim_groups:
+                if merge_group(group, optim_group):
+                    return
+
+            # If no group with the same keys is found, add the new group
+            optim_groups.append(group)
+
+        # parsing params to build optim groups
+        # atm only ['nowd', 'dampen', 'strengthen'] are handled
+        optim_groups = []
+        for p in param_dict.values():
+            param_groups = []
+            if getattr(p, 'tags', None) is not None:
+                for tag in getattr(p, 'tags'):
+                    if tag == 'strengthen':
+                        pass
+                    param_groups.append(tag)
+            if p.dim()<2:
+                param_groups.append('nowd')
+
+            group = merge_groups(p, param_groups)
+            merge_or_create_group(optim_groups, group)
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -531,13 +637,27 @@ class Trainer:
 
         assert (
             self.lr_scheduler_name
-            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "none"]
+            in ["CosineAnnealingWarmRestarts", "ReduceLROnPlateau", "CosineAnnealingLR", "none"]
         ) or (
             (len(self.end_of_epoch_callbacks) + len(self.end_of_batch_callbacks)) > 0
         ), f"{self.lr_scheduler_name} cannot be used unless callback functions are defined"
+
         self.lr_sched = None
         self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
+
+            if self.lr_scheduler_name == "CosineAnnealingLR":
+                steps_per_epoch = self._get_num_of_steps_per_epoch()
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
+
+            if self.use_warmup:
+                #! for now it has been tested only with CosineAnnealingLR
+                import pytorch_warmup as warmup
+                steps_per_epoch = self._get_num_of_steps_per_epoch()
+                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", int((self.max_epochs/100)*5)) # Default: 5% of max epochs
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps)
+
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
                 class_name=self.lr_scheduler_name,
@@ -652,6 +772,7 @@ class Trainer:
                     device=self.torch_device
                 )
             dictionary["state_dict"]["cumulative_wall"] = self.cumulative_wall
+            dictionary["state_dict"]["best_model_saved_at_epoch"] = self.best_model_saved_at_epoch
 
         if training_progress:
             dictionary["progress"] = {}
@@ -776,9 +897,9 @@ class Trainer:
 
         state_dict = dictionary.pop("state_dict", None)
 
-        trainer = cls(model=model, **dictionary)
+        trainer = cls(**dictionary)
 
-        if state_dict is not None and trainer.model is not None and not dictionary.get("fine_tune"):
+        if state_dict is not None and model is not None:
             logging.debug("Reload optimizer and scheduler states")
             for key in cls.object_keys:
                 item = getattr(trainer, key, None)
@@ -809,7 +930,7 @@ class Trainer:
                 "Please either increase the max_epoch or change early stop criteria"
             )
 
-        return trainer
+        return trainer, model
 
     @staticmethod
     def load_model_from_training_session(
@@ -835,7 +956,7 @@ class Trainer:
             # this set as default dtype... does it matter?
             model.to(
                 device=torch.device(device),
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float32,
             )
             model_state_dict = torch.load(
                 traindir + "/" + model_name, map_location=device
@@ -852,6 +973,7 @@ class Trainer:
         self.logger.info(f"Number of weights: {self.num_weights}")
         self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
         self.init_objects()
+        self.init_losses()
         self._initialized = True
         self.cumulative_wall = 0
 
@@ -870,7 +992,7 @@ class Trainer:
             prefix="metrics",
             positional_args=dict(components=self.metrics_components),
             all_args=self.kwargs,
-        )
+        )  # self.metrics.funcs is a dict where for each key u want to compute, it creates an hash for the loss to avoid clashes
 
         if not (
             self.metrics_key.lower().startswith(VALIDATION)
@@ -887,6 +1009,18 @@ class Trainer:
     def set_model(self, model):
         self.model = model
         self.model.to(self.torch_device)
+
+        # register hook to clamp gradients
+        for p in self.model.parameters():
+
+            if self.sanitize_gradients:
+
+                def sanitize_fn(grad):
+                    # Replace NaN values in the gradient with zero
+                    grad[torch.isnan(grad)] = 0
+                    return grad
+
+                p.register_hook(sanitize_fn)
 
     def train(self):
 
@@ -916,24 +1050,96 @@ class Trainer:
             callback(self)
 
         self.final_log()
-        
+
         self.save()
         # hooks_handler.deregister_hooks()
         finish_all_writes()
 
-    def get_cm(self, validation):
-        if self.model_requires_grads or not validation:
-            return contextlib.nullcontext()
-        return torch.no_grad()
+    def _log_updates(self):
+
+        update_log = logging.getLogger(self.log_updates)
+        grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
+
+        # build titles for logging file(s)
+        # done only once
+        if not hasattr(self, 'update_logging_titles'):
+            self.update_logging_titles = [
+                param_name
+                for param_name, param in self.model.named_parameters()
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                )
+            ]
+            _titles = ""
+            for t in self.update_logging_titles:
+                _titles += f"{t}, "
+            _titles = _titles.strip().rstrip(',')
+            update_log.info(_titles)
+            grad_to_weight_ratio_log.info(_titles)
+
+        # log the values
+        update_speed, grad_ratio = "", ""
+        with torch.no_grad():
+            for param_name, param in self.model.named_parameters():
+                if (
+                    param.grad is not None and
+                    param.dim() > 1 and
+                    "bias" not in param_name and
+                    "norm" not in param_name
+                ):
+                    lr = get_latest_lr(self.optim, self.model, param_name)
+                    update = ((lr*param.grad).std()/param.std()).log10()#.item()
+                    grad_to_weight_ratio = param.grad.std()/param.std()
+                    update_speed += f"{update:.4}, "
+                    grad_ratio += f"{grad_to_weight_ratio:.4}, "
+
+        update_log.info(update_speed.strip().rstrip(','))
+        grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
+
+    def _batch_lvl_lrscheduler_step(self):
+        # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if not self.using_batch_lvl_lrscheduler:
+                return
+
+        # todo: instead of str comparison could use a dict with k:lr_sched_name, v: 0/1 whether that scheduler is being used + assert check!
+        # idea: for loop on num_of_possible_lr_scheduler is surely faster then str cmpr thru the whole lr scheduler name
+        if self.lr_scheduler_name == "CosineAnnealingLR":
+            self.lr_sched.step()
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+        elif self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
+            self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", True)
+
+    def _epoch_lvl_lrscheduler_step(self):
+        if hasattr(self, "using_batch_lvl_lrscheduler"):
+            if self.using_batch_lvl_lrscheduler:
+                return
+
+        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
+            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            if hasattr(self, "using_batch_lvl_lrscheduler"): return
+            setattr(self, "using_batch_lvl_lrscheduler", False)
+
+    def _is_warmup_period_over(self):
+        if not self.use_warmup:
+            return True
+        n_warmup_steps_already_done = self.warmup_scheduler.last_step
+        return n_warmup_steps_already_done + 1 >= self.warmup_steps # when this condition is true -> start normal lr_scheduler.step() call
 
     def batch_step(self, data, validation=False):
-        # no need to have gradients from old steps taking up memory
         self.optim.zero_grad(set_to_none=True)
 
         if validation: self.model.eval()
         else: self.model.train()
 
-        cm = self.get_cm(validation)
+        cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
         already_computed_nodes = None
         while True:
 
@@ -951,7 +1157,7 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
             )
 
-            loss, loss_contrib = self.loss(pred=out, ref=ref_data)
+            loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
 
             # update metrics
             with torch.no_grad():
@@ -962,37 +1168,30 @@ class Trainer:
             if not validation:
 
                 loss.backward()
+
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-                
-                if self.sanitize_gradients:
-                    for n, param in self.model.named_parameters(): # replaces possible nan gradients to 0
-                        if param.grad is not None and torch.isnan(param.grad).any():
-                            param.grad[torch.isnan(param.grad)] = 0
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
 
+                if self.debug:
+                    self._log_updates()
+
                 self.optim.step()
 
-                if self.lr_scheduler_name == "CosineAnnealingWarmRestarts":
-                    self.lr_sched.step(self.iepoch + self.ibatch / self.n_batches)
+                if not self._is_warmup_period_over():
+                    with self.warmup_scheduler.dampening(): # @ entering of this cm lrs are dampened iff warmup steps are not over
+                        pass
+                else:
+                    self._batch_lvl_lrscheduler_step()
 
             # evaluate ending condition
             if self.skip_chunking:
                 return True
 
-            # if chunking is active -> if whole struct has been processed then batch is over
-            if already_computed_nodes is None:
-                if len(batch_chunk_center_nodes) < num_batch_center_nodes:
-                    already_computed_nodes = batch_chunk_center_nodes
-            elif len(already_computed_nodes) + len(batch_chunk_center_nodes) == num_batch_center_nodes:
-                already_computed_nodes = None
-            else:
-                assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
-                already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
-
+            already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
             if already_computed_nodes is None:
                 return True
 
@@ -1000,7 +1199,7 @@ class Trainer:
     def stop_cond(self):
         """kill the training early"""
 
-        if self.early_stopping_conds is not None and hasattr(self, "mae_dict"):
+        if self.early_stopping_conds is not None and hasattr(self, "mae_dict") and self._is_warmup_period_over():
             early_stop, early_stop_args, debug_args = self.early_stopping_conds(
                 self.mae_dict
             )
@@ -1033,6 +1232,7 @@ class Trainer:
         for category, dataset in zip(categories, dataloaders):
             self.reset_metrics()
             self.n_batches = len(dataset)
+
             for self.ibatch, batch in enumerate(dataset):
                 success = self.batch_step(
                     data=batch,
@@ -1060,8 +1260,10 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
-            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+        if not self.use_warmup:
+            self._epoch_lvl_lrscheduler_step()
+        elif self._is_warmup_period_over(): # warmup present, just need to check if _is_warmup_period_over
+            self._epoch_lvl_lrscheduler_step()
 
         for callback in self._end_of_epoch_callbacks:
             callback(self)
@@ -1087,7 +1289,7 @@ class Trainer:
             log_header += f" {name:>12.12}"
 
         # append details from metrics
-        metrics, skip_keys = self.metrics.flatten_metrics(
+        metrics = self.metrics.flatten_metrics(
             metrics=self.batch_metrics,
             metrics_metadata=self.metrics_metadata,
         )
@@ -1095,9 +1297,8 @@ class Trainer:
         for key, value in metrics.items(): # log metrics
             mat_str += f", {value:16.5g}"
             header += f", {key}"
-            if key not in skip_keys:
-                log_str += f" {value:12.3g}"
-                log_header += f" {key:>12.12}"
+            log_str += f" {value:12.3g}"
+            log_header += f" {key:>12.12}"
 
         batch_logger = logging.getLogger(self.batch_log[batch_type])
 
@@ -1122,14 +1323,15 @@ class Trainer:
         save model and trainer details
         """
         if not self.is_master:
-            return 
+            return
 
         with atomic_write_group():
-            current_metrics = self.mae_dict[self.metrics_key]
+            current_metrics = self.mae_dict[self.metrics_key] # keys are the list of metrics listed in yaml under metrics_components
             if current_metrics < self.best_metrics:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
 
+                self.best_model_saved_at_epoch = self.iepoch
                 self.save_model(self.best_model_path, blocking=False)
 
                 self.logger.info(
@@ -1199,7 +1401,7 @@ class Trainer:
 
         for category in categories:
 
-            met, skip_keys = self.metrics.flatten_metrics(
+            met = self.metrics.flatten_metrics(
                 metrics=self.metrics_dict[category],
                 metrics_metadata=self.metrics_metadata,
             )
@@ -1216,11 +1418,10 @@ class Trainer:
             for key, value in met.items():
                 mat_str += f", {value:12.3g}"
                 header += f",{category}_{key}"
-                if key not in skip_keys:
-                    log_str[category] += f" {value:12.3g}"
-                    log_header[category] += f" {key:>12.12}"
+                log_str[category] += f" {value:12.3g}"
+                log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
-        
+
         self.norm_dict = dict(Grad_norm=self.norms)
 
         if not self.is_master:
@@ -1276,7 +1477,7 @@ class Trainer:
         """
 
         if validation_dataset is None:
-            logging.warn("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+            logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
 
         if self.train_idcs is None or self.val_idcs is None:
             if self.n_train is None:
@@ -1284,7 +1485,7 @@ class Trainer:
                     if self.n_val is not None:
                         self.n_train = [len(ds) - n_valid for ds, n_valid in zip(dataset.datasets, self.n_val)]
                     else:
-                        logging.warn("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
+                        logging.warning("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
                         n_total = np.array([len(ds) for ds in dataset.datasets])
                         ones_mask = n_total == 1
                         n_total[~ones_mask] = (0.8 * n_total[~ones_mask]).astype(int)
@@ -1292,7 +1493,7 @@ class Trainer:
                         ones = np.copy(n_total[ones_mask])
                         ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
                         n_total[ones_mask] = ones
-                        self.n_train = n_total
+                        self.n_train = n_total.tolist()
                 else:
                     self.n_train = [len(ds) for ds in dataset.datasets]
             if self.n_val is None:
@@ -1353,7 +1554,7 @@ class Trainer:
         indexed_datasets_train = []
         for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
             _dataset = _dataset.index_select(train_idcs)
-            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
             if self.per_node_outputs_keys is None:
                 self.per_node_outputs_keys = per_node_outputs_keys
             if _dataset is not None:
@@ -1363,12 +1564,26 @@ class Trainer:
         indexed_datasets_val = []
         for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
             _dataset = _dataset.index_select(val_idcs)
-            _dataset, _ = remove_node_centers_for_NaN_targets(_dataset, self.loss, self.keep_node_types)
+            _dataset, _ = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
             if _dataset is not None:
                 indexed_datasets_val.append(_dataset)
         self.dataset_val = ConcatDataset(indexed_datasets_val)
 
-    def set_dataloader(self, sampler=None, validation_sampler=None):
+        self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
+
+        def log_data_points(dataset, prefix: str):
+            loss_clean_keys = [self.loss.remove_suffix(key) for key in self.loss.keys]
+            counts = {}
+            for data in dataset:
+                for loss_clean_key in loss_clean_keys:
+                    counts[loss_clean_key] = counts.get(loss_clean_key, 0) + torch.sum(~torch.isnan(data[loss_clean_key])).item()
+            for k, v in counts.items():
+                self.logger.info(f"{prefix} data points for field {k}: {v}")
+
+        log_data_points(self.dataset_train, prefix='Training')
+        log_data_points(self.dataset_val  , prefix='Validation')
+
+    def set_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1379,7 +1594,7 @@ class Trainer:
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(30 if self.dataloader_num_workers > 0 else 0),
+            timeout=(config.get('dloader_timeout', 30) if self.dataloader_num_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
         )
@@ -1401,6 +1616,12 @@ class Trainer:
             **dl_kwargs,
         )
 
+    def init_losses(self):
+        for loss_func in self.loss.funcs.values():
+            _init(loss_func, self.dataset_train, self.model)
+        for loss_func in self.metrics.funcs.values():
+            _init(loss_func, self.dataset_train, self.model)
+
 
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
@@ -1419,12 +1640,14 @@ class TrainerWandB(Trainer):
 
         if self.kwargs.get("wandb_watch", False):
             wandb_watch_kwargs = self.kwargs.get("wandb_watch_kwargs", {})
+            if "log" not in wandb_watch_kwargs:
+                wandb_watch_kwargs["log"] = None # do not log sys info
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
     def end_of_epoch_log(self):
         if not self.is_master:
             return
-        
+
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
@@ -1444,12 +1667,12 @@ class DistributedTrainer(Trainer):
         # Set the device for this process
         torch.cuda.set_device(self.rank)
         super().init(**kwargs)
-    
+
     def set_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
         validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
         super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
-    
+
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP

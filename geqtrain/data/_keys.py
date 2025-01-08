@@ -15,14 +15,19 @@ from typing import List, Final
 
 ### == Define allowed keys as constants == ###
 
+R_MAX_KEY: Final[str] = "r_max"
 # The positions of the nodes in the system
 POSITIONS_KEY: Final[str] = "pos"
 # [2, n_edge] index tensor giving center -> neighbor relations
 EDGE_INDEX_KEY: Final[str] = "edge_index"
+# [bool] | [3] wether to use pbc or not and on which axis
+PBC_KEY: Final[str] = "pbc"
 # [n_edge, 3] tensor of how many periodic cells each edge crosses in each cell vector
 EDGE_CELL_SHIFT_KEY: Final[str] = "edge_cell_shift"
 # [n_batch, 3, 3] or [3, 3] tensor where rows are the cell vectors
 CELL_KEY: Final[str] = "cell"
+# [n_nodes] long tensor
+ATOM_NUMBER_KEY: Final[str] = "atom_numbers"
 # [n_nodes] long tensor
 NODE_TYPE_KEY: Final[str] = "node_types"
 # [n_edge] long tensor
@@ -41,14 +46,18 @@ INPUT_STRUCTURE_KEYS: Final[List[str]] = [
 ]
 
 # [n_nodes, dim] (possibly equivariant) node input attributes
-NODE_ATTRS_KEY: Final[str] = "node_attrs"
+NODE_ATTRS_KEY: Final[str] = "node_attrs" # usually one-hot encoded input category
 # [n_nodes, dim] (possibly equivariant) features of each node
-NODE_FEATURES_KEY: Final[str] = "node_features"
+NODE_FEATURES_KEY: Final[str] = "node_features" # the processed version of NODE_ATTRS_KEY, used to do not overwrite NODE_ATTRS_KEY
 # [n_nodes, dim] (possibly equivariant) output features of each node
 NODE_OUTPUT_KEY: Final[str] = "node_output"
 
 # [n_edges, dim] (possibly equivariant) edge input attributes
-EDGE_ATTRS_KEY: Final[str] = "edge_attrs"
+EDGE_ATTRS_KEY: Final[str] = "edge_attrs" # look at difference between NODE_ATTRS_KEY and NODE_FEATURES_KEY
+# [n_edges, dim] (possibly equivariant) features of the edges
+EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
+# [n_edges, dim] (possibly equivariant) output features of the edges
+EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 # [n_edges, 3] tensor of displacement vectors associated to edges
 EDGE_VECTORS_KEY: Final[str] = "edge_vectors"
 # [n_edges] tensor of the lengths of EDGE_VECTORS
@@ -57,17 +66,15 @@ EDGE_LENGTH_KEY: Final[str] = "edge_lengths"
 EDGE_ANGULAR_ATTRS_KEY: Final[str] = "edge_angular_attrs"
 # [n_edges, dim] invariant radial attributes of the edges
 EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
-# [n_edges, dim] (possibly equivariant) features of the edges
-EDGE_FEATURES_KEY: Final[str] = "edge_features"
-# [n_edges, dim] (possibly equivariant) output features of the edges
-EDGE_OUTPUT_KEY: Final[str] = "edge_output"
 
 # [n_graphs, dim] invariant graph input attributes
 GRAPH_ATTRS_KEY: Final[str] = "graph_attrs"
-# [n_graphs, dim] (possibly equivariant) output feature of graph
+# [n_graphs, dim] (possibly equivariant) graph features of graph
+GRAPH_FEATURES_KEY: Final[str] = "graph_features"
+# [n_graphs, dim] (possibly equivariant) output features of graph
 GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
 
-NOISE: Final[str] = "noise"
+NOISE_KEY: Final[str] = "noise"
 
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [

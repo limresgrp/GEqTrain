@@ -109,7 +109,7 @@ class Contraction(torch.nn.Module):
         self.num_features = irreps_in.count((0, 1))
         self.coupling_irreps = o3.Irreps([irrep.ir for irrep in irreps_in])
         self.correlation = correlation
-        dtype = torch.get_default_dtype()
+        dtype = torch.float32
         for nu in range(1, correlation + 1):
             U_matrix = U_matrix_real(
                 irreps_in=self.coupling_irreps,
