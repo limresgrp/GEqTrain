@@ -6,7 +6,7 @@ from .AtomicData import (
     _GRAPH_FIELDS,
     _EXTRA_FIELDS,
 )
-from .dataset import AtomicDataset, AtomicInMemoryDataset, NpzDataset
+from .dataset import AtomicDataset, AtomicInMemoryDataset, NpzDataset, LazyLoadingConcatDataset
 from .dataloader import DataLoader, Collater
 from ._build import dataset_from_config
 
@@ -23,4 +23,5 @@ __all__ = [
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
     _EXTRA_FIELDS,
+    LazyLoadingConcatDataset,
 ]

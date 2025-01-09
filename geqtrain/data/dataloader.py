@@ -38,7 +38,8 @@ class Collater(object):
         All kwargs besides ``fixed_fields`` are passed through to the constructor.
         """
         return cls(
-            fixed_fields=list(reduce(lambda acc, d: acc | set(getattr(d, "fixed_fields", {}).keys()), dataset.datasets, set())),
+            fixed_fields=list(reduce(lambda acc, d: acc | set(
+                getattr(d, "fixed_fields", {}).keys()), dataset.datasets, set())),
             exclude_keys=exclude_keys,
         )
 
@@ -56,7 +57,8 @@ class Collater(object):
                 new_dim_fixed.add(f)
 
         # TODO: cache ^ and the batched versions of fixed fields for various batch sizes if necessary for performance
-        out = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(new_dim_fixed))
+        out = Batch.from_data_list(
+            batch, exclude_keys=self._exclude_keys.union(new_dim_fixed))
         for f in new_dim_fixed:
             if f in self._exclude_keys:
                 continue
@@ -85,10 +87,13 @@ class DataLoader(torch.utils.data.DataLoader):
         if "collate_fn" in kwargs:
             del kwargs["collate_fn"]
 
+        # todo: remove this and pass it
+        exclude_keys.append('adj_matrix')
         super(DataLoader, self).__init__(
             dataset,
             batch_size,
             shuffle,
-            collate_fn=Collater.for_dataset(dataset, exclude_keys=exclude_keys),
+            collate_fn=Collater.for_dataset(
+                dataset, exclude_keys=exclude_keys),
             **kwargs,
         )

@@ -3,11 +3,13 @@
 
 import inspect
 from importlib import import_module
-from typing import Dict, List
+import logging
+from typing import Dict, List, Union
 from os import listdir
 from os.path import isdir, isfile, join
 
 from torch.utils.data import ConcatDataset
+from geqtrain.data.dataset import LazyLoadingConcatDataset
 from geqtrain import data
 from geqtrain.data import (
     AtomicDataDict,
@@ -18,17 +20,19 @@ from geqtrain.utils import (
     instantiate,
     get_w_prefix,
     Config
-    )
+)
 
 
-def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
+def dataset_from_config(config, prefix: str = "dataset") -> Union[ConcatDataset, LazyLoadingConcatDataset]:
     """
-    1) get dset type
-    2) get data_path or data_file
+    TODO update docs here
+    Called for each {prefix}_list in yaml, possible prefix: dataset, validation_dataset_list, test_dataset_list
+    1) get dset type (eg <class 'geqtrain.data.dataset.NpzDataset'>)
+    2) get data_path or data_file (folder containing files to be opened)
     3) registers fields to read/expose-in-code data at 2) in the correct form
     4) instanciate dataset(s)
-        4.1) if many dsets -> cat them
-    5) return
+        4.1) if many dsets
+    5) return cat(dsets)
 
     initialize dataset based on a config instance
 
@@ -43,16 +47,16 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
     Returns:
         torch.utils.data.ConcatDataset: dataset
     """
-
     instances = []
     dataset_id_offset = 0
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for dataset_id, _config_dataset in enumerate(config_dataset_list):
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
-            raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
+            raise KeyError(
+                f"Dataset with prefix `{prefix}` isn't present in this config!")
 
-        # looks for dset type specified in yaml if present (dataset_list/dataset: {$class_name} )
+        # looks for dset type specified in yaml if present (dataset_list/dataset: {$class_name})
         if inspect.isclass(config_dataset_type):
             class_name = config_dataset_type
         else:
@@ -77,14 +81,15 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         if class_name is None:
             raise NameError(f"dataset type {dataset_name} does not exists")
 
-        inpup_key = f"{prefix}_input" # get input path
+        inpup_key = f"{prefix}_input"  # get input path
         assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
         f_name = _config_dataset.get(inpup_key)
 
-        if isdir(f_name): # can be dir
-            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
+        if isdir(f_name):  # can be dir
+            dataset_file_names = [join(f_name, f) for f in listdir(
+                f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
         else:
-            dataset_file_names = [f_name] # can be 1 file
+            dataset_file_names = [f_name]  # can be 1 file
 
         _config: dict = config.as_dict() if isinstance(config, Config) else config
         _config.update(_config_dataset)
@@ -105,22 +110,37 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
             arg_dicts=[_config[prefixed_eff_key], _config],
         )
 
-        for dataset_file_name in dataset_file_names:
-            _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset # dataset id
+        # default behavior: in-memory loading
+        if _config_dataset.get('in-memory', True):
+            logging.info("Using in-memory dataset.")
+            for dataset_file_name in dataset_file_names:
+                _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + \
+                    dataset_id_offset  # dataset id
+                dataset_id_offset += 1
+                _config[f"{prefix}_file_name"] = dataset_file_name
+
+                # Register fields:
+                # This might reregister fields, but that's OK:
+                instantiate(register_fields, all_args=_config)
+
+                instance, _ = instantiate(
+                    class_name,  # dataset selected to be instanciated
+                    prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
+                    positional_args={},
+                    optional_args=_config,
+                )
+                instances.append(instance)
+
+            return ConcatDataset(instances)
+
+        logging.info("Using NOT-in-memory dataset.")
+        instantiate(register_fields, all_args=_config)
+        for dataset_file_name in dataset_file_names:  # list of npzs file/to/.npz
+            # not instances but args to instanciate when iterating dataloader
+            instances.append({
+                'dataset_file_name': dataset_file_name,
+                'dataset_id': dataset_id + dataset_id_offset,
+            })
             dataset_id_offset += 1
-            _config[f"{prefix}_file_name"] = dataset_file_name
 
-            # Register fields:
-            # This might reregister fields, but that's OK:
-            instantiate(register_fields, all_args=_config)
-
-            instance, _ = instantiate(
-                class_name, # dataset selected to be instanciated
-                prefix=prefix, # look for this prefix word in yaml to select get the params for the ctor
-                positional_args={},
-                optional_args=_config,
-            )
-
-            instances.append(instance)
-
-    return ConcatDataset(instances)
+    return LazyLoadingConcatDataset(class_name, prefix, _config, instances)
