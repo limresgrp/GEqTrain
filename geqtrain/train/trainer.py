@@ -20,9 +20,8 @@ from geqtrain.data import (
     DataLoader,
     AtomicData,
     AtomicDataDict,
-    AtomicInMemoryDataset,
-    _NODE_FIELDS,
     _EDGE_FIELDS,
+    dataset_from_config,
 )
 from geqtrain.utils import (
     Output,
@@ -36,9 +35,7 @@ from geqtrain.utils import (
     finish_all_writes,
     atomic_write_group,
     clean_cuda,
-    gradfilter_ma,
     gradfilter_ema,
-    ForwardHookHandler,
 )
 
 from geqtrain.model import model_from_config
@@ -55,63 +52,6 @@ def get_latest_lr(optimizer, model, param_name: str) -> float:
             if param_name == [name for name, p in model.named_parameters() if p is param][0]:
                 return param_group['lr']
     raise ValueError(f"Parameter {param_name} not found in optimizer.")
-
-def remove_node_centers_for_NaN_targets_and_edges(
-    dataset: AtomicInMemoryDataset,
-    loss_func: Loss,
-    keep_node_types: Optional[List[str]] = None,
-    exclude_node_types_from_edges: Optional[List[str]] = None,
-):
-    data = dataset.data
-    if AtomicDataDict.NODE_TYPE_KEY in data:
-        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
-    else:
-        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
-
-    def get_node_types_mask(node_types, filter, data):
-        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
-
-    def update_edge_index(data, edge_filter: torch.Tensor):
-        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
-        new_edge_index_slices = [0]
-        for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
-            new_edge_index_slices.append(edge_filter[:slice_to].sum())
-        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
-        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
-            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
-
-    # - Remove edges of atoms whose result is NaN - #
-    per_node_outputs_keys = []
-    if loss_func is not None:
-        for key in loss_func.keys:
-            if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
-                key_clean = loss_func.remove_suffix(key)
-                if key_clean not in _NODE_FIELDS:
-                    continue
-                if key_clean in data:
-                    if keep_node_types is not None:
-                        remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
-                        data[key_clean][remove_node_types_mask] = torch.nan
-                    val: torch.Tensor = data[key_clean]
-                    if val.dim() == 1:
-                        val = val.reshape(len(val), -1)
-
-                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
-                    update_edge_index(data, not_nan_edge_filter)
-                    per_node_outputs_keys.append(key_clean)
-
-    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
-    if exclude_node_types_from_edges is not None:
-        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
-        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
-        update_edge_index(data, keep_edges_filter)
-
-    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
-        return None, per_node_outputs_keys
-
-    dataset.data = data
-    return dataset, per_node_outputs_keys
 
 def set_seed(seed):
     np.random.seed(seed)
@@ -965,9 +905,12 @@ class Trainer:
 
         return model, config
 
+    def init_dataset(self, config):
+        self.load_dataset(config)
+        self.init_dataloader(config)
+
     def init(self, model):
         """initialize optimizer"""
-
         self.set_model(model=model)
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
@@ -980,12 +923,8 @@ class Trainer:
     def init_metrics(self):
         if self.metrics_components is None:
             self.metrics_components = []
-            for key, func in self.loss.funcs.items():
-                params = {
-                    "PerSpecies": type(func).__name__.lower().startswith("perspecies"),
-                }
-                self.metrics_components.append((key, "mae", params))
-                self.metrics_components.append((key, "rmse", params))
+            for key in self.train_on_keys:
+                self.metrics_components.append({key: [1., "MSELoss"]})
 
         self.metrics, _ = instantiate(
             builder=Metrics,
@@ -994,17 +933,10 @@ class Trainer:
             all_args=self.kwargs,
         )  # self.metrics.funcs is a dict where for each key u want to compute, it creates an hash for the loss to avoid clashes
 
-        if not (
-            self.metrics_key.lower().startswith(VALIDATION)
-            or self.metrics_key.lower().startswith(TRAIN)
-        ):
-            raise RuntimeError(
-                f"metrics_key should start with either {VALIDATION} or {TRAIN}"
-            )
+        if not (self.metrics_key.lower().startswith(VALIDATION) or self.metrics_key.lower().startswith(TRAIN)):
+            raise RuntimeError(f"metrics_key should start with either {VALIDATION} or {TRAIN}")
         if self.report_init_validation and self.metrics_key.lower().startswith(TRAIN):
-            raise RuntimeError(
-                f"metrics_key may not start with {TRAIN} when report_init_validation=True"
-            )
+            raise RuntimeError(f"metrics_key may not start with {TRAIN} when report_init_validation=True")
 
     def set_model(self, model):
         self.model = model
@@ -1461,23 +1393,18 @@ class Trainer:
         for i in range(len(logger.handlers)):
             logger.handlers.pop()
 
-    def set_dataset(
-        self,
-        dataset: ConcatDataset,
-        validation_dataset: Optional[ConcatDataset] = None,
-    ) -> None:
-        """Set the dataset(s) used by this trainer.
-
-        Training and validation datasets will be sampled from
-        them in accordance with the trainer's parameters.
-
-        If only one dataset is provided, the train and validation
-        datasets will both be sampled from it. Otherwise, if
-        `validation_dataset` is provided, it will be used.
+    def load_dataset(self, config: Config) -> None:
+        """Load the dataset(s) used by this trainer.
         """
 
-        if validation_dataset is None:
+        dataset, self.per_node_outputs_keys = dataset_from_config(config, prefix="dataset")
+        logging.info(f"Successfully loaded the data set of type {dataset}...")
+        try:
+            validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+            logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
+        except KeyError:
             logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+            validation_dataset = None 
 
         if self.train_idcs is None or self.val_idcs is None:
             if self.n_train is None:
@@ -1506,9 +1433,7 @@ class Trainer:
             # Sample both from `dataset`:
             if validation_dataset is not None:
                 for _validation_dataset, n_val in zip(validation_dataset.datasets, self.n_val):
-
                     total_n = len(_validation_dataset)
-
                     if n_val > total_n:
                         raise ValueError("too little data for validation. please reduce n_val")
                     if self.train_val_split == "random":
@@ -1517,14 +1442,11 @@ class Trainer:
                         idcs = torch.arange(total_n)
                     else:
                         raise NotImplementedError(f"splitting mode {self.train_val_split} not implemented")
-
                     self.val_idcs.append(idcs[:n_val])
 
             # If validation_dataset is None, Sample both from `dataset`
             for _index, (_dataset, n_train) in enumerate(zip(dataset.datasets, self.n_train)):
-
                 total_n = len(_dataset)
-
                 if n_train > total_n:
                     raise ValueError(f"too little data for training. please reduce n_train. n_train: {n_train} total: {total_n}")
 
@@ -1549,29 +1471,22 @@ class Trainer:
         assert len(self.n_train) == len(dataset.datasets)
         assert len(self.n_val)   == len(validation_dataset.datasets)
 
-        # build redefined datasets wrt data splitting process above
-        # torch_geometric datasets inherantly support subsets using `index_select`
-        indexed_datasets_train = []
-        for _dataset, train_idcs in zip(dataset.datasets, self.train_idcs):
-            _dataset = _dataset.index_select(train_idcs)
-            _dataset, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
-            if self.per_node_outputs_keys is None:
-                self.per_node_outputs_keys = per_node_outputs_keys
-            if _dataset is not None:
-                indexed_datasets_train.append(_dataset)
-        self.dataset_train = ConcatDataset(indexed_datasets_train)
+        def index_dataset(dataset, indices):
+            indexed_dataset = []
+            for data, idcs in zip(dataset.datasets, indices):
+                if len(idcs) > 0:
+                    data = data.index_select(idcs)
+                    indexed_dataset.append(data)
+            return type(dataset)(indexed_dataset)
 
-        indexed_datasets_val = []
-        for _dataset, val_idcs in zip(validation_dataset.datasets, self.val_idcs):
-            _dataset = _dataset.index_select(val_idcs)
-            _dataset, _ = remove_node_centers_for_NaN_targets_and_edges(_dataset, self.loss, self.keep_node_types, self.exclude_node_types_from_edges)
-            if _dataset is not None:
-                indexed_datasets_val.append(_dataset)
-        self.dataset_val = ConcatDataset(indexed_datasets_val)
+        self.dataset_train = index_dataset(dataset, self.train_idcs)
+        self.dataset_val   = index_dataset(dataset, self.val_idcs)
 
         self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
 
         def log_data_points(dataset, prefix: str):
+            if not isinstance(dataset, ConcatDataset): # Skip for non InMemoryDatasets, as it would be too heavy
+                return
             loss_clean_keys = [self.loss.remove_suffix(key) for key in self.loss.keys]
             counts = {}
             for data in dataset:
@@ -1583,7 +1498,7 @@ class Trainer:
         log_data_points(self.dataset_train, prefix='Training')
         log_data_points(self.dataset_val  , prefix='Validation')
 
-    def set_dataloader(self, config, sampler=None, validation_sampler=None):
+    def init_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
         dl_kwargs = dict(
@@ -1668,10 +1583,10 @@ class DistributedTrainer(Trainer):
         torch.cuda.set_device(self.rank)
         super().init(**kwargs)
 
-    def set_dataloader(self, sampler=None, validation_sampler=None):
+    def init_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(self.dataset_train, num_replicas=self.world_size, rank=self.rank)
         validation_sampler = DistributedSampler(self.dataset_val, num_replicas=self.world_size, rank=self.rank)
-        super().set_dataloader(sampler=sampler, validation_sampler=validation_sampler)
+        super().init_dataloader(sampler=sampler, validation_sampler=validation_sampler)
 
     def set_model(self, model):
         super().set_model(model)

@@ -3,17 +3,19 @@
 
 import inspect
 from importlib import import_module
-from typing import Dict, List
+from typing import Dict, List, Optional
 from os import listdir
 from os.path import isdir, isfile, join
 
+import torch
 from torch.utils.data import ConcatDataset
 from geqtrain import data
 from geqtrain.data import (
     AtomicDataDict,
+    AtomicInMemoryDataset,
+    _NODE_FIELDS,
     register_fields,
 )
-
 from geqtrain.utils import (
     instantiate,
     get_w_prefix,
@@ -21,7 +23,7 @@ from geqtrain.utils import (
     )
 
 
-def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
+def dataset_from_config(config, prefix: str="dataset", in_memory=True, loss=None) -> ConcatDataset:
     """
     1) get dset type
     2) get data_path or data_file
@@ -82,7 +84,7 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
         f_name = _config_dataset.get(inpup_key)
 
         if isdir(f_name): # can be dir
-            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
+            dataset_file_names = [join(f_name, f) for f in listdir(f_name) if not f.startswith('.')]
         else:
             dataset_file_names = [f_name] # can be 1 file
 
@@ -123,4 +125,84 @@ def dataset_from_config(config, prefix: str = "dataset") -> ConcatDataset:
 
             instances.append(instance)
 
-    return ConcatDataset(instances)
+    # --- filter node target to train on based on node type or type name
+    keep_type_names = config.get("keep_type_names", None)
+    if keep_type_names is not None:
+        from geqtrain.train.utils import find_matching_indices
+        config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
+    keep_node_types = config.get("keep_node_types", None)
+    
+    # --- exclude edges from center node to specified node types
+    exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
+    if exclude_type_names_from_edges is not None:
+        from geqtrain.train.utils import find_matching_indices
+        config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
+    exclude_node_types_from_edges = config.get("exclude_node_types_from_edges", None)
+
+    # dataloader
+    per_node_outputs_keys = []
+    optimized_datasets = []
+    for instance in instances:
+        instance, per_node_outputs_keys = remove_node_centers_for_NaN_targets_and_edges(instance, loss, keep_node_types, exclude_node_types_from_edges)
+        if instance is not None:
+            optimized_datasets.append(instance)
+    
+    __dataset_class__ = ConcatDataset if in_memory else ConcatDataset
+    return __dataset_class__(optimized_datasets), per_node_outputs_keys
+
+def remove_node_centers_for_NaN_targets_and_edges(
+    dataset: AtomicInMemoryDataset,
+    loss_func,
+    keep_node_types: Optional[List[str]] = None,
+    exclude_node_types_from_edges: Optional[List[str]] = None,
+):
+    data = dataset.data
+    if AtomicDataDict.NODE_TYPE_KEY in data:
+        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
+    else:
+        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+
+    def get_node_types_mask(node_types, filter, data):
+        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
+
+    def update_edge_index(data, edge_filter: torch.Tensor):
+        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
+        new_edge_index_slices = [0]
+        for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
+            new_edge_index_slices.append(edge_filter[:slice_to].sum())
+        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
+        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
+            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
+
+    # - Remove edges of atoms whose result is NaN - #
+    per_node_outputs_keys = []
+    if loss_func is not None:
+        for key in loss_func.keys:
+            if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
+                key_clean = loss_func.remove_suffix(key)
+                if key_clean not in _NODE_FIELDS:
+                    continue
+                if key_clean in data:
+                    if keep_node_types is not None:
+                        remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
+                        data[key_clean][remove_node_types_mask] = torch.nan
+                    val: torch.Tensor = data[key_clean]
+                    if val.dim() == 1:
+                        val = val.reshape(len(val), -1)
+
+                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
+                    update_edge_index(data, not_nan_edge_filter)
+                    per_node_outputs_keys.append(key_clean)
+
+    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
+    if exclude_node_types_from_edges is not None:
+        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
+        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+        update_edge_index(data, keep_edges_filter)
+
+    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
+        return None, per_node_outputs_keys
+
+    dataset.data = data
+    return dataset, per_node_outputs_keys
