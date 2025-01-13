@@ -158,7 +158,9 @@ def fresh_start(rank, world_size, config):
         # Copy conf file in results folder
         shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
         config.update(trainer.params)
+
         trainer.init_dataset(config)
+        # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
         # = Build model =
@@ -220,8 +222,7 @@ def restart(rank, world_size, config):
                     dictionary[k] = config[k]
                     logging.info(f'Update "{k}" to {dictionary[k]}')
                 elif isinstance(config[k], type(dictionary.get(k, ""))):
-                    raise ValueError(f'Key "{
-                                     k}" is different in config and the result trainer.pth file. Please double check')
+                    raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
 
         config = Config(dictionary, exclude_keys=["state_dict", "progress"])
         _set_global_options(config)
@@ -230,8 +231,7 @@ def restart(rank, world_size, config):
             # Setup the process for distributed training
             setup_process(rank, world_size)
 
-        trainer, model = load_trainer_and_model(
-            rank, world_size, config, dictionary=dictionary, is_restart=True)
+        trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.init_dataset(config)
         trainer.init(model=model)
         trainer.update_kwargs(config)

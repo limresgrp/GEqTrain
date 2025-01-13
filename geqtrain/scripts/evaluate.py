@@ -13,7 +13,7 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import run_inference, _init
+from geqtrain.train.trainer import get_output_keys, run_inference, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
@@ -81,7 +81,7 @@ def init_logger(log: str = None):
 
     return logger, metricslogger, csvlogger, xyzlogger
 
-def infer(dataloader, model, device, per_node_outputs_keys=[], chunk_callbacks=[], batch_callbacks=[], **kwargs):
+def infer(dataloader, model, device, output_keys=[], per_node_outputs_keys=[], chunk_callbacks=[], batch_callbacks=[], **kwargs):
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
@@ -93,6 +93,7 @@ def infer(dataloader, model, device, per_node_outputs_keys=[], chunk_callbacks=[
                 device=device,
                 cm=torch.no_grad(),
                 already_computed_nodes=already_computed_nodes,
+                output_keys=output_keys,
                 per_node_outputs_keys=per_node_outputs_keys,
                 **kwargs,
             )
@@ -273,12 +274,12 @@ def main(args=None, running_as_script: bool = True):
     # Load dataset
     logger.info(f"Loading dataset...")
     try:
-        dataset, per_node_outputs_keys = dataset_from_config(config, prefix="test_dataset", loss=metrics)
+        dataset = dataset_from_config(config, prefix="test_dataset", loss=metrics)
     except KeyError:
         try:
-            dataset, per_node_outputs_keys = dataset_from_config(config, prefix="validation_dataset", loss=metrics)
+            dataset = dataset_from_config(config, prefix="validation_dataset", loss=metrics)
         except KeyError:
-            dataset,per_node_outputs_keys = dataset_from_config(config, loss=metrics)
+            dataset = dataset_from_config(config, loss=metrics)
 
     logger.info(f"Dataset specified in {args.test_config.name} loaded!")
 
@@ -383,7 +384,9 @@ def main(args=None, running_as_script: bool = True):
     chunk_callbacks = [out_callback]
     if metrics is not None:
         chunk_callbacks.append(metrics_callback)
-    infer(dataloader, model, device, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
+    
+    output_keys, per_node_outputs_keys = get_output_keys(metrics)
+    infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
 
     if metrics is not None:
         logger.info("\n--- Final result: ---")
