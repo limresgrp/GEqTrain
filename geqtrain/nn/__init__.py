@@ -4,7 +4,7 @@ from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
+from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, EdgeRadialAttrsEmbedder
 from ._graph import EmbeddingGraphAttrs
 from ._edgewise import (  # noqa: F401
     EdgewiseReduce,
@@ -37,4 +37,5 @@ __all__ = [
     ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
+    EdgeRadialAttrsEmbedder,
 ]
