@@ -5,9 +5,10 @@ from geqtrain.nn import ScalarMLPFunction
 class FiLMFunction(ScalarMLPFunction):
     """
         FiLMFunction applies Feature-wise Linear Modulation (FiLM) conditioning to its input.
-        
+        https://distill.pub/2018/feature-wise-transformations/
+
         This class extends the ScalarMLPFunction to perform feature-wise affine transformations
-        based on conditioning inputs. It uses a multi-layer perceptron (MLP) to generate scaling 
+        based on conditioning inputs. It uses a multi-layer perceptron (MLP) to generate scaling
         and shifting parameters that are applied to the input features.
 
         Attributes:
@@ -16,7 +17,7 @@ class FiLMFunction(ScalarMLPFunction):
             mlp_output_dimension (Optional[int]): The output dimension size for the MLP.
             mlp_nonlinearity (Optional[str]): The non-linearity activation function to be used in the MLP. Defaults to "silu".
             _dim (int): The dimension size for the output features, which is half of the MLP output dimension.
-        
+
         Parameters for Initialization:
             mlp_input_dimension (Optional[int]): The input dimension size for the MLP.
             mlp_latent_dimensions (List[int]): A list of dimensions for the hidden layers of the MLP.
@@ -55,6 +56,6 @@ class FiLMFunction(ScalarMLPFunction):
         Returns:
             Tensor: The modulated input tensor.
         """
-        
+
         _wb = self.sequential(conditioning)
-        return _wb[batch, :self._dim] * x + _wb[batch, self._dim:]
+        return _wb[batch, :self._dim] * x + _wb[batch, self._dim:] # FiLM(x)=γ(z)⊙x+β(z)
