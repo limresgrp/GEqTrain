@@ -267,6 +267,15 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     in_dim=self.irreps_in[self.edge_invariant_field].num_irreps,
                     out_dim=self.final_latent_mlp.out_features
                 )
+                # self.rbf_embedder = FiLMFunction(
+                #     mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
+                #     mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
+                #     mlp_output_dimension=self.latent_mlp.out_features,
+                #     mlp_nonlinearity='swiglu',
+                #     zero_init_last_layer_weights=False,
+                #     has_bias=False,
+                #     final_non_lin='sigmoid'
+                # )
 
         # - End build modules - #
         out_feat_elems = []
@@ -565,6 +574,15 @@ class InteractionLayer(torch.nn.Module):
                 in_dim=parent.irreps_in[parent.edge_invariant_field].num_irreps,
                 out_dim=self.latent_mlp.out_features
             )
+            # self.rbf_embedder = FiLMFunction(
+            #     mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
+            #     mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
+            #     mlp_output_dimension=self.latent_mlp.out_features,
+            #     mlp_nonlinearity='swiglu',
+            #     zero_init_last_layer_weights=False,
+            #     has_bias=False,
+            #     final_non_lin='sigmoid'
+            # )
 
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent):

@@ -1,5 +1,5 @@
 from .kan import KAN
-from ._fc import ScalarMLPFunction
+from ._fc import ScalarMLPFunction, select_nonlinearity
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
@@ -38,4 +38,5 @@ __all__ = [
     SO3_Linear,
     SO3_LayerNorm,
     EdgeRadialAttrsEmbedder,
+    select_nonlinearity,
 ]

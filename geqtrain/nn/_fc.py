@@ -16,13 +16,14 @@ def select_nonlinearity(nonlinearity):
     elif nonlinearity == "selu": non_lin_instance = torch.nn.SELU()
     elif nonlinearity == "relu": non_lin_instance = torch.nn.ReLU()
     elif nonlinearity == "swiglu": non_lin_instance = SwiGLUModule()
+    elif nonlinearity == "sigmoid": non_lin_instance = torch.nn.Sigmoid()
     elif nonlinearity: raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
     return non_lin_instance
 
 
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
     """
-        ScalarMLPFunction is a flexible Multi-Layer Perceptron (MLP) module designed to provide various configurations of MLPs,
+        A Multi-Layer Perceptron module designed to provide various configurations of MLPs,
         including options for weight normalization, normalization layers, and custom non-linearities.
 
         Attributes:
@@ -49,11 +50,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             zero_init_last_layer_weights (bool): Whether to initialize the weights of the last layer to zero.
 
         Notes:
-            - The non-linearity functions available are 'silu', 'ssp', and 'selu'.
             - Weight initialization follows the principles of Kaiming initialization for better convergence.
-            - This module leverages the e3nn library for certain mathematical operations.
 
         Example Usage:
+
+            build an mlp as: torch.nn.Sequential([nn.Linear(128, 256), nn.Linear(256, 256), nn.Linear(256, 10)])
+
             mlp = ScalarMLPFunction(
                 mlp_input_dimension=128,
                 mlp_latent_dimensions=[256, 256],
@@ -111,14 +113,19 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "selu": torch.nn.functional.selu,
             "relu": torch.nn.functional.relu,
             "swiglu": SwiGLUModule,
+            "sigmoid": torch.nn.functional.sigmoid,
         }[mlp_nonlinearity]
 
         nonlin_const = 1.0
         if nonlinearity is not None:
-            if mlp_nonlinearity == "ssp": nonlin_const = normalize2mom(ShiftedSoftPlus).cst
-            elif mlp_nonlinearity == "selu" or mlp_nonlinearity == "relu": nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
-            elif mlp_nonlinearity == "silu": nonlin_const = normalize2mom(nonlinearity).cst
-            elif mlp_nonlinearity == "swiglu": nonlin_const = 2.02 # avoids variance explosion in interaction layers
+            if mlp_nonlinearity == "ssp":
+                nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+            elif mlp_nonlinearity in ["selu", "relu", "sigmoid"]:
+                nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
+            elif mlp_nonlinearity == "silu":
+                nonlin_const = normalize2mom(nonlinearity).cst
+            elif mlp_nonlinearity == "swiglu":
+                nonlin_const = 2.02 # avoids variance explosion in interaction layers
 
         if bias is not None: has_bias = True
 
@@ -139,7 +146,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
                 modules = [(f"linear_{layer_index}", lin_layer)]
                 if self.use_layer_norm:
-                  modules.append((f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)))
+                    modules.append((f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)))
                 modules.append((f"activation_{layer_index}", non_lin_instance))
 
             if self.use_layer_norm: modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))

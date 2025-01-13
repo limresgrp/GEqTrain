@@ -102,9 +102,8 @@ class EdgeRadialAttrsEmbedder(torch.nn.Module):
         self.out_field = out_field
         self.lin_proj = torch.nn.Linear(in_dim, out_dim, bias=True)
         # init ensures to out a 0 vect s.t. sigmoid outs .5 forall edges at start of training
-        torch.nn.init.xavier_uniform_(self.lin_proj.weight,  gain=torch.nn.init.calculate_gain("sigmoid"))
+        torch.nn.init.xavier_normal_(self.lin_proj.weight,  gain=torch.nn.init.calculate_gain("sigmoid"))
         with torch.no_grad(): self.lin_proj.bias.fill_(0.5)
 
     def forward(self, data: AtomicDataDict.Type, latents:torch.Tensor) -> torch.Tensor:
-        # return 2 * latents * self.lin_proj(data[self.input_field]).sigmoid() # lin proj out squishes variance to .5 -> double it to get std=1
-        return latents * self.lin_proj(data[self.input_field]).sigmoid() # lin proj out squishes variance to .5 -> double it to get std=1
+        return latents * self.lin_proj(data[self.input_field]).sigmoid()
