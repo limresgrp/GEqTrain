@@ -1326,7 +1326,11 @@ class Trainer:
             return
 
         with atomic_write_group():
-            current_metrics = self.mae_dict[self.metrics_key] # keys are the list of metrics listed in yaml under metrics_components
+            # allow current_metrics to be None at first epoch in case tracked metric is a training metric
+            current_metrics = self.mae_dict.get(self.metrics_key, None)
+            if not current_metrics:
+                return
+
             if current_metrics < self.best_metrics:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
