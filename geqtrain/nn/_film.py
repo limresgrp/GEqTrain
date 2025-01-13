@@ -46,7 +46,7 @@ class FiLMFunction(ScalarMLPFunction):
             zero_init_last_layer_weights=zero_init_last_layer_weights,
         )
 
-        if self.final_non_lin:
+        if final_non_lin:
             self.final_non_lin = select_nonlinearity(final_non_lin)
 
         self._dim = mlp_output_dimension
