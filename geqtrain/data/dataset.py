@@ -111,6 +111,7 @@ class AtomicDataset(Dataset):
         IGNORE_KEYS = {
             AtomicDataDict.DATASET_INDEX_KEY,
             "embedding_dimensionality",
+            "transforms",
         }
 
         def filter_attributes(self, pnames, IGNORE_KEYS):
