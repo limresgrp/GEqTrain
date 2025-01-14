@@ -68,6 +68,9 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 def get_output_keys(loss_func: Loss):
+    '''
+    returns fields/keys that have to be predicted (i.e. for which we need to compute a loss)
+    '''
     output_keys, per_node_outputs_keys = [], []
     if loss_func is not None:
         for key in loss_func.keys:
@@ -966,6 +969,7 @@ class Trainer:
 
     def init_dataset(self, config):
         self.load_dataset(config)
+        self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
         self.init_dataloader(config)
 
     def init(self, model):
@@ -1470,9 +1474,6 @@ class Trainer:
             logger.handlers.pop()
 
     def load_dataset(self, config: Config) -> None:
-        """Load the dataset(s) used by this trainer.
-        """
-
         dataset = dataset_from_config(config, prefix="dataset", loss=self.loss)
         logging.info(f"Successfully loaded the data set of type {dataset}...")
         try:
@@ -1482,9 +1483,11 @@ class Trainer:
             logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
             validation_dataset = None
 
+        # to be done before eventual validation_dataset = dataset
         if self.train_idcs is None or self.val_idcs is None:
-            self.split_dataset(dataset, validation_dataset)
+            self.train_idcs, self.val_idcs = self.split_dataset(dataset, validation_dataset)
 
+        # default behavior: if no val_dset then val_dset is train_dset
         if validation_dataset is None:
             validation_dataset = dataset
 
@@ -1492,6 +1495,9 @@ class Trainer:
         assert len(self.n_val) == len(validation_dataset.n_observations)
 
         def index_dataset(dataset, indices):
+            '''
+            indexed_dataset: list of 1d-np.arrays containing idxs of each selected element inside each and every .npz
+            '''
             indexed_dataset = []
             for data, idcs in zip(dataset.datasets, indices):
                 if len(idcs) > 0:
@@ -1508,86 +1514,90 @@ class Trainer:
 
         self.dataset_train = index_dataset(dataset, self.train_idcs)
         self.dataset_val   = index_dataset(dataset, self.val_idcs)
-        
-        self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
 
         self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
-        
-        if isinstance(self.dataset_train, InMemoryConcatDataset):
+        if self.debug and isinstance(self.dataset_train, InMemoryConcatDataset):
             self.log_data_points(self.dataset_train, prefix='Training')
-        if isinstance(self.dataset_val, InMemoryConcatDataset):
+        if self.debug and isinstance(self.dataset_val, InMemoryConcatDataset):
             self.log_data_points(self.dataset_val, prefix='Validation')
 
     def split_dataset(
         self,
-        dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
-        validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
+        train_dset, #dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
+        val_dset,   #validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
     ):
-        if self.n_train is None:
-            if validation_dataset is None:
-                if self.n_val is not None:
-                    self.n_train = [
-                            n - n_valid for n, n_valid in zip(dataset.n_observations, self.n_val)]
-                else:
-                    logging.warning("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
-                    n_observations = np.array(dataset.n_observations)
-                    ones_mask = n_observations == 1
-                    n_observations[~ones_mask] = (0.8 * n_observations[~ones_mask]).astype(int)
-                    num_ones = np.sum(ones_mask)
-                    ones = np.copy(n_observations[ones_mask])
-                    ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
-                    n_observations[ones_mask] = ones
-                    self.n_train = n_observations.tolist()
-            else:
-                self.n_train = dataset.n_observations
+        '''
+        This function ALWAYS creates train_dset and a val_dset stored inside trainer
+        if val_dset not provided: 80/20 split of train set is performed
 
-        if self.n_val is None:
-            if validation_dataset is not None:
-                self.n_val = validation_dataset.n_observations
-            else:
-                self.n_val = [
-                        n - n_train for n, n_train in zip(dataset.n_observations, self.n_train)]
+        dset.n_observations: list of ints i.e. list of num_of_obs present in npz
+        self.n_val (and self.n_train): list of ints i.e. list of num_of_obs that have to be put in val_dset out of given npz
+        '''
 
-        self.train_idcs, self.val_idcs = [], []
-            # Sample both from `dataset`:
-        if validation_dataset is not None:
-            for n_obs, n_val in zip(validation_dataset.n_observations, self.n_val):
-                if n_val > n_obs:
-                    raise ValueError(
-                            "too little data for validation. please reduce n_val")
-                if self.train_val_split == "random":
-                    idcs = torch.randperm(
-                            n_obs, generator=self.dataset_rng)
-                elif self.train_val_split == "sequential":
-                    idcs = torch.arange(n_obs)
-                else:
-                    raise NotImplementedError(
-                            f"splitting mode {self.train_val_split} not implemented")
+        val_dset_provided_in_yaml:bool = True if val_dset is not None else False
 
-                self.val_idcs.append(idcs[:n_val])
+        def n_train_obs_for_each_npz():
+            # returns: list of ints i.e. list of num_of_obs that have to be put in train_dset out of given npz
 
-            # If validation_dataset is None, Sample both from `dataset`
-        for _index, (n_obs, n_train) in enumerate(zip(dataset.n_observations, self.n_train)):
-            if n_train > n_obs:
-                raise ValueError(
-                        f"too little data for training. please reduce n_train. n_train: {n_train} total: {n_obs}")
+            def split_80_20(dataset):
+                logging.warning("No 'n_train' nor 'n_valid' parameters were provided. Using default 80-20%")
+                n_observations = np.array(dataset.n_observations)
+                ones_mask = n_observations == 1
+                n_observations[~ones_mask] = (0.8 * n_observations[~ones_mask]).astype(int)
+                num_ones = np.sum(ones_mask)
+                ones = np.copy(n_observations[ones_mask])
+                ones[np.random.choice(num_ones, int(0.2*num_ones), replace=False)] = 0
+                n_observations[ones_mask] = ones
+                return n_observations.tolist()
 
-            if self.train_val_split == "random":
-                idcs = torch.randperm(n_obs, generator=self.dataset_rng)
-            elif self.train_val_split == "sequential":
-                idcs = torch.arange(n_obs)
-            else:
-                raise NotImplementedError(
-                        f"splitting mode {self.train_val_split} not implemented")
+            if self.n_train: return self.n_train # if already defined, return
+            if val_dset_provided_in_yaml: return train_dset.n_observations # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
+            # build n_train as "complmement" of n_val: from each_train_npz[i] drop a self.n_val[i]:int observations out of it
+            if self.n_val: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_val)]
+            return split_80_20(train_dset)
 
-            self.train_idcs.append(idcs[: n_train])
-            if validation_dataset is None:
+        def n_val_obs_for_each_npz():
+            if self.n_val: return self.n_val
+            if val_dset_provided_in_yaml: return val_dset.n_observations # val can be itself since it is an indipendent dset
+            return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
+
+        self.n_train = n_train_obs_for_each_npz()
+        self.n_val   = n_val_obs_for_each_npz()
+
+        def get_idxs_permuation(n_obs):
+            '''
+            torch.arange(12): tensor([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11])
+            torch.randperm(12): tensor([ 5,  2,  1, 11,  7,  6, 10,  8,  4,  9,  3,  0])
+            '''
+            if self.train_val_split == "random": return torch.randperm(n_obs, generator=self.dataset_rng)
+            elif self.train_val_split == "sequential": return torch.arange(n_obs)
+            else: raise NotImplementedError(f"splitting mode {self.train_val_split} not implemented")
+
+        val_idcs = []
+        if val_dset_provided_in_yaml:
+            # sampling observations from val_dset
+            for n_obs, n_val in zip(val_dset.n_observations, self.n_val):
+                if n_val > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_val. n_val: {n_val}, total: {n_obs}")
+                idcs = get_idxs_permuation(n_obs)
+                val_idcs.append(idcs[:n_val])
+
+        train_idcs = []
+        for _index, (n_obs, n_train) in enumerate(zip(train_dset.n_observations, self.n_train)):
+            # sampling observations from train_dset
+            if n_train > n_obs: raise ValueError(f"Too little data for training. Please reduce n_train. n_train: {n_train}, total: {n_obs}")
+            idcs = get_idxs_permuation(n_obs)
+            train_idcs.append(idcs[: n_train])
+
+            if not val_dset_provided_in_yaml:
+                # sampling from train_dset also for val_dset
                 assert len(self.n_train) == len(self.n_val)
                 n_val = self.n_val[_index]
-                if (n_train + n_val) > n_obs:
-                    raise ValueError(
-                            f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {n_obs}")
-                self.val_idcs.append(idcs[n_train: n_train + n_val])
+                if (n_train + n_val) > n_obs: raise ValueError(f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {n_obs}")
+                val_idcs.append(idcs[n_train: n_train + n_val])
+
+        return train_idcs, val_idcs
+
+
 
     def init_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
