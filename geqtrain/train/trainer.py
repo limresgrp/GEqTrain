@@ -141,7 +141,6 @@ def run_inference(
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
-
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
     batch: AtomicDataDict.Type,
@@ -153,8 +152,6 @@ def prepare_chunked_input_data(
     device="cpu"
 ):
     # === Limit maximum batch size to avoid CUDA Out of Memory === #
-    # === ---------------------------------------------------- === #
-    # === ---------------------------------------------------- === #
 
     chunk = already_computed_nodes is not None
     batch_chunk = deepcopy(batch)
@@ -264,7 +261,6 @@ def prepare_chunked_input_data(
     }
 
     return input_data, batch_chunk, batch_chunk_center_nodes
-
 
 def _init(loss_func, dataset, model):
     init_loss = getattr(loss_func, "init_loss", None)
@@ -438,10 +434,8 @@ class Trainer:
         self.output = output
 
         self.logfile = output.open_logfile("log", propagate=True)
-        self.epoch_log = output.open_logfile(
-            "metrics_epoch.csv", propagate=False)
-        self.init_epoch_log = output.open_logfile(
-            "metrics_initialization.csv", propagate=False)
+        self.epoch_log = output.open_logfile("metrics_epoch.csv", propagate=False)
+        self.init_epoch_log = output.open_logfile("metrics_initialization.csv", propagate=False)
         self.batch_log = {
             TRAIN:      output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
             VALIDATION: output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
@@ -459,12 +453,10 @@ class Trainer:
         self.trainer_save_path = output.generate_file("trainer.pth")
 
         # --- handle randomness
-        if seed is not None:
-            set_seed(seed)
+        if seed: set_seed(seed)
 
         self.dataset_rng = torch.Generator()
-        if dataset_seed is not None:
-            self.dataset_rng.manual_seed(dataset_seed)
+        if dataset_seed: self.dataset_rng.manual_seed(dataset_seed)
 
         self.logger.info(f"Torch device: {self.device}")
         self.torch_device = torch.device(self.device)
@@ -476,15 +468,15 @@ class Trainer:
         }
 
         # --- filter node target to train on based on node type or type name
-        if self.keep_type_names is not None:
+        if self.keep_type_names:
             self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
-        if self.keep_node_types is not None:
+        if self.keep_node_types:
             self.keep_node_types = torch.as_tensor(self.keep_node_types, device=self.torch_device)
 
         # --- exclude edges from center node to specified node types
-        if self.exclude_type_names_from_edges is not None:
+        if self.exclude_type_names_from_edges:
             self.exclude_node_types_from_edges = torch.tensor(find_matching_indices(self.type_names, exclude_type_names_from_edges))
-        if self.exclude_node_types_from_edges is not None:
+        if self.exclude_node_types_from_edges:
             self.exclude_node_types_from_edges = torch.as_tensor(self.exclude_node_types_from_edges, device=self.torch_device)
 
         # --- sort out all the other parameters
@@ -1561,8 +1553,8 @@ class Trainer:
             if val_dset_provided_in_yaml: return val_dset.n_observations # val can be itself since it is an indipendent dset
             return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
 
-        self.n_train = n_train_obs_for_each_npz()
-        self.n_val   = n_val_obs_for_each_npz()
+        self.n_train = list(n_train_obs_for_each_npz())
+        self.n_val   = list(n_val_obs_for_each_npz())
 
         def get_idxs_permuation(n_obs):
             '''
@@ -1596,7 +1588,6 @@ class Trainer:
                 val_idcs.append(idcs[n_train: n_train + n_val])
 
         return train_idcs, val_idcs
-
 
 
     def init_dataloader(self, config, sampler=None, validation_sampler=None):
