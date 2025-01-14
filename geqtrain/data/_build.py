@@ -83,6 +83,22 @@ def get_dataset_file_names(prefix, _config_dataset):
         return [join(f_name, f) for f in listdir(f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
     return [f_name]  # can be 1 file
 
+def node_types_to_keep(config):
+    # --- filter node target to train on based on node type or type name
+    keep_type_names = config.get("keep_type_names", None)
+    if keep_type_names is not None:
+        from geqtrain.train.utils import find_matching_indices
+        config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
+    return config.get("keep_node_types", None) # keep_node_types
+
+def node_types_to_exclude(config):
+    # --- exclude edges from center node to specified node types
+    exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
+    if exclude_type_names_from_edges is not None:
+        from geqtrain.train.utils import find_matching_indices
+        config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
+    return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
+
 
 def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
     """
@@ -121,23 +137,10 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         config             = update_config(config, _config_dataset, prefix)
         dataset_file_names = get_dataset_file_names(prefix, _config_dataset)
 
-        # --- filter node target to train on based on node type or type name
-        keep_type_names = config.get("keep_type_names", None)
-        if keep_type_names is not None:
-            from geqtrain.train.utils import find_matching_indices
-            config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
-        keep_node_types = config.get("keep_node_types", None)
-
-        # --- exclude edges from center node to specified node types
-        exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
-        if exclude_type_names_from_edges is not None:
-            from geqtrain.train.utils import find_matching_indices
-            config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
-        exclude_node_types_from_edges = config.get("exclude_node_types_from_edges", None)
-
         # default behavior: in-memory loading
         inmemory = _config_dataset.get('inmemory', True)
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
+
         for dataset_file_name in dataset_file_names:
             _config = copy.deepcopy(config)
             _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset
@@ -160,7 +163,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
             """
             if inmemory:
                 # Filter out nan nodes and nodes with type_names that we don't want to keep
-                instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, keep_node_types, exclude_node_types_from_edges)
+                instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
             if instance is not None:
                 if inmemory:
                     instances.append(instance)
@@ -171,7 +174,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
                         'lazy_dataset': np.arange(instance.data.num_graphs),
                     })
                     del instance
-            
+
         if inmemory:
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, _config, instances)
