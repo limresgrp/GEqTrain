@@ -94,16 +94,12 @@ class EdgeRadialAttrsEmbedder(torch.nn.Module):
         self,
         in_dim: int,
         out_dim: int,
-        input_field: str = AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-        out_field: str = "EmbeddedRadialBasis",
     ):
         super().__init__()
-        self.input_field = input_field
-        self.out_field = out_field
         self.lin_proj = torch.nn.Linear(in_dim, out_dim, bias=True)
         # init ensures to out a 0 vect s.t. sigmoid outs .5 forall edges at start of training
         torch.nn.init.xavier_normal_(self.lin_proj.weight,  gain=torch.nn.init.calculate_gain("sigmoid"))
         with torch.no_grad(): self.lin_proj.bias.fill_(0.5)
 
-    def forward(self, data: AtomicDataDict.Type, latents:torch.Tensor) -> torch.Tensor:
-        return latents * self.lin_proj(data[self.input_field]).sigmoid()
+    def forward(self, latents:torch.Tensor, rbf:torch.Tensor ) -> torch.Tensor:
+        return latents * self.lin_proj(rbf).sigmoid()
