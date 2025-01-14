@@ -25,6 +25,9 @@ from geqtrain.utils import (
     Config
 )
 
+from functools import partial
+from multiprocessing import Pool, Lock, cpu_count, Manager
+
 
 def get_class_name(config_dataset_type):
     # looks for dset type specified in yaml if present (dataset_list/dataset: {$class_name})
@@ -99,7 +102,6 @@ def node_types_to_exclude(config):
         config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
     return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
 
-
 def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
     """
     TODO update docs here
@@ -124,7 +126,6 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
     Returns:
         torch.utils.data.ConcatDataset: dataset
     """
-    instances = []
     dataset_id_offset = 0
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for dataset_id, _config_dataset in enumerate(config_dataset_list):
@@ -141,43 +142,18 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         inmemory = _config_dataset.get('inmemory', True)
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
-        for dataset_file_name in dataset_file_names:
-            _config = copy.deepcopy(config)
-            _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset
-            dataset_id_offset += 1
-            _config[f"{prefix}_file_name"] = dataset_file_name
+        # multiprocessing handling of npz reading
+        m = Manager() #! https://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processe
+        mp_lock = m.Lock()
+        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, mp_lock, dataset_id_offset, loss)
+        # TODO here compute batch_size wrt len data
+        with Pool(processes=cpu_count()-5) as pool:
+            l=pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=1000)
 
-            # Register fields:
-            # This might reregister fields, but that's OK:
-            instantiate(register_fields, all_args=_config)
-
-            instance, _ = instantiate(
-                class_name,  # dataset selected to be instanciated
-                prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
-                positional_args={},
-                optional_args=_config,
-            )
-
-            """
-            !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
-            """
-            if inmemory:
-                # Filter out nan nodes and nodes with type_names that we don't want to keep
-                instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
-            if instance is not None:
-                if inmemory:
-                    instances.append(instance)
-                else:
-                    instances.append({
-                        'dataset_file_name': dataset_file_name,
-                        'dataset_id': dataset_id + dataset_id_offset,
-                        'lazy_dataset': np.arange(instance.data.num_graphs),
-                    })
-                    del instance
-
+        instances = list(l)
         if inmemory:
             return InMemoryConcatDataset(instances)
-        return LazyLoadingConcatDataset(class_name, prefix, _config, instances)
+        return LazyLoadingConcatDataset(class_name, prefix, config, instances)
 
 
 def remove_node_centers_for_NaN_targets_and_edges(
@@ -236,3 +212,39 @@ def remove_node_centers_for_NaN_targets_and_edges(
 
     dataset.data = data
     return dataset
+
+def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, mp_lock, dataset_id_offset, loss, dataset_file_name):
+    _config = copy.deepcopy(config)
+    _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset
+    with mp_lock:
+        dataset_id_offset += 1
+    _config[f"{prefix}_file_name"] = dataset_file_name
+
+    # Register fields:
+    # This might reregister fields, but that's OK:
+    instantiate(register_fields, all_args=_config)
+
+    instance, _ = instantiate(
+        class_name,  # dataset selected to be instanciated
+        prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
+        positional_args={},
+        optional_args=_config,
+    )
+
+    """
+    !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
+    """
+    if inmemory:
+        # Filter out nan nodes and nodes with type_names that we don't want to keep
+        instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
+    if instance is not None:
+        if inmemory:
+            return instance
+        else:
+            out = {
+                'dataset_file_name': dataset_file_name,
+                'dataset_id': dataset_id + dataset_id_offset,
+                'lazy_dataset': np.arange(instance.data.num_graphs),
+            }
+            del instance
+            return out
