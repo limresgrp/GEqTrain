@@ -129,7 +129,7 @@ class InMemoryConcatDataset(ConcatDataset):
     def __init__(self, datasets):
         super().__init__(datasets)
         self._n_observations = np.array([len(ds) for ds in self.datasets])
-    
+
     @property
     def n_observations(self):
         return self._n_observations
@@ -151,12 +151,13 @@ class LazyLoadingConcatDataset(Dataset):
 
     @property
     def _n_observations(self):
+        # list of num_of_obs present in each npz
         return np.array([len(_idcs) for _idcs in self._lazy_dataset])
 
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     @property
     def config(self):
         return self._config
@@ -174,10 +175,6 @@ class LazyLoadingConcatDataset(Dataset):
 
     def __len__(self):
         return sum(self.n_observations)
-
-    '''def keep_idxs(self, idxs):
-        self.datasets_list = [self.datasets_list[idx]
-                              for idx in idxs]  # acts in-place'''
 
     @property
     def datasets(self):
@@ -204,14 +201,23 @@ class LazyLoadingConcatDataset(Dataset):
         )
 
         # Find the dataset_idx and sample_idx using cumsum and bisect
+        if idx < 0:
+            if -idx > len(self):
+                raise ValueError("absolute value of index should not exceed dataset length")
+            idx = len(self) + idx
         dataset_idx = bisect.bisect_right(self.cumsum, idx)
         if dataset_idx == 0:
             sample_idx = idx
         else:
-            sample_idx = idx - self.cumsum[dataset_idx - 1]
-
-        # uniform sampling from NpzDataset
-        return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+            sample_idx = idx - self.cumsum[dataset_idx - 1] #! not true it is as if (self.cumsum[dataset_idx - 1]+1) is the correct thing o.O
+        # dataset_idx: index of the npz file that contains the mol requested
+        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
+        try:
+            return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+        except IndexError:
+            # print("IndexError")
+            # raise IndexError
+            return instance[self._lazy_dataset[dataset_idx][sample_idx-1]]
 
 
 class AtomicDataset(Dataset):
