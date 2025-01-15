@@ -48,11 +48,6 @@ from geqtrain.utils import (
     Config
 )
 
-# TODO IS THIS OK HERE FOR MULTIPROCESSING?
-# more info at: https://medium.com/@heyamit10/how-to-use-pytorch-multiprocessing-0ddd2014f4fd
-from torch.multiprocessing import Lock
-lock = mp.Lock()
-
 
 def fix_batch_dim(arr):
     if arr is None:
@@ -186,38 +181,35 @@ class LazyLoadingConcatDataset(Dataset):
         if first time of loading of npz, writes it in preprocessed_path
         if not first time loads preprocessed_path/file and instanciates the NpzDataset instead of keeping it in mem
         '''
-        # better deepcopy then mp.lock to avoid hangings, as soon as batch has been processed _config is destroyed
-        _config = copy.deepcopy(self.config)
-        _config[AtomicDataDict.DATASET_INDEX_KEY] = self._datasets_list[idx]['dataset_id']
-        _config[f"{self._prefix}_file_name"] = self._datasets_list[idx]['dataset_file_name']
 
-        instance, _ = instantiate(
-            # dataset type selected for instanciation eg <class 'geqtrain.data.dataset.NpzDataset'>
-            self._class_name,
-            # look for this prefix word in yaml to select get the params for the ctor (default: 'dataset')
-            prefix=self._prefix,
-            positional_args={},
-            optional_args=_config,  # the whole yaml parsed and wrapped in a dict
-        )
-
-        # Find the dataset_idx and sample_idx using cumsum and bisect
+        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of NpzDataset)
+        # dataset_idx: index of the npz file that contains the mol requested
         if idx < 0:
             if -idx > len(self):
                 raise ValueError("absolute value of index should not exceed dataset length")
             idx = len(self) + idx
         dataset_idx = bisect.bisect_right(self.cumsum, idx)
+
+        # 2) instanciate NpzDataset
+        # better deepcopy then mp.lock to avoid hangings, as soon as batch has been processed _config is destroyed
+        _config = copy.deepcopy(self.config)
+        _config[AtomicDataDict.DATASET_INDEX_KEY] = self._datasets_list[dataset_idx]['dataset_id']
+        _config[f"{self._prefix}_file_name"] = self._datasets_list[dataset_idx]['dataset_file_name']
+
+        instance, _ = instantiate(
+            self._class_name, # dataset type selected for instanciation eg NpzDataset
+            prefix=self._prefix, # looks for {prefix}_ in yaml to select ctor params (default: 'dataset')
+            positional_args={},
+            optional_args=_config, # the whole yaml parsed and wrapped in a dict
+        )
+
+        # 3) index into it: find sample_idx
+        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
         if dataset_idx == 0:
             sample_idx = idx
         else:
-            sample_idx = idx - self.cumsum[dataset_idx - 1] #! not true it is as if (self.cumsum[dataset_idx - 1]+1) is the correct thing o.O
-        # dataset_idx: index of the npz file that contains the mol requested
-        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
-        try:
-            return instance[self._lazy_dataset[dataset_idx][sample_idx]]
-        except IndexError:
-            # print("IndexError")
-            # raise IndexError
-            return instance[self._lazy_dataset[dataset_idx][sample_idx-1]]
+            sample_idx = idx - self.cumsum[dataset_idx - 1]
+        return instance[self._lazy_dataset[dataset_idx][sample_idx]]
 
 
 class AtomicDataset(Dataset):
@@ -461,29 +453,20 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
 
             # check keys (refactor this)
-            node_fields = {k: v for k, v in node_fields.items()
-                           if v is not None}
-            edge_fields = {k: v for k, v in edge_fields.items()
-                           if v is not None}
-            graph_fields = {k: v for k,
-                            v in graph_fields.items() if v is not None}
-            extra_fields = {k: v for k,
-                            v in extra_fields.items() if v is not None}
+            node_fields  = {k: v for k, v in node_fields.items() if v is not None}
+            edge_fields  = {k: v for k, v in edge_fields.items() if v is not None}
+            graph_fields = {k: v for k,v in graph_fields.items() if v is not None}
+            extra_fields = {k: v for k,v in extra_fields.items() if v is not None}
 
-            all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(
-                graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
-            assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(
-                extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
+            all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
+            assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
             # Check bad key combinations, but don't require that this be a graph yet.
             AtomicDataDict.validate_keys(all_keys, graph_required=False)
 
             # check dimesionality
-            num_examples = set(
-                [len(x) for x in [val for val in node_fields.values() if val is not None]])
+            num_examples = set([len(x) for x in [val for val in node_fields.values() if val is not None]])
             if not len(num_examples) == 1:
-                raise ValueError(
-                    f"This dataset is invalid: expected all node_fields to have same length (same number of examples), but they had shapes {f: v.shape for f, v in node_fields.items()}"
-                )
+                raise ValueError(f"This dataset is invalid: expected all node_fields to have same length (same number of examples), but they had shapes {f: v.shape for f, v in node_fields.items()}")
             num_examples = next(iter(num_examples))
 
             # Check that the number of frames is consistent for all node and edge fields
@@ -530,13 +513,10 @@ class AtomicInMemoryDataset(AtomicDataset):
 
         # type conversion
         # ignore_fields: fields mapped in yaml but not casted to tensor
-        _process_dict(fixed_fields, ignore_fields=[
-                      AtomicDataDict.R_MAX_KEY, "smiles"])
+        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY, "smiles"])
 
-        total_MBs = sum(item.numel() * item.element_size()
-                        for _, item in data) / (1024 * 1024)
-        logging.info(
-            f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
+        total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (1024 * 1024)
+        logging.info(f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
         del total_MBs
 
         # use atomic writes to avoid race conditions between
@@ -545,11 +525,10 @@ class AtomicInMemoryDataset(AtomicDataset):
         # it doesn't matter if they overwrite each others cached'
         # datasets. It only matters that they don't simultaneously try
         # to write the _same_ file, corrupting it.
-        with lock:
-            with atomic_write(self.processed_paths[0], binary=True) as f:
-                torch.save((data, fixed_fields, self.include_frames), f)
-            with atomic_write(self.processed_paths[1], binary=False) as f:
-                yaml.dump(self._get_parameters(), f)
+        with atomic_write(self.processed_paths[0], binary=True) as f:
+            torch.save((data, fixed_fields, self.include_frames), f)
+        with atomic_write(self.processed_paths[1], binary=False) as f:
+            yaml.dump(self._get_parameters(), f)
 
         logging.info("Cached processed data to disk")
 
