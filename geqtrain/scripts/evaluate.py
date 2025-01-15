@@ -17,7 +17,6 @@ from geqtrain.train.trainer import get_output_keys, run_inference, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
-from geqtrain.utils.savenload import load_file
 
 
 def init_logger(log: str = None):

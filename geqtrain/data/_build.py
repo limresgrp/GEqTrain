@@ -183,15 +183,15 @@ def remove_node_centers_for_NaN_targets_and_edges(
 
     def update_edge_index(data, edge_filter: torch.Tensor):
         data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
-        new_edge_index_slices = [0]
-        for slice_to in data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]:
-            new_edge_index_slices.append(edge_filter[:slice_to].sum())
-        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(
-            new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
+        if len(edge_filter) == 0:
+            return
+        edge_filter_cumsum = edge_filter.cumsum(0)
+        new_edge_index_slices = edge_filter_cumsum[torch.as_tensor(data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]) - 1].tolist()
+        new_edge_index_slices.insert(0, 0)
+        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
         if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
             data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
-            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[
-                AtomicDataDict.EDGE_INDEX_KEY]
+            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
 
     # - Remove edges of atoms whose result is NaN - #
     if loss_func is not None:
