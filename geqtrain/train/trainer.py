@@ -1516,8 +1516,8 @@ class Trainer:
 
     def split_dataset(
         self,
-        train_dset, #dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
-        val_dset,   #validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
+        train_dset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
+        val_dset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset]
     ):
         '''
         This function ALWAYS creates train_dset and a val_dset stored inside trainer
@@ -1599,8 +1599,7 @@ class Trainer:
             exclude_keys=self.exclude_keys,
             num_workers=self.dataloader_num_workers,
             # keep stuff around in memory
-            persistent_workers=(self.dataloader_num_workers >
-                                0 and self.max_epochs > 1),
+            persistent_workers=(self.dataloader_num_workers > 0 and self.max_epochs > 1),
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
