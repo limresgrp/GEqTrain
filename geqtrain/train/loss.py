@@ -3,7 +3,7 @@ from typing import Union, List, Dict
 
 import torch.nn
 
-from geqtrain.train.utils import parse_dict
+from geqtrain.train.utils import parse_loss_metrics_dict
 from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
@@ -57,7 +57,7 @@ class Loss:
                 if isinstance(elem, str):
                     self.register_coeffs_and_loss(key=elem, coeff=1.0, func="MSELoss", func_params={})
                 elif isinstance(elem, dict):
-                    for key, coeff, func, func_params in parse_dict(elem):
+                    for key, coeff, func, func_params in parse_loss_metrics_dict(elem):
                         self.register_coeffs_and_loss(key=key, coeff=coeff, func=func, func_params=func_params)
                 else:
                     raise NotImplementedError(
