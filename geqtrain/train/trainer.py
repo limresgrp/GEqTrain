@@ -1498,6 +1498,7 @@ class Trainer:
                         indexed_dataset.append(data)
                     elif isinstance(dataset, LazyLoadingConcatDataset):
                         indexed_dataset.append(data[idcs].reshape(-1))
+
             if isinstance(dataset, InMemoryConcatDataset):
                 return InMemoryConcatDataset(indexed_dataset)
             elif isinstance(dataset, LazyLoadingConcatDataset):
@@ -1505,7 +1506,7 @@ class Trainer:
                 return dataset
 
         self.dataset_train = index_dataset(dataset, self.train_idcs)
-        self.dataset_val   = index_dataset(dataset, self.val_idcs)
+        self.dataset_val   = index_dataset(validation_dataset, self.val_idcs)
 
         self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
         if self.debug and isinstance(self.dataset_train, InMemoryConcatDataset):
@@ -1558,6 +1559,7 @@ class Trainer:
 
         def get_idxs_permuation(n_obs):
             '''
+            example behaviour:
             torch.arange(12): tensor([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11])
             torch.randperm(12): tensor([ 5,  2,  1, 11,  7,  6, 10,  8,  4,  9,  3,  0])
             '''
@@ -1567,7 +1569,7 @@ class Trainer:
 
         val_idcs = []
         if val_dset_provided_in_yaml:
-            # sampling observations from val_dset
+            # sampling observations from val_dset: sample from each npz the amount of obs requested
             for n_obs, n_val in zip(val_dset.n_observations, self.n_val):
                 if n_val > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_val. n_val: {n_val}, total: {n_obs}")
                 idcs = get_idxs_permuation(n_obs)
@@ -1575,7 +1577,7 @@ class Trainer:
 
         train_idcs = []
         for _index, (n_obs, n_train) in enumerate(zip(train_dset.n_observations, self.n_train)):
-            # sampling observations from train_dset
+            # sampling observations from train_dset: sample from each npz the amount of obs requested
             if n_train > n_obs: raise ValueError(f"Too little data for training. Please reduce n_train. n_train: {n_train}, total: {n_obs}")
             idcs = get_idxs_permuation(n_obs)
             train_idcs.append(idcs[: n_train])
@@ -1679,9 +1681,19 @@ class DistributedTrainer(Trainer):
 
     def init_dataloader(self, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(
-            self.dataset_train, num_replicas=self.world_size, rank=self.rank)
+            self.dataset_train,
+            num_replicas=self.world_size,
+            rank=self.rank,
+            shuffle=False, # since we are passing a sampler to the dataloader
+        )
+
         validation_sampler = DistributedSampler(
-            self.dataset_val, num_replicas=self.world_size, rank=self.rank)
+            self.dataset_val,
+            num_replicas=self.world_size,
+            rank=self.rank,
+            shuffle=False, # since we are passing a sampler to the dataloader
+        )
+
         super().init_dataloader(sampler=sampler, validation_sampler=validation_sampler)
 
     def set_model(self, model):

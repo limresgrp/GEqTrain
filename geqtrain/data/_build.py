@@ -26,7 +26,7 @@ from geqtrain.utils import (
 )
 
 from functools import partial
-from multiprocessing import Pool, Lock
+from multiprocessing import Pool, Value
 
 
 def get_class_name(config_dataset_type):
@@ -126,7 +126,13 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
     Returns:
         torch.utils.data.ConcatDataset: dataset
     """
-    dataset_id_offset = 0
+
+    # avoid mp.Manager: https://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processe
+    c = Value('i', 0) # initialize or reset counter
+    def init_mp(c):
+        global counter
+        counter = c
+
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for dataset_id, _config_dataset in enumerate(config_dataset_list):
         config_dataset_type = _config_dataset.get(prefix, None)
@@ -142,25 +148,16 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
+        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, loss)
+        n_workers = len(os.sched_getaffinity(0))  # pid=0 the calling process
 
-        # avoid mp.Manager: https://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processe
-        l = Lock()
-        def init_lock(l):
-            global mp_lock
-            mp_lock = l
+        # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
+        chunksize = len(dataset_file_names) // (n_workers if inmemory else n_workers *.25)
 
-        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, dataset_id_offset, loss)
+        with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+            instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
 
-        n_workers = len(os.sched_getaffinity(0)) # pid=0 represents the calling process
-
-        # things to consider here: 1) we have the isusse of not being able to load all dset in mem, so we can't load it all but in different processes
-        # i.e. chunksize = int(len(dataset_file_names) / n_workers) cannot be done (that's why * .25)
-        chunksize = int(len(dataset_file_names) / n_workers *.25)
-
-        with Pool(initializer=init_lock, initargs=(l,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-            l=pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize) # todo: use starmap to remove partial (https://superfastpython.com/multiprocessing-pool-starmap/)
-
-        instances = list(l)
+        instances = list(instances)
         if inmemory:
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
@@ -223,11 +220,14 @@ def remove_node_centers_for_NaN_targets_and_edges(
     dataset.data = data
     return dataset
 
-def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, dataset_id_offset, loss, dataset_file_name):
-    _config = copy.deepcopy(config)
-    _config[AtomicDataDict.DATASET_INDEX_KEY] = dataset_id + dataset_id_offset
-    with mp_lock:
-        dataset_id_offset += 1
+def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, loss, dataset_file_name):
+    _config = copy.deepcopy(config) # this might not be required but kept for saefty
+
+    with counter.get_lock():
+        _id = dataset_id + counter.value
+        counter.value += 1
+
+    _config[AtomicDataDict.DATASET_INDEX_KEY] = _id
     _config[f"{prefix}_file_name"] = dataset_file_name
 
     # Register fields:
@@ -253,7 +253,7 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
         else:
             out = {
                 'dataset_file_name': dataset_file_name,
-                'dataset_id': dataset_id + dataset_id_offset,
+                AtomicDataDict.DATASET_INDEX_KEY: _id,
                 'lazy_dataset': np.arange(instance.data.num_graphs),
             }
             del instance

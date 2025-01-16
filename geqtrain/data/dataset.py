@@ -1,7 +1,6 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from torch.utils.data import IterableDataset
 from typing import (
     List,
     Optional,
@@ -20,9 +19,6 @@ import torch
 import copy
 from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
-
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
@@ -193,7 +189,7 @@ class LazyLoadingConcatDataset(Dataset):
         # 2) instanciate NpzDataset
         # better deepcopy then mp.lock to avoid hangings, as soon as batch has been processed _config is destroyed
         _config = copy.deepcopy(self.config)
-        _config[AtomicDataDict.DATASET_INDEX_KEY] = self._datasets_list[dataset_idx]['dataset_id']
+        _config[AtomicDataDict.DATASET_INDEX_KEY] = self._datasets_list[dataset_idx][AtomicDataDict.DATASET_INDEX_KEY]
         _config[f"{self._prefix}_file_name"] = self._datasets_list[dataset_idx]['dataset_file_name']
 
         instance, _ = instantiate(
@@ -369,8 +365,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
             if not np.all(include_frames == self.include_frames):
                 raise ValueError(f"the include_frames is changed. Please delete the processed folder and rerun {self.processed_paths[0]}")
-            self.fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = self.fixed_fields.get(
-                AtomicDataDict.DATASET_INDEX_KEY, 0) * 0 + self.dataset_id
+            self.fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = self.fixed_fields.get(AtomicDataDict.DATASET_INDEX_KEY, 0) * 0 + self.dataset_id
         if self.target_indices is not None:
             assert self.target_key is not None
             self.data[self.target_key] = self.data[self.target_key][..., np.array(self.target_indices)]
