@@ -134,7 +134,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         counter = c
 
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
-    for dataset_id, _config_dataset in enumerate(config_dataset_list):
+    for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
@@ -148,7 +148,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
-        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, loss)
+        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, loss)
         n_workers = len(os.sched_getaffinity(0))  # pid=0 the calling process
 
         # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
@@ -220,11 +220,11 @@ def remove_node_centers_for_NaN_targets_and_edges(
     dataset.data = data
     return dataset
 
-def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, loss, dataset_file_name):
+def handle_single_dataset_file_name(config, prefix, class_name, inmemory, loss, dataset_file_name):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
 
     with counter.get_lock():
-        _id = dataset_id + counter.value
+        _id = counter.value
         counter.value += 1
 
     _config[AtomicDataDict.DATASET_INDEX_KEY] = _id

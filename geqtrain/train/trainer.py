@@ -468,15 +468,15 @@ class Trainer:
         }
 
         # --- filter node target to train on based on node type or type name
-        if self.keep_type_names:
+        if self.keep_type_names is not None:
             self.keep_node_types = find_matching_indices(self.type_names, self.keep_type_names)
-        if self.keep_node_types:
+        if self.keep_node_types is not None:
             self.keep_node_types = torch.as_tensor(self.keep_node_types, device=self.torch_device)
 
         # --- exclude edges from center node to specified node types
-        if self.exclude_type_names_from_edges:
+        if self.exclude_type_names_from_edges is not None:
             self.exclude_node_types_from_edges = torch.tensor(find_matching_indices(self.type_names, exclude_type_names_from_edges))
-        if self.exclude_node_types_from_edges:
+        if self.exclude_node_types_from_edges is not None:
             self.exclude_node_types_from_edges = torch.as_tensor(self.exclude_node_types_from_edges, device=self.torch_device)
 
         # --- sort out all the other parameters
