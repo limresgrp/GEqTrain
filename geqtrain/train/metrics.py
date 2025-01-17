@@ -139,6 +139,9 @@ class Metrics(Loss):
         metrics = {}
 
         for key in self.keys:
+            # for each key on which to compute metric1, metric2, etc (eg: MAE, MSE) that are unfortunately named eg out_0, out_1
+            # compute metric1, metric2, ... on out <-key_clean used to access pred, ref
+            # then creates out_0, out_1, ... to keep running stats and return the results of metric1, metric2 wrt current input only
             clean_key = self.remove_suffix(key)
             error: torch.Tensor = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
                 pred=pred,

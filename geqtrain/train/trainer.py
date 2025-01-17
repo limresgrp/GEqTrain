@@ -1,5 +1,7 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
+import os
+import torch.distributed as dist
 
 import inspect
 import logging
@@ -8,7 +10,7 @@ import contextlib
 from copy import deepcopy
 from os.path import isfile
 from time import perf_counter
-from typing import Callable, Optional, Union, Tuple, List, Dict
+from typing import Callable, Optional, Union, Tuple, List, Dict, Iterable
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +27,6 @@ from geqtrain.data import (
     _NODE_FIELDS,
     _GRAPH_FIELDS,
     _EDGE_FIELDS,
-    dataset_from_config,
 )
 from geqtrain.utils import (
     Output,
@@ -50,6 +51,19 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+
+def gather(tensor, tensor_list=None, is_master=False, group=None):
+    """
+        Sends tensor to root process, which store it in tensor_list.
+    """
+    rank = dist.get_rank()
+    if group is None:
+        group = dist.group.WORLD
+    if is_master:
+        assert(tensor_list is not None)
+        dist.gather(tensor, gather_list=tensor_list, group=group) # this blocking: it will not return until the gather operation is completed across all participating processes
+    else:
+        dist.gather(tensor, dst=0, group=group) # this is not blocking
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
@@ -414,8 +428,10 @@ class Trainer:
         use_grokfast: bool = False,
         debug: bool = False,
         use_warmup: bool = False,
+        run_name:str="", # used as distrbuted process group name
         **kwargs,
     ):
+        self.ddp_process_group_name = run_name
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
@@ -527,6 +543,8 @@ class Trainer:
         self._end_of_batch_callbacks = [load_callable(callback) for callback in end_of_batch_callbacks]
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks = [load_callable(callback) for callback in final_callbacks]
+
+        assert self.device == self.rank
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
@@ -959,20 +977,21 @@ class Trainer:
 
         return model, config
 
-    def init_dataset(self, config):
-        self.load_dataset(config)
-        self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
+    def init_dataset(self, config, train_dset, val_dset):
+        self.load_dataset_idcs(train_dset, val_dset)
         self.init_dataloader(config)
 
-    def init(self, model):
+    def init(self, **kwargs):
+        assert "model" in kwargs
+        model = kwargs.get("model")
         """initialize optimizer"""
         self.set_model(model=model)
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
-        self.logger.info(
-            f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
+        self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
         self.init_objects()
         self.init_losses()
+        self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
         self._initialized = True
         self.cumulative_wall = 0
 
@@ -1044,7 +1063,11 @@ class Trainer:
         finish_all_writes()
 
     def _log_updates(self):
-
+        '''
+        logs:
+        - update to params due to optim step
+        - grad_to_weight_ratio: param.grad.std()/param.std()
+        '''
         update_log = logging.getLogger(self.log_updates)
         grad_to_weight_ratio_log = logging.getLogger(self.log_ratio)
 
@@ -1089,6 +1112,7 @@ class Trainer:
         grad_to_weight_ratio_log.info(grad_ratio.strip().rstrip(','))
 
     def _batch_lvl_lrscheduler_step(self):
+        # this call must be done from all processes in case of distributed training SINCE IT IS NOT ACTING WRT LOSS/METRICS
         # idea: 2 bool comparison are always going to be more performant then str comparison if len(str)>2
         if hasattr(self, "using_batch_lvl_lrscheduler"):
             if not self.using_batch_lvl_lrscheduler:
@@ -1109,6 +1133,10 @@ class Trainer:
             setattr(self, "using_batch_lvl_lrscheduler", True)
 
     def _epoch_lvl_lrscheduler_step(self):
+
+        if not self.is_master:
+            return
+
         if hasattr(self, "using_batch_lvl_lrscheduler"):
             if self.using_batch_lvl_lrscheduler:
                 return
@@ -1120,22 +1148,78 @@ class Trainer:
             setattr(self, "using_batch_lvl_lrscheduler", False)
 
     def _is_warmup_period_over(self):
+        # this call must be done from all processes in case of distributed training
+        # when this returns true -> start normal lr_scheduler.step() call
         if not self.use_warmup:
             return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
-        # when this condition is true -> start normal lr_scheduler.step() call
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
+
+    def _sync_tensor_across_processes_via_avg(self, tensor):
+        # only supported avg for performance and clarity
+        # sincronize tensor across processes
+        # inplace op
+        dist.reduce(tensor, self.rank, op=dist.ReduceOp.SUM)
+        tensor /= os.environ['WORLD_SIZE']
+
+    def _sync_dict_of_tensor_across_processes_via_avg(self, tensor_dict, keys_to_sync:Iterable=None):
+        # default behavior: assume all values are tensors to be sync
+        # todo: enforce inability to access to content in here after this step since all content will be rank dependant
+        if keys_to_sync is None:
+            keys_to_sync = tensor_dict.keys()
+        for k in keys_to_sync:
+            self._sync_tensor_across_processes_via_avg(tensor_dict[k])
+
+    @torch.no_grad()
+    def _update_metrics(self, out, ref_data):
+        self._gather_outputs_for_metrics(pred=out, ref=ref_data)
+        self.batch_metrics = self.metrics(pred=out, ref=ref_data)
+
+    @torch.no_grad()
+    def _gather_outputs_for_single_metric(self, _dict, _key, _ws):
+        if self.is_master:
+            l = [torch.zeros_like(_dict[_key]) for _ in range(_ws)]
+            gather(tensor=_dict[_key], tensor_list=l, is_master=self.is_master)
+            _dict[_key] = torch.cat(l, dim=0)
+        else:
+            gather(tensor=_dict[_key], is_master=self.is_master)
+
+
+    @torch.no_grad()
+    def _gather_outputs_for_metrics(self, pred, ref):
+        _ws = dist.get_world_size()
+        for metric_key_clean in set(self.metrics.clean_keys):
+            # collect targets from different processes for current batch/key
+            # self._gather_outputs_for_single_metric(ref, metric_key_clean, _ws)
+            # do the same for predictions
+            # self._gather_outputs_for_single_metric(pred, metric_key_clean, _ws)
+
+            if self.is_master:
+                batch_targets_for_key = [torch.zeros_like(ref[metric_key_clean]) for _ in range(_ws)]
+                gather(tensor=ref[metric_key_clean], tensor_list=batch_targets_for_key, is_master=self.is_master)
+                ref[metric_key_clean] = torch.cat(batch_targets_for_key, dim=0)
+            else:
+                gather(tensor=ref[metric_key_clean], is_master=self.is_master)
+            if self.is_master:
+                batch_predictions_for_key = [torch.zeros_like(pred[metric_key_clean]) for _ in range(_ws)]
+                gather(tensor=pred[metric_key_clean], tensor_list=batch_predictions_for_key, is_master=self.is_master)
+                pred[metric_key_clean] = torch.cat(batch_predictions_for_key, dim=0)
+            else:
+                gather(tensor=pred[metric_key_clean], is_master=self.is_master)
+
+    @torch.no_grad()
+    def _sync_losses(self, loss, loss_contrib):
+        # todo: MUST be done after backward pass add assert to check if loss.grad still exists after backward?
+        self._sync_tensor_across_processes_via_avg(loss)
+        self._sync_dict_of_tensor_across_processes_via_avg(loss_contrib)
 
     def batch_step(self, data, validation=False):
         self.optim.zero_grad(set_to_none=True)
-
+        self.model.train()
         if validation:
             self.model.eval()
-        else:
-            self.model.train()
 
-        cm = contextlib.nullcontext() if (
-            self.model_requires_grads or not validation) else torch.no_grad()
+        cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
         already_computed_nodes = None
         while True:
 
@@ -1154,13 +1238,10 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
             )
 
-            loss, loss_contrib = self.loss(
-                pred=out, ref=ref_data, epoch=self.iepoch)
+            loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch) # loss.grad is None = T
 
-            # update metrics
-            with torch.no_grad():
-                self.batch_losses = self.loss_stat(loss, loss_contrib)
-                self.batch_metrics = self.metrics(pred=out, ref=ref_data)
+            # if self.is_master:
+            self._update_metrics(out, ref_data)
             del ref_data
 
             if not validation:
@@ -1172,8 +1253,7 @@ class Trainer:
 
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
-                self.norms.append(torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_gradient_norm).item())
+                self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
 
                 if self.debug:
                     self._log_updates()
@@ -1185,6 +1265,11 @@ class Trainer:
                         pass
                 else:
                     self._batch_lvl_lrscheduler_step()
+
+            # if self.is_master:
+            # self._sync_losses(loss, loss_contrib)
+
+            self.batch_losses = self.loss_stat(loss, loss_contrib) #! todo is this correct?
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1199,10 +1284,11 @@ class Trainer:
     def stop_cond(self):
         """kill the training early"""
 
+        if not self.is_master:
+            return
+
         if self.early_stopping_conds is not None and hasattr(self, "mae_dict") and self._is_warmup_period_over():
-            early_stop, early_stop_args, debug_args = self.early_stopping_conds(
-                self.mae_dict
-            )
+            early_stop, early_stop_args, debug_args = self.early_stopping_conds(self.mae_dict)
             if debug_args is not None:
                 self.logger.debug(debug_args)
             if early_stop:
@@ -1327,8 +1413,7 @@ class Trainer:
             return
 
         with atomic_write_group():
-            # self.mae_dict[self.metrics_key] # keys are the list of metrics listed in yaml under metrics_components
-            current_metrics = self.mae_dict.get(self.metrics_key, None)
+            current_metrics = self.mae_dict.get(self.metrics_key, None) # mae_dict.keys =  list of metrics listed in yaml under metrics_components
             if not current_metrics:
                 return
             if current_metrics < self.best_metrics:
@@ -1353,7 +1438,7 @@ class Trainer:
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
-            torch.save(self.model.state_dict(), write_to)
+            torch.save(self.model.state_dict(), write_to) #! IMPO here is self.model.module.state_dict() if ddp
 
     def init_log(self):
         if not self.is_master:
@@ -1378,6 +1463,9 @@ class Trainer:
         """
         log validation details at the end of each epoch
         """
+
+        if not self.is_master:
+            return
 
         lr = self.optim.param_groups[0]["lr"]
         wall = perf_counter() - self.wall
@@ -1462,21 +1550,16 @@ class Trainer:
             hdl.close()
         logger.handlers = []
 
-        for i in range(len(logger.handlers)):
+        for _ in range(len(logger.handlers)):
             logger.handlers.pop()
 
-    def load_dataset(self, config: Config) -> None:
-        dataset = dataset_from_config(config, prefix="dataset", loss=self.loss)
-        logging.info(f"Successfully loaded the data set of type {dataset}...")
-        try:
-            validation_dataset = dataset_from_config(config, prefix="validation_dataset", loss=self.loss)
-            logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
-        except KeyError:
-            logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
-            validation_dataset = None
+    def load_dataset_idcs(self,
+        dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
+        validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset]
+    ) -> None: # TODO rename method
 
-        # to be done before eventual validation_dataset = dataset
         if self.train_idcs is None or self.val_idcs is None:
+            # split_dataset to be done before eventual validation_dataset = dataset executed below
             self.train_idcs, self.val_idcs = self.split_dataset(dataset, validation_dataset)
 
         # default behavior: if no val_dset then val_dset is train_dset
@@ -1509,10 +1592,11 @@ class Trainer:
         self.dataset_val   = index_dataset(validation_dataset, self.val_idcs)
 
         self.logger.info(f"Training data structures: {len(self.dataset_train)} | Validation data structures: {len(self.dataset_val)}")
-        if self.debug and isinstance(self.dataset_train, InMemoryConcatDataset):
-            self.log_data_points(self.dataset_train, prefix='Training')
-        if self.debug and isinstance(self.dataset_val, InMemoryConcatDataset):
-            self.log_data_points(self.dataset_val, prefix='Validation')
+        if self.debug:
+            if isinstance(self.dataset_train, InMemoryConcatDataset):
+                self.log_data_points(self.dataset_train, prefix='Training')
+            if isinstance(self.dataset_val, InMemoryConcatDataset):
+                self.log_data_points(self.dataset_val, prefix='Validation')
 
     def split_dataset(
         self,
@@ -1637,7 +1721,7 @@ class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
     def init(self, **kwargs):
-        super().init(**kwargs)
+        super(TrainerWandB, self).init(**kwargs)
 
         if not self._initialized:
             return
@@ -1669,16 +1753,16 @@ class DistributedTrainer(Trainer):
 
     def __init__(self, rank: int, world_size: int, *args, **kwargs):
         kwargs["device"] = rank
-        super().__init__(is_master=rank == 0, *args, **kwargs)
         self.rank = rank
+        super().__init__(is_master=rank == 0, *args, **kwargs)
         self.world_size = world_size
 
     def init(self, **kwargs):
         # Set the device for this process
         torch.cuda.set_device(self.rank)
-        super().init(**kwargs)
+        super(DistributedTrainer, self).init(**kwargs)
 
-    def init_dataloader(self, sampler=None, validation_sampler=None):
+    def init_dataloader(self, config, sampler=None, validation_sampler=None):
         sampler = DistributedSampler(
             self.dataset_train,
             num_replicas=self.world_size,
@@ -1693,15 +1777,15 @@ class DistributedTrainer(Trainer):
             shuffle=False, # since we are passing a sampler to the dataloader
         )
 
-        super().init_dataloader(sampler=sampler, validation_sampler=validation_sampler)
+        super().init_dataloader(config=config, sampler=sampler, validation_sampler=validation_sampler)
 
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
-        self.model = DDP(self.model, device_ids=[self.rank])
+        self.model = DDP(self.model, device_ids=[self.rank], find_unused_parameters=True)
 
 
 class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
 
     def init(self, **kwargs):
-        super().init(self, **kwargs)
+        super(DistributedTrainerWandB, self).init(**kwargs)

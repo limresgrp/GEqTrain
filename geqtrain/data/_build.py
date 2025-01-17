@@ -22,12 +22,21 @@ from geqtrain.data import (
 from geqtrain.utils import (
     instantiate,
     get_w_prefix,
-    Config
+    Config,
 )
 
 from functools import partial
 from multiprocessing import Pool, Value
 
+
+def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
+    from geqtrain.train.utils import parse_loss_metrics_dict
+    loss_keys = set()
+    for loss_dict in config.get(loss_key, []):
+        key, _, _, func_params = list(parse_loss_metrics_dict(loss_dict))[0]
+        if func_params.get('ignore_nan', False):
+            loss_keys.update(key)
+    return list(loss_keys)
 
 def get_class_name(config_dataset_type):
     # looks for dset type specified in yaml if present (dataset_list/dataset: {$class_name})
@@ -102,8 +111,11 @@ def node_types_to_exclude(config):
         config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
     return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
 
-def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
+def dataset_from_config(config,
+                        prefix: str = "dataset",
+                        loss_key: str='loss_coeffs') -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
     """
+    loss_key in evaluate metrics_components
     TODO update docs here
     Called for each {prefix}_list in yaml, possible prefix: dataset, validation_dataset_list, test_dataset_list
     1) get dset type (eg <class 'geqtrain.data.dataset.NpzDataset'>)
@@ -148,11 +160,13 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
-        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, loss)
-        n_workers = len(os.sched_getaffinity(0))  # pid=0 the calling process
+        key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
+        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, key_clean_list)
+
+        n_workers = min(len(dataset_file_names), 16)  # len(os.sched_getaffinity(0)  pid=0 the calling process
 
         # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-        chunksize = len(dataset_file_names) // (n_workers if inmemory else n_workers *.25)
+        chunksize = max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1)
 
         with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
             instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
@@ -162,65 +176,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
 
-
-def remove_node_centers_for_NaN_targets_and_edges(
-    dataset: AtomicInMemoryDataset,
-    loss_func,
-    keep_node_types: Optional[List[str]] = None,
-    exclude_node_types_from_edges: Optional[List[str]] = None,
-):
-    data = dataset.data
-    if AtomicDataDict.NODE_TYPE_KEY in data:
-        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
-    else:
-        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
-
-    def get_node_types_mask(node_types, filter, data):
-        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
-
-    def update_edge_index(data, edge_filter: torch.Tensor):
-        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
-        if len(edge_filter) == 0:
-            return
-        edge_filter_cumsum = edge_filter.cumsum(0)
-        new_edge_index_slices = edge_filter_cumsum[torch.as_tensor(data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]) - 1].tolist()
-        new_edge_index_slices.insert(0, 0)
-        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
-        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
-            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
-
-    # - Remove edges of atoms whose result is NaN - #
-    if loss_func is not None:
-        for key in loss_func.keys:
-            if hasattr(loss_func.funcs[key], "ignore_nan") and loss_func.funcs[key].ignore_nan:
-                key_clean = loss_func.remove_suffix(key)
-                if key_clean not in _NODE_FIELDS:
-                    continue
-                if key_clean in data:
-                    if keep_node_types is not None:
-                        remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
-                        data[key_clean][remove_node_types_mask] = torch.nan
-                    val: torch.Tensor = data[key_clean]
-                    if val.dim() == 1:
-                        val = val.reshape(len(val), -1)
-
-                    not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
-                    update_edge_index(data, not_nan_edge_filter)
-
-    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
-    if exclude_node_types_from_edges is not None:
-        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
-        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
-        update_edge_index(data, keep_edges_filter)
-
-    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
-        return None
-
-    dataset.data = data
-    return dataset
-
-def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, loss, dataset_file_name):
+def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, key_clean_list, dataset_file_name):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
 
     with counter.get_lock():
@@ -246,7 +202,7 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
     """
     if inmemory:
         # Filter out nan nodes and nodes with type_names that we don't want to keep
-        instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
+        instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
     if instance is not None:
         if inmemory:
             return instance
@@ -258,3 +214,57 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
             }
             del instance
             return out
+
+def remove_node_centers_for_NaN_targets_and_edges(
+    dataset: AtomicInMemoryDataset,
+    key_clean_list: List[str],
+    keep_node_types: Optional[List[str]] = None,
+    exclude_node_types_from_edges: Optional[List[str]] = None,
+):
+    data = dataset.data
+    if AtomicDataDict.NODE_TYPE_KEY in data:
+        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
+    else:
+        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+
+    def get_node_types_mask(node_types, filter, data):
+        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
+
+    def update_edge_index(data, edge_filter: torch.Tensor):
+        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
+        if len(edge_filter) == 0:
+            return
+        edge_filter_cumsum = edge_filter.cumsum(0)
+        new_edge_index_slices = edge_filter_cumsum[torch.as_tensor(data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]) - 1].tolist()
+        new_edge_index_slices.insert(0, 0)
+        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
+        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
+            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
+            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
+
+    # - Remove edges of atoms whose result is NaN - #
+    for key_clean in key_clean_list:
+        if key_clean not in _NODE_FIELDS:
+            continue
+        if key_clean in data:
+            if keep_node_types is not None:
+                remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
+                data[key_clean][remove_node_types_mask] = torch.nan
+            val: torch.Tensor = data[key_clean]
+            if val.dim() == 1:
+                val = val.reshape(len(val), -1)
+
+            not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
+            update_edge_index(data, not_nan_edge_filter)
+
+    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
+    if exclude_node_types_from_edges is not None:
+        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
+        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+        update_edge_index(data, keep_edges_filter)
+
+    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
+        return None
+
+    dataset.data = data
+    return dataset

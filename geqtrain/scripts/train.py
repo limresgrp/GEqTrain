@@ -20,14 +20,19 @@ import os
 import shutil
 from typing import Dict, Optional
 import numpy as np  # noqa: F401
-
+from geqtrain.data import dataset_from_config
+import torch
 
 warnings.filterwarnings("ignore")
 
 
-def setup_process(rank, world_size):
+def setup_process(rank, world_size, group_name):
     # Initialize the process group for distributed training
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    for device_id in range(world_size):
+        # Before init the process group, call torch.cuda.set_device(args.rank) to assign different GPUs to different processes.
+        # https://github.com/pytorch/pytorch/issues/18689
+        torch.cuda.set_device(device_id)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, group_name=group_name)
 
 
 def cleanup(rank):
@@ -35,6 +40,16 @@ def cleanup(rank):
     dist.destroy_process_group()
 
 
+def get_free_port():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('', 0))
+    addr = s.getsockname()
+    s.close()
+    return addr[1]
+
+
+# geqtrain-train ./config/halicin.yaml -ws 2 -ma 'localhost' -mp 'rand'
 def main(args=None, running_as_script: bool = True):
     args, config = parse_command_line(args)
 
@@ -56,6 +71,10 @@ def main(args=None, running_as_script: bool = True):
                 "Could not restart training in Distributed Training yet.")
         func = restart
 
+    config = Config.from_dict(config)
+    _set_global_options(config)
+    dataset, validation_dataset = instanciate_train_val_dsets(config)
+
     if config.use_dt:
         # Manually set the environment variables for multi-GPU setup
         world_size = args.world_size
@@ -64,18 +83,25 @@ def main(args=None, running_as_script: bool = True):
         if args.master_addr:
             os.environ['MASTER_ADDR'] = str(args.master_addr)
         if args.master_port:
-            os.environ['MASTER_PORT'] = str(args.master_port)
+            port = get_free_port() if args.master_port == 'rand' else args.master_port
+            os.environ['MASTER_PORT'] = str(port)
 
         # Spawn one process per GPU
         import torch.multiprocessing as mp
-        mp.spawn(func, args=(world_size, config.as_dict(),),
-                 nprocs=world_size, join=True)
+        # mp.set_start_method('spawn', force=True)
+
+        os.environ[
+            "TORCH_DISTRIBUTED_DEBUG"
+        ] = "INFO" # "DETAIL"  # set to DETAIL for runtime logging.
+
+        mp.spawn(func, args=(world_size, config.as_dict(), dataset, validation_dataset,), nprocs=world_size, join=True) # autonomous handling of rank, here each process runs func:Union[fresh_start], func:restart not yet implemented
     else:
         func(0, 1, config.as_dict())
 
     return
 
 
+# geqtrain-train ./config/halicin.yaml -ws 2 -ma 'localhost'
 def parse_command_line(args=None):
     parser = argparse.ArgumentParser(
         description="Train (or restart training of) a model."
@@ -106,7 +132,7 @@ def parse_command_line(args=None):
         action="store_true",
     )
     parser.add_argument(
-        "-ws",
+        "-ws", # if wd is present then use_dt
         "--world-size",
         help="Number of available GPUs for Distributed Training",
         type=int,
@@ -116,7 +142,7 @@ def parse_command_line(args=None):
         "-ma",
         "--master-addr",
         help="set MASTER_ADDR environment variable for Distributed Training",
-        default=None,
+        default='localhost',
     )
     parser.add_argument(
         "-mp",
@@ -129,11 +155,9 @@ def parse_command_line(args=None):
     # Check consistency
     if args.world_size is not None:
         if args.device is not None:
-            raise argparse.ArgumentError(
-                "Cannot specify device when using Distributed Training")
+            raise argparse.ArgumentError("Cannot specify device when using Distributed Training")
         if args.equivariance_test:
-            raise argparse.ArgumentError(
-                "You can run Equivariance Test on single CPU/GPU only")
+            raise argparse.ArgumentError("You can run Equivariance Test on single CPU/GPU only")
 
     config = Config.from_file(args.config)
 
@@ -145,21 +169,34 @@ def parse_command_line(args=None):
     return args, config
 
 
-def fresh_start(rank, world_size, config):
+def instanciate_train_val_dsets(config: Config):
+    dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {dataset}...")
     try:
+        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+        logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
+    except KeyError:
+        logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+        validation_dataset = None
+    return dataset, validation_dataset
+
+
+def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
+    try:
+        # recast config to be a Config obj
         config = Config.from_dict(config)
-        _set_global_options(config)
 
         # Setup the process for distributed training
         if config.use_dt:
-            setup_process(rank, world_size)
+            setup_process(rank, world_size, config.get('run_name'))
 
         trainer, model = load_trainer_and_model(rank, world_size, config)
         # Copy conf file in results folder
         shutil.copyfile(Path(config.filepath).resolve(), trainer.config_path)
         config.update(trainer.params)
 
-        trainer.init_dataset(config)
+        trainer.init_dataset(config, train_dataset, validation_dataset)
+
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
