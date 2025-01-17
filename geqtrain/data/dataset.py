@@ -119,7 +119,7 @@ class InMemoryConcatDataset(ConcatDataset):
 
     def __init__(self, datasets):
         super().__init__(datasets)
-        self._n_observations = np.array([len(ds) for ds in self.datasets])
+        self._n_observations = np.diff(self.cumulative_sizes, prepend=0)
 
     @property
     def n_observations(self):
