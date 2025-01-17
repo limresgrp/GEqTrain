@@ -20,8 +20,8 @@ import os
 import shutil
 from typing import Dict, Optional
 import numpy as np  # noqa: F401
-
-
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
 warnings.filterwarnings("ignore")
 
 

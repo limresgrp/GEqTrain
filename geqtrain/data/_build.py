@@ -127,12 +127,6 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         torch.utils.data.ConcatDataset: dataset
     """
 
-    # avoid mp.Manager: https://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processe
-    c = Value('i', 0) # initialize or reset counter
-    def init_mp(c):
-        global counter
-        counter = c
-
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
@@ -148,20 +142,66 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
+        use_multiprocessing = _config_dataset.get('use_multiprocessing', True)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, loss)
-        n_workers = len(os.sched_getaffinity(0))  # pid=0 the calling process
 
-        # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-        chunksize = len(dataset_file_names) // (n_workers if inmemory else n_workers *.25)
+        if use_multiprocessing:
+            n_workers = min(len(dataset_file_names), len(os.sched_getaffinity(0)))  # pid=0 the calling process
 
-        with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-            instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
+            # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
+            chunksize = max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1)
 
-        instances = list(instances)
+            with Pool(processes=n_workers) as pool:  # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+                instances = pool.starmap(
+                    mp_handle_single_dataset_file_name,
+                    [
+                        (dataset_file_name, _id)
+                        for _id, dataset_file_name
+                        in enumerate(dataset_file_names)
+                    ],
+                    chunksize=chunksize
+                )
+        else:
+            instances = [mp_handle_single_dataset_file_name(file_name, _id) for _id, file_name in enumerate(dataset_file_names)]
+
+        instances = [instance for instance in list(instances) if instance is not None]
         if inmemory:
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
 
+def handle_single_dataset_file_name(config, prefix, class_name, inmemory, loss, dataset_file_name, _id):
+    _config = copy.deepcopy(config) # this might not be required but kept for saefty
+    _config[AtomicDataDict.DATASET_INDEX_KEY] = _id
+    _config[f"{prefix}_file_name"] = dataset_file_name
+
+    # Register fields:
+    # This might reregister fields, but that's OK:
+    instantiate(register_fields, all_args=_config)
+
+    instance, _ = instantiate(
+        class_name,  # dataset selected to be instanciated
+        prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
+        positional_args={},
+        optional_args=_config,
+    )
+
+    """
+    !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
+    """
+    if inmemory:
+        # Filter out nan nodes and nodes with type_names that we don't want to keep
+        instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
+    if instance is not None:
+        if inmemory:
+            return instance
+        else:
+            out = {
+                'dataset_file_name': dataset_file_name,
+                AtomicDataDict.DATASET_INDEX_KEY: _id,
+                'lazy_dataset': np.arange(instance.data.num_graphs),
+            }
+            del instance
+            return out
 
 def remove_node_centers_for_NaN_targets_and_edges(
     dataset: AtomicInMemoryDataset,
@@ -219,42 +259,3 @@ def remove_node_centers_for_NaN_targets_and_edges(
 
     dataset.data = data
     return dataset
-
-def handle_single_dataset_file_name(config, prefix, class_name, inmemory, loss, dataset_file_name):
-    _config = copy.deepcopy(config) # this might not be required but kept for saefty
-
-    with counter.get_lock():
-        _id = counter.value
-        counter.value += 1
-
-    _config[AtomicDataDict.DATASET_INDEX_KEY] = _id
-    _config[f"{prefix}_file_name"] = dataset_file_name
-
-    # Register fields:
-    # This might reregister fields, but that's OK:
-    instantiate(register_fields, all_args=_config)
-
-    instance, _ = instantiate(
-        class_name,  # dataset selected to be instanciated
-        prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
-        positional_args={},
-        optional_args=_config,
-    )
-
-    """
-    !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
-    """
-    if inmemory:
-        # Filter out nan nodes and nodes with type_names that we don't want to keep
-        instance = remove_node_centers_for_NaN_targets_and_edges(instance, loss, node_types_to_keep(config), node_types_to_exclude(config))
-    if instance is not None:
-        if inmemory:
-            return instance
-        else:
-            out = {
-                'dataset_file_name': dataset_file_name,
-                AtomicDataDict.DATASET_INDEX_KEY: _id,
-                'lazy_dataset': np.arange(instance.data.num_graphs),
-            }
-            del instance
-            return out
