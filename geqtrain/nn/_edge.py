@@ -86,20 +86,3 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
             edge_length_embedded = self.basis(edge_length) * self.cutoff(edge_length)[:, None]
             data[self.out_field] = edge_length_embedded
         return data
-
-
-@compile_mode("script")
-class EdgeRadialAttrsEmbedder(torch.nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int,
-    ):
-        super().__init__()
-        self.lin_proj = torch.nn.Linear(in_dim, out_dim, bias=True)
-        # init ensures to out a 0 vect s.t. sigmoid outs .5 forall edges at start of training
-        torch.nn.init.xavier_normal_(self.lin_proj.weight,  gain=torch.nn.init.calculate_gain("sigmoid"))
-        with torch.no_grad(): self.lin_proj.bias.fill_(0.5)
-
-    def forward(self, latents:torch.Tensor, rbf:torch.Tensor ) -> torch.Tensor:
-        return latents * self.lin_proj(rbf).sigmoid()

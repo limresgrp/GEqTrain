@@ -25,7 +25,6 @@ from geqtrain.nn.allegro import (
 from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
-from geqtrain.nn._edge import EdgeRadialAttrsEmbedder
 
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
@@ -263,10 +262,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             )
 
             if self.learn_cutoff_bias:
-                # self.rbf_embedder = EdgeRadialAttrsEmbedder(
-                #     in_dim=self.irreps_in[self.edge_invariant_field].num_irreps,
-                #     out_dim=self.final_latent_mlp.out_features
-                # )
                 self.rbf_embedder = FiLMFunction(
                     mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
                     mlp_latent_dimensions=[2*self.irreps_in[self.edge_invariant_field].num_irreps],
@@ -276,6 +271,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     has_bias=False,
                     final_non_lin='sigmoid'
                 )
+            
+            self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
         # - End build modules - #
         out_feat_elems = []
@@ -352,6 +349,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             else:
                 cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
                 new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
+            new_latents = self.post_norm(new_latents)
 
             # apply residual stream normalization
             coefficient_old = torch.rsqrt(layer_update_coefficients[layer_index].square() + 1)
@@ -570,10 +568,6 @@ class InteractionLayer(torch.nn.Module):
                 self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
         if self.learn_cutoff_bias:
-            # self.rbf_embedder = EdgeRadialAttrsEmbedder(
-            #     in_dim=parent.irreps_in[parent.edge_invariant_field].num_irreps,
-            #     out_dim=self.latent_mlp.out_features
-            # )
             self.rbf_embedder = FiLMFunction(
                 mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
                 mlp_latent_dimensions=[2*parent.irreps_in[parent.edge_invariant_field].num_irreps],
@@ -637,12 +631,12 @@ class InteractionLayer(torch.nn.Module):
         this_layer_update_coeff: Optional[torch.Tensor],
     ):
         new_latents = self.latent_mlp(inv_latent_cat)
-        new_latents = self.post_norm(new_latents)
         # Apply cutoff, which propagates through to everything else
         if self.learn_cutoff_bias:
             new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
         else:
             new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
+        new_latents = self.post_norm(new_latents)
 
         if self.layer_index > 0:
             assert this_layer_update_coeff is not None

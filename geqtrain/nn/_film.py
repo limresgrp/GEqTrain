@@ -1,8 +1,10 @@
 from typing import List, Optional
 from geqtrain.nn import ScalarMLPFunction, select_nonlinearity
+from e3nn.util.jit import compile_mode
 import torch
 
 
+@compile_mode("script")
 class FiLMFunction(ScalarMLPFunction):
     """
         FiLMFunction applies Feature-wise Linear Modulation (FiLM) conditioning to its input.

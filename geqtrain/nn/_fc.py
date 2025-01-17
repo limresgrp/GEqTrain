@@ -8,6 +8,7 @@ from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule, SwiGLU
 from geqtrain.utils import add_tags_to_parameters
+from e3nn.util.jit import compile_mode
 
 
 def select_nonlinearity(nonlinearity):
@@ -21,6 +22,7 @@ def select_nonlinearity(nonlinearity):
     return non_lin_instance
 
 
+@compile_mode("script")
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
     """
         A Multi-Layer Perceptron module designed to provide various configurations of MLPs,
