@@ -48,8 +48,9 @@ class FiLMFunction(ScalarMLPFunction):
             zero_init_last_layer_weights=zero_init_last_layer_weights,
         )
 
-        if final_non_lin:
-            self.final_non_lin = select_nonlinearity(final_non_lin)
+        if final_non_lin is not None:
+            final_non_lin = select_nonlinearity(final_non_lin)
+        self.final_non_lin = final_non_lin
 
         self._dim = mlp_output_dimension
 
@@ -69,13 +70,13 @@ class FiLMFunction(ScalarMLPFunction):
         _wb = self.sequential(conditioning)
         # FiLM(x)=γ(z)⊙x+β(z)
 
-        if batch:
-            if self.final_non_lin:
+        if batch is not None:
+            if self.final_non_lin is not None:
                 return self.final_non_lin(_wb[batch, :self._dim]) * x + _wb[batch, self._dim:]
             return _wb[batch, :self._dim] * x + _wb[batch, self._dim:]
 
 
-        if self.final_non_lin:
+        if self.final_non_lin is not None:
             return self.final_non_lin(_wb[..., :self._dim]) * x + _wb[..., self._dim:]
 
         return _wb[..., :self._dim] * x + _wb[..., self._dim:]
