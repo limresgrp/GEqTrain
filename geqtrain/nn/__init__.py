@@ -12,7 +12,7 @@ from ._edgewise import (  # noqa: F401
 )  # noqa: F401
 from .interaction import InteractionModule
 from .readout import ReadoutModule
-from ._scale import PerTypeScaleModule
+from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 
@@ -30,6 +30,7 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
+    PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
     FiLMFunction,

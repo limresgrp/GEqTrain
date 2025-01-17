@@ -4,7 +4,7 @@ from ._graph_model import GraphModel, HeadlessGraphModel
 from ._global_graph_model import GlobalGraphModel, HeadlessGlobalGraphModel
 from ._global_node_model import GlobalNodeModel, HeadlessGlobalNodeModel
 from ._heads import Heads
-from ._scale import PerTypeScale
+from ._scale import PerNodeAttrsScale, PerTypeScale
 from ._weight_init import (
     uniform_initialize_FCs,
     initialize_from_state,
@@ -24,6 +24,7 @@ __all__ = [
     GlobalNodeModel,
     HeadlessGlobalNodeModel,
     Heads,
+    PerNodeAttrsScale,
     PerTypeScale,
     uniform_initialize_FCs,
     initialize_from_state,
