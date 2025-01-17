@@ -192,6 +192,13 @@ def main(args=None, running_as_script: bool = True):
         default=1,
     )
     parser.add_argument(
+        "-w",
+        "--workers",
+        help="Number of workers to process dataset. Default: 1 (single process)",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "-l",
         "--log",
         nargs='?',
@@ -249,6 +256,7 @@ def main(args=None, running_as_script: bool = True):
     logger.info(f"Loading config file...")
     evaluate_config = Config.from_file(str(args.test_config), defaults={})
     config.update(evaluate_config)
+    config["dataset_num_workers"] = args.workers
     logger.info(f"Config file loaded!")
 
     # Load metrics (if specified)
