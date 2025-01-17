@@ -128,6 +128,7 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
     """
 
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
+    all_instances = []
     for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
@@ -142,12 +143,11 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
-        use_multiprocessing = _config_dataset.get('use_multiprocessing', True)
+        n_workers = min(len(dataset_file_names), config.get('dataset_num_workers', len(os.sched_getaffinity(0))))  # pid=0 the calling process
+        use_multiprocessing = _config_dataset.get('use_multiprocessing', n_workers>1)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, loss)
 
         if use_multiprocessing:
-            n_workers = min(len(dataset_file_names), len(os.sched_getaffinity(0)))  # pid=0 the calling process
-
             # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
             chunksize = max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1)
 
@@ -164,10 +164,11 @@ def dataset_from_config(config, prefix: str = "dataset", loss=None) -> Union[InM
         else:
             instances = [mp_handle_single_dataset_file_name(file_name, _id) for _id, file_name in enumerate(dataset_file_names)]
 
-        instances = [instance for instance in list(instances) if instance is not None]
-        if inmemory:
-            return InMemoryConcatDataset(instances)
-        return LazyLoadingConcatDataset(class_name, prefix, config, instances)
+        all_instances.extend([instance for instance in list(instances) if instance is not None])
+    logging.info(f"Number of different datasets used for {prefix}: {len(all_instances)}")
+    if inmemory:
+        return InMemoryConcatDataset(all_instances)
+    return LazyLoadingConcatDataset(class_name, prefix, config, all_instances)
 
 def handle_single_dataset_file_name(config, prefix, class_name, inmemory, loss, dataset_file_name, _id):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
