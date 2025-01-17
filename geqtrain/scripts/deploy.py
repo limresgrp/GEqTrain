@@ -140,6 +140,12 @@ def main(args=None):
         help="Output file for deployed model.",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--extra-metadata",
+        help="Additional key-value pairs to add to the metadata dictionary. Format: key=value. Use quotation marks for values with spaces, e.g., key=\"value with spaces\".",
+        nargs='*',
+        default=[]
+    )
 
     args = parser.parse_args(args=args)
 
@@ -166,11 +172,14 @@ def main(args=None):
     metadata[R_MAX_KEY] = str(float(config["r_max"]))
     
     if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
-        metadata[JIT_FUSION_STRATEGY] = ";".join(
-            "%s,%i" % e for e in config[JIT_FUSION_STRATEGY]
-        )
+        metadata[JIT_FUSION_STRATEGY] = ";".join("%s,%i" % e for e in config[JIT_FUSION_STRATEGY])
     metadata[TF32_KEY] = str(int(config["allow_tf32"]))
     metadata[CONFIG_KEY] = yaml.dump(dict(config))
+
+    # Add extra metadata from command line arguments
+    for item in args.extra_metadata:
+        key, value = item.split('=')
+        metadata[key] = value
 
     metadata = {k: v.encode("ascii") for k, v in metadata.items()}
     os.makedirs(dirname(args.out_file), exist_ok=True)

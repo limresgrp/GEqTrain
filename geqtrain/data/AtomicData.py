@@ -102,7 +102,7 @@ def register_fields(
         raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
 
 
-def _process_dict(kwargs, ignore_fields=['smiles']):
+def _process_dict(kwargs, ignore_fields=['smiles', 'max_energy']):
     """Convert a dict of data into correct dtypes/shapes according to key"""
     # Deal with _some_ dtype issues
     for k, v in kwargs.items():
@@ -262,7 +262,7 @@ class AtomicData(Data):
         """
         if pos is None or r_max is None:
             raise ValueError("pos and r_max must be given.")
-        
+
         if pbc is None:
             if cell is not None:
                 raise ValueError(
@@ -270,7 +270,7 @@ class AtomicData(Data):
                 )
             # there are no PBC if cell and pbc are not provided
             pbc = False
-        
+
         if isinstance(pbc, bool):
             pbc = (pbc,) * 3
         else:
@@ -287,7 +287,7 @@ class AtomicData(Data):
                 cell=cell,
                 pbc=pbc,
             )
-        
+
         if cell is not None:
             kwargs[AtomicDataDict.CELL_KEY] = cell.view(3, 3)
             kwargs[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = edge_cell_shift
@@ -371,7 +371,7 @@ def neighbor_list(
 
         if isinstance(pbc, bool):
             pbc = (pbc,) * 3
-        
+
         # Either the position or the cell may be on the GPU as tensors
         if isinstance(pos, torch.Tensor):
             temp_pos = pos.detach().cpu().numpy()
@@ -381,7 +381,7 @@ def neighbor_list(
             temp_pos = np.asarray(pos)
             out_device = torch.device("cpu")
             out_dtype = torch.float32
-        
+
         if isinstance(cell, torch.Tensor):
             temp_cell = cell.detach().cpu().numpy()
             cell_tensor = cell.to(device=out_device, dtype=out_dtype)
@@ -395,7 +395,7 @@ def neighbor_list(
 
         # ASE dependent part
         temp_cell = ase.geometry.complete_cell(temp_cell)
-        
+
         first_idex, second_idex, edge_cell_shift = ase.neighborlist.primitive_neighbor_list(
             "ijS",
             pbc,
@@ -439,5 +439,5 @@ def neighbor_list(
         dist_matrix = torch.norm(pos[:, None, ...] - pos[None, ...], dim=-1).fill_diagonal_(torch.inf)
         edge_index = torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device)
         edge_cell_shift, cell_tensor = None, None
-    
+
     return edge_index, edge_cell_shift, cell_tensor
