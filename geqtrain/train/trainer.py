@@ -51,12 +51,17 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+def is_dt_active():
+    try:
+        dist.get_world_size()
+        return True
+    except RuntimeError:
+        return False
 
 def gather(tensor, tensor_list=None, is_master=False, group=None):
     """
         Sends tensor to root process, which store it in tensor_list.
     """
-    rank = dist.get_rank()
     if group is None:
         group = dist.group.WORLD
     if is_master:
@@ -428,10 +433,11 @@ class Trainer:
         use_grokfast: bool = False,
         debug: bool = False,
         use_warmup: bool = False,
-        run_name:str="", # used as distrbuted process group name
         **kwargs,
     ):
-        self.ddp_process_group_name = run_name
+        # is this instance of trainer working in a distributed training env?
+        self.is_dt_active = is_dt_active()
+
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
@@ -544,7 +550,8 @@ class Trainer:
         self._end_of_train_callbacks = [load_callable(callback) for callback in end_of_train_callbacks]
         self._final_callbacks = [load_callable(callback) for callback in final_callbacks]
 
-        assert self.device == self.rank
+        if hasattr(self, 'rank'):
+            assert self.device == self.rank
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
@@ -1155,66 +1162,66 @@ class Trainer:
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
 
-    def _sync_tensor_across_processes_via_avg(self, tensor):
-        # only supported avg for performance and clarity
-        # sincronize tensor across processes
-        # inplace op
-        dist.reduce(tensor, self.rank, op=dist.ReduceOp.SUM)
-        tensor /= os.environ['WORLD_SIZE']
+    def _sync_tensor(self, tensor: torch.Tensor) -> Union[torch.Tensor, None]:
+        '''
+        must be called by ALL processes
+        sincronize tensor across processes
 
-    def _sync_dict_of_tensor_across_processes_via_avg(self, tensor_dict, keys_to_sync:Iterable=None):
-        # default behavior: assume all values are tensors to be sync
+        return:
+         - if master process is caller: list of gathered tensors,
+         - None otherwise
+        '''
+        if self.is_master:
+            l = [torch.zeros_like(tensor) for _ in range(self.world_size)]
+            gather(tensor=tensor, tensor_list=l, is_master=self.is_master)
+            if l[0].dim()>=2: # i.e. if list of batched multi-dim-tensors
+                return torch.cat(l, dim=0) # used to gather metrics
+            else: # list of scalar-tensors
+                return torch.stack(l, dim=0) # used to gather loss values
+        else:
+            gather(tensor=tensor, is_master=self.is_master)
+
+    def _sync_dict(self, tensor_dict: Dict[str, torch.Tensor], keys_to_sync:Iterable[str]=None)->None:
+        '''
+        must be called by ALL processes
+        acts in place on tensor_dict
+        default behavior: assume all values indexed via keys_to_sync are torch.tensors that need to be sync
+        '''
         # todo: enforce inability to access to content in here after this step since all content will be rank dependant
         if keys_to_sync is None:
             keys_to_sync = tensor_dict.keys()
         for k in keys_to_sync:
-            self._sync_tensor_across_processes_via_avg(tensor_dict[k])
+            out = self._sync_tensor(tensor_dict[k])
+            if out is not None: # T only for master
+                tensor_dict[k] = out
 
     @torch.no_grad()
     def _update_metrics(self, out, ref_data):
-        self._gather_outputs_for_metrics(pred=out, ref=ref_data)
+        if self.is_dt_active:
+            # collect targets/predictions from different processes for current batch/key
+            _keys = set(self.metrics.clean_keys)
+            self._sync_dict(out, _keys)
+            self._sync_dict(ref_data, _keys)
         self.batch_metrics = self.metrics(pred=out, ref=ref_data)
 
     @torch.no_grad()
-    def _gather_outputs_for_single_metric(self, _dict, _key, _ws):
-        if self.is_master:
-            l = [torch.zeros_like(_dict[_key]) for _ in range(_ws)]
-            gather(tensor=_dict[_key], tensor_list=l, is_master=self.is_master)
-            _dict[_key] = torch.cat(l, dim=0)
+    def _accumulate_losses(self, validation, optim_step_executed, loss, loss_contrib):
+        '''
+        during trainining it must be called after backward+optim
+        '''
+        if self.is_dt_active:
+            if not validation:
+                assert optim_step_executed
+            self._sync_dict(loss_contrib)
+            syncd_loss = self._sync_tensor(loss)
+            if syncd_loss is not None: # T only for master
+                self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
         else:
-            gather(tensor=_dict[_key], is_master=self.is_master)
-
-
-    @torch.no_grad()
-    def _gather_outputs_for_metrics(self, pred, ref):
-        _ws = dist.get_world_size()
-        for metric_key_clean in set(self.metrics.clean_keys):
-            # collect targets from different processes for current batch/key
-            # self._gather_outputs_for_single_metric(ref, metric_key_clean, _ws)
-            # do the same for predictions
-            # self._gather_outputs_for_single_metric(pred, metric_key_clean, _ws)
-
-            if self.is_master:
-                batch_targets_for_key = [torch.zeros_like(ref[metric_key_clean]) for _ in range(_ws)]
-                gather(tensor=ref[metric_key_clean], tensor_list=batch_targets_for_key, is_master=self.is_master)
-                ref[metric_key_clean] = torch.cat(batch_targets_for_key, dim=0)
-            else:
-                gather(tensor=ref[metric_key_clean], is_master=self.is_master)
-            if self.is_master:
-                batch_predictions_for_key = [torch.zeros_like(pred[metric_key_clean]) for _ in range(_ws)]
-                gather(tensor=pred[metric_key_clean], tensor_list=batch_predictions_for_key, is_master=self.is_master)
-                pred[metric_key_clean] = torch.cat(batch_predictions_for_key, dim=0)
-            else:
-                gather(tensor=pred[metric_key_clean], is_master=self.is_master)
-
-    @torch.no_grad()
-    def _sync_losses(self, loss, loss_contrib):
-        # todo: MUST be done after backward pass add assert to check if loss.grad still exists after backward?
-        self._sync_tensor_across_processes_via_avg(loss)
-        self._sync_dict_of_tensor_across_processes_via_avg(loss_contrib)
+            self.batch_losses = self.loss_stat(loss, loss_contrib)
 
     def batch_step(self, data, validation=False):
         self.optim.zero_grad(set_to_none=True)
+        optim_step_executed = False
         self.model.train()
         if validation:
             self.model.eval()
@@ -1238,9 +1245,7 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
             )
 
-            loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch) # loss.grad is None = T
-
-            # if self.is_master:
+            loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
             self._update_metrics(out, ref_data)
             del ref_data
 
@@ -1259,6 +1264,7 @@ class Trainer:
                     self._log_updates()
 
                 self.optim.step()
+                optim_step_executed = True
 
                 if not self._is_warmup_period_over():
                     with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
@@ -1266,17 +1272,13 @@ class Trainer:
                 else:
                     self._batch_lvl_lrscheduler_step()
 
-            # if self.is_master:
-            # self._sync_losses(loss, loss_contrib)
-
-            self.batch_losses = self.loss_stat(loss, loss_contrib) #! todo is this correct?
+            self._accumulate_losses(validation, optim_step_executed, loss, loss_contrib)
 
             # evaluate ending condition
             if self.skip_chunking:
                 return True
 
-            already_computed_nodes = evaluate_end_chunking_condition(
-                already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
+            already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
             if already_computed_nodes is None:
                 return True
 
@@ -1675,7 +1677,6 @@ class Trainer:
 
         return train_idcs, val_idcs
 
-
     def init_dataloader(self, config, sampler=None, validation_sampler=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
@@ -1754,8 +1755,8 @@ class DistributedTrainer(Trainer):
     def __init__(self, rank: int, world_size: int, *args, **kwargs):
         kwargs["device"] = rank
         self.rank = rank
-        super().__init__(is_master=rank == 0, *args, **kwargs)
         self.world_size = world_size
+        super().__init__(is_master=rank == 0, *args, **kwargs)
 
     def init(self, **kwargs):
         # Set the device for this process

@@ -40,16 +40,36 @@ def cleanup(rank):
     dist.destroy_process_group()
 
 
-def get_free_port():
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('', 0))
-    addr = s.getsockname()
-    s.close()
-    return addr[1]
+def configure_dist_training(args):
+
+    def get_free_port():
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(('', 0))
+        addr = s.getsockname()
+        s.close()
+        return addr[1]
+
+    # Manually set the environment variables for multi-GPU setup
+    world_size = args.world_size
+    # Number of GPUs/processes to use
+    os.environ['WORLD_SIZE'] = str(world_size)
+    if args.master_addr:
+        os.environ['MASTER_ADDR'] = str(args.master_addr)
+    if args.master_port:
+        port = get_free_port() if args.master_port == 'rand' else args.master_port
+        os.environ['MASTER_PORT'] = str(port)
+
+    # Spawn one process per GPU
+    # mp.set_start_method('spawn', force=True)
+
+    os.environ[
+        "TORCH_DISTRIBUTED_DEBUG"
+    ] = "INFO" # "DETAIL"  # set to DETAIL for runtime logging.
+    return world_size
 
 
-# geqtrain-train ./config/halicin.yaml -ws 2 -ma 'localhost' -mp 'rand'
+# geqtrain-train ./config/halicin.yaml -ws 2
 def main(args=None, running_as_script: bool = True):
     args, config = parse_command_line(args)
 
@@ -66,42 +86,24 @@ def main(args=None, running_as_script: bool = True):
     if not found_restart_file:
         func = fresh_start
     else:
-        if config.use_dt:
-            raise NotImplementedError(
-                "Could not restart training in Distributed Training yet.")
+        if config.use_dt: # todo
+            raise NotImplementedError("Could not restart training in Distributed Training yet.")
         func = restart
 
     config = Config.from_dict(config)
     _set_global_options(config)
-    dataset, validation_dataset = instanciate_train_val_dsets(config)
+    train_dataset, validation_dataset = instanciate_train_val_dsets(config)
 
     if config.use_dt:
-        # Manually set the environment variables for multi-GPU setup
-        world_size = args.world_size
-        # Number of GPUs/processes to use
-        os.environ['WORLD_SIZE'] = str(world_size)
-        if args.master_addr:
-            os.environ['MASTER_ADDR'] = str(args.master_addr)
-        if args.master_port:
-            port = get_free_port() if args.master_port == 'rand' else args.master_port
-            os.environ['MASTER_PORT'] = str(port)
-
-        # Spawn one process per GPU
         import torch.multiprocessing as mp
-        # mp.set_start_method('spawn', force=True)
-
-        os.environ[
-            "TORCH_DISTRIBUTED_DEBUG"
-        ] = "INFO" # "DETAIL"  # set to DETAIL for runtime logging.
-
-        mp.spawn(func, args=(world_size, config.as_dict(), dataset, validation_dataset,), nprocs=world_size, join=True) # autonomous handling of rank, here each process runs func:Union[fresh_start], func:restart not yet implemented
+        world_size = configure_dist_training(args)
+        # autonomous handling of rank, each process runs func
+        mp.spawn(func, args=(world_size, config.as_dict(), train_dataset, validation_dataset,), nprocs=world_size, join=True)
     else:
-        func(0, 1, config.as_dict())
-
+        func(rank=0, world_size=1, config=config.as_dict(), train_dataset=train_dataset, validation_dataset=validation_dataset)
     return
 
 
-# geqtrain-train ./config/halicin.yaml -ws 2 -ma 'localhost'
 def parse_command_line(args=None):
     parser = argparse.ArgumentParser(
         description="Train (or restart training of) a model."
@@ -148,7 +150,7 @@ def parse_command_line(args=None):
         "-mp",
         "--master-port",
         help="set MASTER_PORT environment variable for Distributed Training",
-        default=None,
+        default='rand',
     )
     args = parser.parse_args(args=args)
 
@@ -170,15 +172,15 @@ def parse_command_line(args=None):
 
 
 def instanciate_train_val_dsets(config: Config):
-    dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully loaded the data set of type {dataset}...")
+    train_dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {train_dataset}...")
     try:
         validation_dataset = dataset_from_config(config, prefix="validation_dataset")
         logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
     except KeyError:
         logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
         validation_dataset = None
-    return dataset, validation_dataset
+    return train_dataset, validation_dataset
 
 
 def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
@@ -237,7 +239,7 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
             pass
 
 
-def restart(rank, world_size, config):
+def restart(rank, world_size, config, train_dataset, validation_dataset):
     try:
         # load the dictionary
         restart_file = f"{config['root']}/{config['run_name']}/trainer.pth"
@@ -268,8 +270,8 @@ def restart(rank, world_size, config):
             # Setup the process for distributed training
             setup_process(rank, world_size)
 
+        trainer.init_dataset(config, train_dataset, validation_dataset)
         trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
-        trainer.init_dataset(config)
         trainer.init(model=model)
         trainer.update_kwargs(config)
 
