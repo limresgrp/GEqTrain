@@ -30,11 +30,14 @@ from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 
 
-def log_feature_on_wandb(name:str, t:torch.tensor):
+def log_feature_on_wandb(name:str, t:torch.tensor, train:bool):
   #todo: do we need to differenciate scalars with geom tensors?
+  s = "eval"
+  if train:
+      s = "train"
   wandb.log({
-      f"activations_dists/{name}.mean": t.mean().item(),
-      f"activations_dists/{name}.std":  t.std().item(),})
+      f"activations_dists/{s}/{name}.mean": t.mean().item(),
+      f"activations_dists/{s}/{name}.std":  t.std().item(),})
 
 
 @compile_mode("script")
@@ -340,11 +343,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.name}.out_features.prev_layer", latents_old)
-          log_feature_on_wandb(f"{self.name}.out_features.this_layer", latents_new)
-          log_feature_on_wandb(f"{self.name}.out_features.updated_latents_scalars_only", updated_latents_scalars_only)
-          if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.equiv_only", eq_features)
-          log_feature_on_wandb(f"{self.name}.out_features", out_features)
+          log_feature_on_wandb(f"{self.name}.out_features.prev_layer", latents_old, self.training)
+          log_feature_on_wandb(f"{self.name}.out_features.this_layer", latents_new, self.training)
+          log_feature_on_wandb(f"{self.name}.out_features.updated_latents_scalars_only", updated_latents_scalars_only, self.training)
+          if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.equiv_only", eq_features, self.training)
+          log_feature_on_wandb(f"{self.name}.out_features", out_features, self.training)
         return data
 
 
@@ -667,8 +670,8 @@ class InteractionLayer(torch.nn.Module):
         inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
 
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.latents", latents)
-          log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.inv_latent", inv_latent)
+          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
+          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
           return latents, inv_latent, None
@@ -676,5 +679,5 @@ class InteractionLayer(torch.nn.Module):
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}.{self.layer_index}.eq_features", eq_features)
+          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
         return latents, inv_latent, eq_features
