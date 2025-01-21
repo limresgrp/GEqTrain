@@ -147,7 +147,7 @@ def dataset_from_config(config,
         counter = c
 
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
-    for dataset_id, _config_dataset in enumerate(config_dataset_list):
+    for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
@@ -162,26 +162,28 @@ def dataset_from_config(config,
 
         # --- multiprocessing handling of npz reading
         key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
-        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, key_clean_list)
-
-        n_workers = int(min(len(dataset_file_names), MAX_NUM_WORKERS))
-
-        # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-        chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
-
-        with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-            instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
+        mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
+        n_workers = int(min(len(dataset_file_names), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
+        use_multiprocessing = _config_dataset.get('use_multiprocessing', n_workers>1)
+        if use_multiprocessing:
+            # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
+            chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
+            with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+                instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
+        else:
+            instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names]
 
         instances = [el for el in instances if el is not None]
         if inmemory:
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
 
-def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inmemory, key_clean_list, dataset_file_name):
+
+def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_name):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
 
     with counter.get_lock():
-        _id = dataset_id + counter.value
+        _id = counter.value
         counter.value += 1
 
     _config[AtomicDataDict.DATASET_INDEX_KEY] = _id
@@ -209,6 +211,7 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
         instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
         return instance
 
+    # otherwise return the non-in-mem data struct that contains all info to reinstanciate instance at runtime
     out = {
         'dataset_file_name': dataset_file_name,
         AtomicDataDict.DATASET_INDEX_KEY: _id,

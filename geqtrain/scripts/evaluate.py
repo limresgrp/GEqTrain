@@ -192,6 +192,13 @@ def main(args=None, running_as_script: bool = True):
         default=1,
     )
     parser.add_argument(
+        "-w",
+        "--workers",
+        help="Number of workers to process dataset. Default: 1 (single process)",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "-l",
         "--log",
         nargs='?',
@@ -249,6 +256,7 @@ def main(args=None, running_as_script: bool = True):
     logger.info(f"Loading config file...")
     evaluate_config = Config.from_file(str(args.test_config), defaults={})
     config.update(evaluate_config)
+    config["dataset_num_workers"] = args.workers
     logger.info(f"Config file loaded!")
 
     # Load metrics (if specified)
@@ -326,6 +334,7 @@ def main(args=None, running_as_script: bool = True):
                 dataset_id = data[AtomicDataDict.DATASET_INDEX_KEY].item()  # Scalar
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+                node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
 
                 # Initialize lines list for CSV format
                 lines = []
@@ -333,8 +342,9 @@ def main(args=None, running_as_script: bool = True):
                     lines.append("dataset_id,batch,chunk,atom_number,node_type,pred,ref")
 
                 if node_output is not None:
-                    for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number,node_type, node_output)):
-                        _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
+                    if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
+                    for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
+                        _ref_node_output = ref_node_output[node_centers[idx]].item() if ref_node_output is not None else 0
                         lines.append(f"{dataset_id:6},{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f}")
             except:
                 return ''
@@ -342,6 +352,7 @@ def main(args=None, running_as_script: bool = True):
             return "\n".join(lines)
 
         def format_xyz(data, ref_data):
+            return ''
             try:
                 # Extract fields from data
                 pos = data[AtomicDataDict.POSITIONS_KEY]
@@ -350,8 +361,12 @@ def main(args=None, running_as_script: bool = True):
                 dataset_id = data[AtomicDataDict.DATASET_INDEX_KEY].item()  # Scalar
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
+                node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+                if ref_node_output is not None:
+                    ref_node_output = ref_node_output[node_centers]
 
                 n_atoms = pos.shape[0]
+                if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
 
                 # Initialize lines list for XYZ format
                 lines = []
