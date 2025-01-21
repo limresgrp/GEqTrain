@@ -1181,7 +1181,7 @@ class Trainer:
         else:
             gather(tensor=tensor, is_master=self.is_master)
 
-    def _sync_dict(self, tensor_dict: Dict[str, torch.Tensor], keys_to_sync:Iterable[str]=None)->None:
+    def _sync_dict(self, tensor_dict: Dict[str, torch.Tensor], keys_to_sync:Iterable[str]=None) -> None:
         '''
         must be called by ALL processes
         acts in place on tensor_dict
@@ -1196,7 +1196,7 @@ class Trainer:
                 tensor_dict[k] = out
 
     @torch.no_grad()
-    def _update_metrics(self, out, ref_data):
+    def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
         if self.is_dt_active:
             # collect targets/predictions from different processes for current batch/key
             _keys = set(self.metrics.clean_keys)
@@ -1205,7 +1205,7 @@ class Trainer:
         self.batch_metrics = self.metrics(pred=out, ref=ref_data)
 
     @torch.no_grad()
-    def _accumulate_losses(self, validation, optim_step_executed, loss, loss_contrib):
+    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
         '''
         during trainining it must be called after backward+optim
         '''
@@ -1219,7 +1219,20 @@ class Trainer:
         else:
             self.batch_losses = self.loss_stat(loss, loss_contrib)
 
-    def batch_step(self, data, validation=False):
+    def lr_sched_step(self, batch_lvl:bool) -> None:
+        if batch_lvl:
+            if not self._is_warmup_period_over():
+                    with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
+                        pass
+            else:
+                self._batch_lvl_lrscheduler_step()
+        else: # epoch lvl
+            if not self.use_warmup:
+                self._epoch_lvl_lrscheduler_step()
+            elif self._is_warmup_period_over():  # warmup present, just need to check if _is_warmup_period_over
+                self._epoch_lvl_lrscheduler_step()
+
+    def batch_step(self, data, validation:bool=False) -> bool:
         self.optim.zero_grad(set_to_none=True)
         optim_step_executed = False
         self.model.train()
@@ -1250,27 +1263,17 @@ class Trainer:
             del ref_data
 
             if not validation:
-
                 loss.backward()
-
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
-
                 if self.debug:
                     self._log_updates()
-
                 self.optim.step()
                 optim_step_executed = True
-
-                if not self._is_warmup_period_over():
-                    with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
-                        pass
-                else:
-                    self._batch_lvl_lrscheduler_step()
+                self.lr_sched_step(batch_lvl=True)
 
             self._accumulate_losses(validation, optim_step_executed, loss, loss_contrib)
 
@@ -1349,10 +1352,7 @@ class Trainer:
         # for -1 (report_init_validation: True) we aren't training, so it's wrong
         # to step the LR scheduler even if it will have no effect with this particular
         # scheduler at the beginning of training.
-        if not self.use_warmup:
-            self._epoch_lvl_lrscheduler_step()
-        elif self._is_warmup_period_over():  # warmup present, just need to check if _is_warmup_period_over
-            self._epoch_lvl_lrscheduler_step()
+        self.lr_sched_step(batch_lvl=False)
 
         for callback in self._end_of_epoch_callbacks:
             callback(self)
