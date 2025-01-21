@@ -626,8 +626,7 @@ class NpzDataset(AtomicInMemoryDataset):
         # loads each sing .npz and get all keys + maps wrt yaml keys
 
         print(self.raw_dir + "/" + self.raw_file_names[0])
-        data = np.load(self.raw_dir + "/" +
-                       self.raw_file_names[0], allow_pickle=True)
+        data = np.load(self.raw_dir + "/" + self.raw_file_names[0], allow_pickle=True)
 
         # only the keys explicitly mentioned in the yaml file will be parsed (registered via register fields section)
         keys = set(list(self.key_mapping.keys()))
