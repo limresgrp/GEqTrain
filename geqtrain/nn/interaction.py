@@ -329,7 +329,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             latents_old = coefficient_old * latents
             latents_new = coefficient_new * new_latents
             latents = torch.index_add(
-                latents_old,
+                latents_old.to(latents_new.dtype),
                 0,
                 active_edges,
                 latents_new,
