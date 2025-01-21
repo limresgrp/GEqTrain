@@ -27,13 +27,17 @@ import torch
 warnings.filterwarnings("ignore")
 
 
-def setup_process(rank, world_size, group_name):
-    # Initialize the process group for distributed training
+def setup_process(rank:int, world_size:int):
+    """Initialize the process group for distributed training
+    Args:
+        rank (int): rank of the current process (i.e. device id assigned to the process)
+        world_size (int): number of processes (i.e. number of GPUs that are going to be used for training)
+    """
     for device_id in range(world_size):
         # Before init the process group, call torch.cuda.set_device(args.rank) to assign different GPUs to different processes.
         # https://github.com/pytorch/pytorch/issues/18689
         torch.cuda.set_device(device_id)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, group_name=group_name)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def cleanup(rank):
@@ -186,10 +190,10 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
     try:
         # recast config to be a Config obj
         config = Config.from_dict(config)
+        assert isinstance(config, Config), "config must be of type Config"
 
-        # Setup the process for distributed training
         if config.use_dt:
-            setup_process(rank, world_size, config.get('run_name'))
+            setup_process(rank, world_size)
 
         trainer, model = load_trainer_and_model(rank, world_size, config)
         # Copy conf file in results folder
@@ -239,39 +243,46 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
 
 
 def restart(rank, world_size, config, train_dataset, validation_dataset):
+
+    def check_for_param_updates():
+        # compare old_config to config and update stop condition related arguments
+
+        modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
+                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]
+
+        for k,v in config.items():
+            if v != old_config.get(k, ""):
+                if k in modifiable_params:
+                    old_config[k] = v
+                    logging.info(f'Update "{k}" to {old_config[k]}')
+                elif k.startswith("early_stop"):
+                    old_config[k] = v
+                    logging.info(f'Update "{k}" to {old_config[k]}')
+                elif k == 'filepath':
+                    assert Path(config[k]).resolve() == Path(old_config[k]).resolve()
+                    old_config[k] = v
+                elif isinstance(v, type(old_config.get(k, ""))):
+                    raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
+
     try:
-        # load the dictionary
+        # trainer to dict: parsed dict is the used to instanciate Config
         restart_file = f"{config['root']}/{config['run_name']}/trainer.pth"
-        dictionary = load_file(
+        old_config = load_file(
             supported_formats=dict(torch=["pt", "pth"]),
             filename=restart_file,
             enforced_format="torch",
         )
 
-        modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
-                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]
+        check_for_param_updates()
 
-        # compare dictionary to config and update stop condition related arguments
-        for k in config.keys():
-            if config[k] != dictionary.get(k, ""):
-                if k in modifiable_params:
-                    dictionary[k] = config[k]
-                    logging.info(f'Update "{k}" to {dictionary[k]}')
-                elif k.startswith("early_stop"):
-                    dictionary[k] = config[k]
-                    logging.info(f'Update "{k}" to {dictionary[k]}')
-                elif isinstance(config[k], type(dictionary.get(k, ""))):
-                    raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
-
-        config = Config(dictionary, exclude_keys=["state_dict", "progress"])
+        config = Config(old_config, exclude_keys=["state_dict", "progress"])
         _set_global_options(config)
 
         if config.use_dt:
-            # Setup the process for distributed training
             setup_process(rank, world_size)
 
+        trainer, model = load_trainer_and_model(rank, world_size, config, old_config=old_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
-        trainer, model = load_trainer_and_model(rank, world_size, config, dictionary=dictionary, is_restart=True)
         trainer.init(model=model)
         trainer.update_kwargs(config)
 
@@ -285,18 +296,18 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         raise e
     finally:
         try:
-            if dictionary.get("use_dt", False):
+            if old_config.get("use_dt", False):
                 cleanup(rank)
         except:
             pass
     return
 
 
-def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionary: Optional[Dict] = None, is_restart=False):
-    if dictionary is None:
-        dictionary = dict(config)
+def load_trainer_and_model(rank: int, world_size: int, config: Config, old_config: Optional[Dict] = None, is_restart=False):
+    if old_config is None:
+        old_config = dict(config)
     if config.use_dt:
-        dictionary.update({
+        old_config.update({
             "rank": rank,
             "world_size": world_size,
         })
@@ -310,17 +321,17 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, dictionar
                 init_n_update(config)
         if config.use_dt:
             from geqtrain.train import DistributedTrainerWandB
-            trainer, model = DistributedTrainerWandB.from_dict(dictionary)
+            trainer, model = DistributedTrainerWandB.from_dict(old_config)
         else:
             from geqtrain.train import TrainerWandB
-            trainer, model = TrainerWandB.from_dict(dictionary)
+            trainer, model = TrainerWandB.from_dict(old_config)
     else:
         if config.use_dt:
             from geqtrain.train import DistributedTrainer
-            trainer, model = DistributedTrainer.from_dict(dictionary)
+            trainer, model = DistributedTrainer.from_dict(old_config)
         else:
             from geqtrain.train import Trainer
-            trainer, model = Trainer.from_dict(dictionary)
+            trainer, model = Trainer.from_dict(old_config)
     return trainer, model
 
 

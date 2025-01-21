@@ -59,8 +59,8 @@ def is_dt_active():
         return False
 
 def gather(tensor, tensor_list=None, is_master=False, group=None):
-    """
-        Sends tensor to root process, which store it in tensor_list.
+    """Sends tensor to root process, which store it in tensor_list.
+    https://medium.com/@cresclux/example-on-torch-distributed-gather-7b5921092cbc
     """
     if group is None:
         group = dist.group.WORLD
@@ -1440,7 +1440,10 @@ class Trainer:
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
-            torch.save(self.model.state_dict(), write_to) #! IMPO here is self.model.module.state_dict() if ddp
+            if self.is_dt_active:
+                torch.save(self.model.module.state_dict(), write_to)
+            else:
+                torch.save(self.model.state_dict(), write_to)
 
     def init_log(self):
         if not self.is_master:
@@ -1756,6 +1759,8 @@ class DistributedTrainer(Trainer):
         kwargs["device"] = rank
         self.rank = rank
         self.world_size = world_size
+        if 'is_master' in kwargs: # to avoid passing it twice to super().__init__
+            kwargs.pop('is_master')
         super().__init__(is_master=rank == 0, *args, **kwargs)
 
     def init(self, **kwargs):
