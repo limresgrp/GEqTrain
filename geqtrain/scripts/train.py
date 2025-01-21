@@ -18,9 +18,10 @@ import logging
 import argparse
 import os
 import shutil
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, Union
 import numpy as np  # noqa: F401
 from geqtrain.data import dataset_from_config
+from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
 import torch
 
 warnings.filterwarnings("ignore")
@@ -86,8 +87,6 @@ def main(args=None, running_as_script: bool = True):
     if not found_restart_file:
         func = fresh_start
     else:
-        if config.use_dt: # todo
-            raise NotImplementedError("Could not restart training in Distributed Training yet.")
         func = restart
 
     config = Config.from_dict(config)
@@ -171,7 +170,7 @@ def parse_command_line(args=None):
     return args, config
 
 
-def instanciate_train_val_dsets(config: Config):
+def instanciate_train_val_dsets(config: Config) -> Tuple[Union[InMemoryConcatDataset, LazyLoadingConcatDataset], Union[InMemoryConcatDataset, LazyLoadingConcatDataset]]:
     train_dataset = dataset_from_config(config, prefix="dataset")
     logging.info(f"Successfully loaded the data set of type {train_dataset}...")
     try:
@@ -249,12 +248,13 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
             enforced_format="torch",
         )
 
+        modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
+                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]
+
         # compare dictionary to config and update stop condition related arguments
         for k in config.keys():
             if config[k] != dictionary.get(k, ""):
-                # modifiable things if restart
-                if k in ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
-                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]:
+                if k in modifiable_params:
                     dictionary[k] = config[k]
                     logging.info(f'Update "{k}" to {dictionary[k]}')
                 elif k.startswith("early_stop"):
