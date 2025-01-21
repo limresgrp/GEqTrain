@@ -28,6 +28,7 @@ from geqtrain.utils import (
 from functools import partial
 from multiprocessing import Pool, Value
 
+MAX_NUM_WORKERS = 32
 
 def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
     from geqtrain.train.utils import parse_loss_metrics_dict
@@ -163,15 +164,15 @@ def dataset_from_config(config,
         key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, dataset_id, prefix, class_name, inmemory, key_clean_list)
 
-        n_workers = int(min(len(dataset_file_names), 16))  # len(os.sched_getaffinity(0)  pid=0 the calling process
+        n_workers = int(min(len(dataset_file_names), MAX_NUM_WORKERS))
 
         # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-        chunksize =int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
+        chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
 
         with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
             instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
 
-        instances = list(instances)
+        instances = [el for el in instances if el is not None]
         if inmemory:
             return InMemoryConcatDataset(instances)
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
@@ -190,12 +191,15 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
     # This might reregister fields, but that's OK:
     instantiate(register_fields, all_args=_config)
 
-    instance, _ = instantiate(
-        class_name,  # dataset selected to be instanciated
-        prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
-        positional_args={},
-        optional_args=_config,
-    )
+    try:
+        instance, _ = instantiate(
+            class_name,  # dataset selected to be instanciated
+            prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
+            positional_args={},
+            optional_args=_config,
+        )
+    except FileNotFoundError:
+        return None
 
     """
     !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
@@ -203,17 +207,16 @@ def handle_single_dataset_file_name(config, dataset_id, prefix, class_name, inme
     if inmemory:
         # Filter out nan nodes and nodes with type_names that we don't want to keep
         instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
-    if instance is not None:
-        if inmemory:
-            return instance
-        else:
-            out = {
-                'dataset_file_name': dataset_file_name,
-                AtomicDataDict.DATASET_INDEX_KEY: _id,
-                'lazy_dataset': np.arange(instance.data.num_graphs),
-            }
-            del instance
-            return out
+        return instance
+
+    out = {
+        'dataset_file_name': dataset_file_name,
+        AtomicDataDict.DATASET_INDEX_KEY: _id,
+        'lazy_dataset': np.arange(instance.data.num_graphs),
+    }
+    del instance
+    return out
+
 
 def remove_node_centers_for_NaN_targets_and_edges(
     dataset: AtomicInMemoryDataset,

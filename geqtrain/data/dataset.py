@@ -419,7 +419,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 extract_zip(download_path, self.raw_dir)
 
     def process(self):
-        data = self.get_data()  # !LOAD .NPZ since we r using npz npzdset
+        data = self.get_data()
         if len(data) == 5:
 
             # Get our data
@@ -623,10 +623,13 @@ class NpzDataset(AtomicInMemoryDataset):
     def get_data(self):
 
         # loads each sing .npz and get all keys + maps wrt yaml keys
-
-        print(self.raw_dir + "/" + self.raw_file_names[0])
-        data = np.load(self.raw_dir + "/" +
-                       self.raw_file_names[0], allow_pickle=True)
+        _dir = self.raw_dir + "/" + self.raw_file_names[0]
+        print(_dir)
+        try:
+            data = np.load(_dir, allow_pickle=True)
+        except:
+            logging.error(f"File {_dir} not found")
+            raise FileNotFoundError(f"File {_dir} not found")
 
         # only the keys explicitly mentioned in the yaml file will be parsed (registered via register fields section)
         keys = set(list(self.key_mapping.keys()))
