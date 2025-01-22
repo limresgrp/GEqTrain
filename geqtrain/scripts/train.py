@@ -27,7 +27,7 @@ import torch
 warnings.filterwarnings("ignore")
 
 
-def setup_process(rank:int, world_size:int):
+def setup_distributed_training(rank:int, world_size:int):
     """Initialize the process group for distributed training
     Args:
         rank (int): rank of the current process (i.e. device id assigned to the process)
@@ -40,8 +40,9 @@ def setup_process(rank:int, world_size:int):
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
-def cleanup(rank):
+def cleanup_distributed_training(rank):
     logging.info(f"Rank: {rank} | Destroying process group")
+    dist.barrier()
     dist.destroy_process_group()
 
 
@@ -193,7 +194,7 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         assert isinstance(config, Config), "config must be of type Config"
 
         if config.use_dt:
-            setup_process(rank, world_size)
+            setup_distributed_training(rank, world_size)
 
         trainer, model = load_trainer_and_model(rank, world_size, config)
         # Copy conf file in results folder
@@ -237,7 +238,7 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
     finally:
         try:
             if config.use_dt:
-                cleanup(rank)
+                cleanup_distributed_training(rank)
         except:
             pass
 
@@ -279,7 +280,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         _set_global_options(config)
 
         if config.use_dt:
-            setup_process(rank, world_size)
+            setup_distributed_training(rank, world_size)
 
         trainer, model = load_trainer_and_model(rank, world_size, config, old_config=old_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
@@ -297,7 +298,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
     finally:
         try:
             if old_config.get("use_dt", False):
-                cleanup(rank)
+                cleanup_distributed_training(rank)
         except:
             pass
     return

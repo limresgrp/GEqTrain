@@ -28,15 +28,13 @@ from geqtrain.utils import (
 from functools import partial
 from multiprocessing import Pool, Value
 
-MAX_NUM_WORKERS = 32
-
 def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
     from geqtrain.train.utils import parse_loss_metrics_dict
     loss_keys = set()
     for loss_dict in config.get(loss_key, []):
         key, _, _, func_params = list(parse_loss_metrics_dict(loss_dict))[0]
         if func_params.get('ignore_nan', False):
-            loss_keys.update(key)
+            loss_keys.add(key)
     return list(loss_keys)
 
 def get_class_name(config_dataset_type):
