@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from torch.utils.data import DistributedSampler
+from torch.utils.data import DistributedSampler, Sampler
 
 from geqtrain.data import (
     DataLoader,
@@ -1321,11 +1321,15 @@ class Trainer:
         self.loss_dict = {}
         self.norms = []
 
-        for category, dataset in zip(categories, dataloaders):
+        for category, dloader in zip(categories, dataloaders):
             self.reset_metrics()
-            self.n_batches = len(dataset)
+            self.n_batches = len(dloader)
 
-            for self.ibatch, batch in enumerate(dataset):
+            if category == TRAIN and self.is_dt_active:
+                # https://cerfacs.fr/coop/pytorch-multi-gpu#distributed-data-parallelism-ddp:~:text=train_sampler.set_epoch(epoch)
+                self.dl_train.set_epoch(self.iepoch)
+
+            for self.ibatch, batch in enumerate(dloader):
                 success = self.batch_step(
                     data=batch,
                     validation=(category == VALIDATION),
@@ -1682,24 +1686,29 @@ class Trainer:
 
         return train_idcs, val_idcs
 
-    def init_dataloader(self, config, sampler=None, validation_sampler=None):
+    def init_dataloader(self, config, sampler: Sampler | None = None, validation_sampler: Sampler | None=None):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
+
+        train_dloader_n_workers = config.get('train_dloader_n_workers', self.dataloader_num_workers)
+        val_dloader_n_workers = config.get('val_dloader_n_workers', self.dataloader_num_workers)
+        using_multiple_workers = self.dataloader_num_workers or train_dloader_n_workers or val_dloader_n_workers
+
         dl_kwargs = dict(
             exclude_keys=self.exclude_keys,
-            num_workers=self.dataloader_num_workers,
             # keep stuff around in memory
-            persistent_workers=(self.dataloader_num_workers > 0 and self.max_epochs > 1),
+            persistent_workers=(using_multiple_workers and self.max_epochs > 1),
             # PyTorch recommends this for GPU since it makes copies much faster
             pin_memory=(self.torch_device != torch.device("cpu")),
             # avoid getting stuck
-            timeout=(config.get('dloader_timeout', 30)
-                     if self.dataloader_num_workers > 0 else 0),
+            timeout=(config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0),
             # use the right randomness
             generator=self.dataset_rng,
+            prefetch_factor=config.get('dloader_prefetch_factor', 2),
         )
 
         self.dl_train = DataLoader(
+            num_workers=train_dloader_n_workers,
             dataset=self.dataset_train,
             shuffle=(sampler is None) and self.shuffle,
             batch_size=self.batch_size,
@@ -1710,6 +1719,7 @@ class Trainer:
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
         self.dl_val = DataLoader(
+            num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,
             batch_size=self.validation_batch_size,
             sampler=validation_sampler,
@@ -1775,14 +1785,14 @@ class DistributedTrainer(Trainer):
             self.dataset_train,
             num_replicas=self.world_size,
             rank=self.rank,
-            shuffle=False, # since we are passing a sampler to the dataloader
+            shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
         validation_sampler = DistributedSampler(
             self.dataset_val,
             num_replicas=self.world_size,
             rank=self.rank,
-            shuffle=False, # since we are passing a sampler to the dataloader
+            shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
         super().init_dataloader(config=config, sampler=sampler, validation_sampler=validation_sampler)
