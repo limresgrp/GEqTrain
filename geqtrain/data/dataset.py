@@ -124,6 +124,9 @@ class InMemoryConcatDataset(ConcatDataset):
     @property
     def n_observations(self):
         return self._n_observations
+    
+    def __getdataset__(self, dataset_idx):
+        return self.datasets[dataset_idx]
 
 
 class LazyLoadingConcatDataset(Dataset):
@@ -187,17 +190,7 @@ class LazyLoadingConcatDataset(Dataset):
         dataset_idx = bisect.bisect_right(self.cumsum, idx)
 
         # 2) instanciate NpzDataset
-        # better deepcopy then mp.lock to avoid hangings, as soon as batch has been processed _config is destroyed
-        _config = copy.deepcopy(self.config)
-        _config[AtomicDataDict.DATASET_INDEX_KEY] = self._datasets_list[dataset_idx][AtomicDataDict.DATASET_INDEX_KEY]
-        _config[f"{self._prefix}_file_name"] = self._datasets_list[dataset_idx]['dataset_file_name']
-
-        instance, _ = instantiate(
-            self._class_name, # dataset type selected for instanciation eg NpzDataset
-            prefix=self._prefix, # looks for {prefix}_ in yaml to select ctor params (default: 'dataset')
-            positional_args={},
-            optional_args=_config, # the whole yaml parsed and wrapped in a dict
-        )
+        instance = self.__getdataset__(dataset_idx)
 
         # 3) index into it: find sample_idx
         # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
@@ -206,6 +199,20 @@ class LazyLoadingConcatDataset(Dataset):
         else:
             sample_idx = idx - self.cumsum[dataset_idx - 1]
         return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+
+    def __getdataset__(self, dataset_idx):
+        _config = copy.deepcopy(self.config)
+        file_name_key = f"{self._prefix}_file_name"
+        _config[file_name_key] = self._datasets_list[dataset_idx][file_name_key]
+
+        instance, _ = instantiate(
+            self._class_name, # dataset type selected for instanciation eg NpzDataset
+            prefix=self._prefix, # looks for {prefix}_ in yaml to select ctor params (default: 'dataset')
+            positional_args={},
+            optional_args=_config, # the whole yaml parsed and wrapped in a dict
+        )
+
+        return instance
 
 
 class AtomicDataset(Dataset):
@@ -232,7 +239,6 @@ class AtomicDataset(Dataset):
         """Get a dict of the parameters used to build this dataset."""
         pnames = list(inspect.signature(self.__init__).parameters)
         IGNORE_KEYS = {
-            AtomicDataDict.DATASET_INDEX_KEY,
             "embedding_dimensionality",
             "transforms",
         }
@@ -305,10 +311,10 @@ class AtomicInMemoryDataset(AtomicDataset):
     def __init__(
         self,
         root: str,
-        dataset_id: int,
         pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
+        ignore_fields: List = [],
         extra_fixed_fields: Dict[str, Any] = {},
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
@@ -319,14 +325,12 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_attributes: Dict = {},
         transforms: Optional[List[Callable]] = None,
     ):
-        self.dataset_id = dataset_id
         self.pbc = pbc
-        self.file_name = (
-            getattr(type(self), "FILE_NAME",
-                    None) if file_name is None else file_name
-        )
+        self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         self.url = getattr(type(self), "URL", url)
 
+        ignore_fields.extend([AtomicDataDict.R_MAX_KEY, AtomicDataDict.DATASET_RAW_FILE_NAME])
+        self.ignore_fields = ignore_fields
         self.extra_fixed_fields = extra_fixed_fields
         self.include_frames = include_frames
         self.target_indices = target_indices
@@ -366,7 +370,6 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
             if not np.all(include_frames == self.include_frames):
                 raise ValueError(f"the include_frames is changed. Please delete the processed folder and rerun {self.processed_paths[0]}")
-            self.fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = self.fixed_fields.get(AtomicDataDict.DATASET_INDEX_KEY, 0) * 0 + self.dataset_id
         if self.target_indices is not None:
             assert self.target_key is not None
             self.data[self.target_key] = self.data[self.target_key][..., np.array(self.target_indices)]
@@ -427,6 +430,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             node_fields, edge_fields, graph_fields, extra_fields, fixed_fields = data
 
             fixed_fields.update(self.extra_fixed_fields)
+            fixed_fields[AtomicDataDict.DATASET_RAW_FILE_NAME] = self.raw_file_names[0]
 
             # node fields
             node_fields, fixed_fields = parse_attrs(
@@ -491,7 +495,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                         **{f: v[i] if len(v.shape) > 1 else v for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
-                    }, pbc=self.pbc)
+                    }, pbc=self.pbc, ignore_fields=self.ignore_fields)
                 for i in include_frames
             ]
 
@@ -500,16 +504,14 @@ class AtomicInMemoryDataset(AtomicDataset):
 
         # Batch it for efficient saving
         # This limits an AtomicInMemoryDataset to a maximum of LONG_MAX atoms _overall_, but that is a very big number and any dataset that large is probably not "InMemory" anyway
-        data = Batch.from_data_list(
-            data_list, exclude_keys=fixed_fields.keys())
+        data = Batch.from_data_list(data_list, exclude_keys=fixed_fields.keys())
         del data_list
         del node_fields
         del edge_fields
         del graph_fields
 
-        # type conversion
-        # ignore_fields: fields mapped in yaml but not casted to tensor
-        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY, "smiles"])
+        # type conversion. ignore_fields: fields mapped in yaml but not casted to tensor
+        _process_dict(fixed_fields, ignore_fields=self.ignore_fields)
 
         total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (1024 * 1024)
         logging.info(f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
@@ -579,11 +581,11 @@ class NpzDataset(AtomicInMemoryDataset):
     def __init__(
         self,
         root: str,
-        dataset_id: int,
         pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
+        ignore_fields: List = [],
         extra_fixed_fields: Dict[str, Any] = {},
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
@@ -597,11 +599,11 @@ class NpzDataset(AtomicInMemoryDataset):
         self.key_mapping = key_mapping
 
         super().__init__(
-            dataset_id=dataset_id,
             pbc=pbc,
             file_name=file_name,
             url=url,
             root=root,
+            ignore_fields=ignore_fields,
             extra_fixed_fields=extra_fixed_fields,
             include_frames=include_frames,
             target_indices=target_indices,
@@ -646,13 +648,11 @@ class NpzDataset(AtomicInMemoryDataset):
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: v for k, v in mapped.items()
-            if self.node_attributes.get(k, {}).get('fixed', False)
-            or self.edge_attributes.get(k, {}).get('fixed', False)
+            if  self.node_attributes.get(k, {}).get('fixed', False)
+            or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)
             or self.extra_attributes.get(k, {}).get('fixed', False)
         }
-        fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(
-            self.dataset_id)
 
         node_fields = {
             k: v for k, v in mapped.items()

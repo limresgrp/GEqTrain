@@ -1326,14 +1326,9 @@ class Trainer:
             self.n_batches = len(dataset)
 
             for self.ibatch, batch in enumerate(dataset):
-                success = self.batch_step(
-                    data=batch,
-                    validation=(category == VALIDATION),
-                )
-
+                success = self.batch_step(data=batch, validation=(category == VALIDATION))
                 if success:
                     self.end_of_batch_log(batch_type=category)
-
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
 

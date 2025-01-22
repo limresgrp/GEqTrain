@@ -36,7 +36,7 @@ def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
     for loss_dict in config.get(loss_key, []):
         key, _, _, func_params = list(parse_loss_metrics_dict(loss_dict))[0]
         if func_params.get('ignore_nan', False):
-            loss_keys.update(key)
+            loss_keys.add(key)
     return list(loss_keys)
 
 def get_class_name(config_dataset_type):
@@ -140,12 +140,6 @@ def dataset_from_config(config,
         torch.utils.data.ConcatDataset: dataset
     """
 
-    # avoid mp.Manager: https://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processe
-    c = Value('i', 0) # initialize or reset counter
-    def init_mp(c):
-        global counter
-        counter = c
-
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
     for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
@@ -168,7 +162,7 @@ def dataset_from_config(config,
         if use_multiprocessing:
             # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
             chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
-            with Pool(initializer=init_mp, initargs=(c,), processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+            with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
                 instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
         else:
             instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names]
@@ -181,13 +175,8 @@ def dataset_from_config(config,
 
 def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_name):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
-
-    with counter.get_lock():
-        _id = counter.value
-        counter.value += 1
-
-    _config[AtomicDataDict.DATASET_INDEX_KEY] = _id
-    _config[f"{prefix}_file_name"] = dataset_file_name
+    file_name_key = f"{prefix}_file_name"
+    _config[file_name_key] = dataset_file_name
 
     # Register fields:
     # This might reregister fields, but that's OK:
@@ -195,7 +184,7 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
 
     try:
         instance, _ = instantiate(
-            class_name,  # dataset selected to be instanciated
+            class_name,     # dataset selected to be instanciated
             prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
             positional_args={},
             optional_args=_config,
@@ -213,8 +202,7 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
 
     # otherwise return the non-in-mem data struct that contains all info to reinstanciate instance at runtime
     out = {
-        'dataset_file_name': dataset_file_name,
-        AtomicDataDict.DATASET_INDEX_KEY: _id,
+        file_name_key: dataset_file_name,
         'lazy_dataset': np.arange(instance.data.num_graphs),
     }
     del instance

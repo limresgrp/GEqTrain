@@ -102,7 +102,7 @@ def register_fields(
         raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
 
 
-def _process_dict(kwargs, ignore_fields=['smiles', 'max_energy']):
+def _process_dict(kwargs, ignore_fields):
     """Convert a dict of data into correct dtypes/shapes according to key"""
     # Deal with _some_ dtype issues
     for k, v in kwargs.items():
@@ -207,16 +207,16 @@ class AtomicData(Data):
         _validate: bool = True,
         **kwargs
     ):
-
         # empty init needed by get_example
         if len(kwargs) == 0 and len(irreps) == 0:
             super().__init__()
             return
-
+        
+        ignore_fields = kwargs.pop('ignore_fields', [])
         # Check the keys
         if _validate:
             AtomicDataDict.validate_keys(kwargs)
-            _process_dict(kwargs)
+            _process_dict(kwargs, ignore_fields)
 
         super().__init__(num_nodes=len(kwargs["pos"]), **kwargs)
 
