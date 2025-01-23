@@ -209,16 +209,14 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         # = Build model =
         if model is None:
             logging.info("Building the network...")
-            model = model_from_config(
-                config=config, initialize=True, dataset=trainer.dataset_train)
+            model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
             logging.info("Successfully built the network!")
 
         # Equivar test
         if config.equivariance_test:
             logging.info("Running equivariance test...")
             model.eval()
-            errstr = assert_AtomicData_equivariant(
-                model, trainer.dataset_train[0])
+            errstr = assert_AtomicData_equivariant(model, trainer.dataset_train[0])
             model.train()
             logging.info(
                 f"Equivariance test passed; equivariance errors:\n{errstr}")

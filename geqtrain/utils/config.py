@@ -97,9 +97,7 @@ class Config(object):
             self.add_allow_list(allow_list, default_values={})
 
         if config is not None and exclude_keys is not None:
-            config = {
-                key: value for key, value in config.items() if key not in exclude_keys
-            }
+            config = {key: value for key, value in config.items() if key not in exclude_keys}
         if config is not None:
             self.update(config)
 

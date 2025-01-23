@@ -977,9 +977,7 @@ class Trainer:
                 device=torch.device(device),
                 dtype=torch.float32,
             )
-            model_state_dict = torch.load(
-                traindir + "/" + model_name, map_location=device
-            )
+            model_state_dict = torch.load(traindir + "/" + model_name, map_location=device)
             model.load_state_dict(model_state_dict)
 
         return model, config
@@ -1330,14 +1328,10 @@ class Trainer:
                 self.dl_train.set_epoch(self.iepoch)
 
             for self.ibatch, batch in enumerate(dloader):
-                success = self.batch_step(
-                    data=batch,
-                    validation=(category == VALIDATION),
-                )
+                success = self.batch_step(data=batch,validation=(category == VALIDATION),)
 
                 if success:
                     self.end_of_batch_log(batch_type=category)
-
                     for callback in self._end_of_batch_callbacks:
                         callback(self)
 

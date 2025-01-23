@@ -60,6 +60,7 @@ def model_from_config(
 
             params["dataset"] = dataset
 
+        # Passed to wrapping class (every module listed in model_builders - except the first - must require this param)
         if "model" in pnames:
             if model is None:
                 raise RuntimeError(f"Builder {builder.__name__} asked for the model as an input, but no previous builder has returned a model")
