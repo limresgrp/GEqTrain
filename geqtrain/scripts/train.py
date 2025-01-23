@@ -76,12 +76,9 @@ def configure_dist_training(args):
 
 
 # geqtrain-train ./config/halicin.yaml -ws 2
-def main(args=None, running_as_script: bool = True):
+def main(args=None):
     args, config = parse_command_line(args)
-
-    if running_as_script:
-        set_up_script_logger(config.get("log", None), config.verbose)
-
+    set_up_script_logger(config.verbose)
     found_restart_file = isdir(f"{config.root}/{config.run_name}")
     if found_restart_file and not (config.append):
         raise RuntimeError(
@@ -125,12 +122,6 @@ def parse_command_line(args=None):
         "--equivariance-test",
         help="test the model's equivariance before training on first frame of the validation dataset",
         action="store_true",
-    )
-    parser.add_argument(
-        "--log",
-        help="log file to store all the screen logging",
-        type=Path,
-        default=None,
     )
     parser.add_argument(
         "--grad-anomaly-mode",
@@ -335,4 +326,4 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, old_confi
 
 
 if __name__ == "__main__":
-    main(running_as_script=True)
+    main()
