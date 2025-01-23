@@ -1195,11 +1195,6 @@ class Trainer:
 
     @torch.no_grad()
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
-        if self.is_dt_active:
-            # collect targets/predictions from different processes for current batch/key
-            _keys = set(self.metrics.clean_keys)
-            self._sync_dict(out, _keys)
-            self._sync_dict(ref_data, _keys)
         self.batch_metrics = self.metrics(pred=out, ref=ref_data)
 
     @torch.no_grad()
@@ -1207,15 +1202,7 @@ class Trainer:
         '''
         during trainining it must be called after backward+optim
         '''
-        if self.is_dt_active:
-            if not validation:
-                assert optim_step_executed
-            self._sync_dict(loss_contrib)
-            syncd_loss = self._sync_tensor(loss)
-            if syncd_loss is not None: # T only for master
-                self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
-        else:
-            self.batch_losses = self.loss_stat(loss, loss_contrib)
+        self.batch_losses = self.loss_stat(loss, loss_contrib)
 
     def lr_sched_step(self, batch_lvl:bool) -> None:
         if batch_lvl:
@@ -1323,9 +1310,9 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dloader)
 
-            if category == TRAIN and self.is_dt_active:
+            if category == TRAIN and isinstance(self.dl_train.sampler, DistributedSampler):
                 # https://cerfacs.fr/coop/pytorch-multi-gpu#distributed-data-parallelism-ddp:~:text=train_sampler.set_epoch(epoch)
-                self.dl_train.set_epoch(self.iepoch)
+                self.dl_train.sampler.set_epoch(self.iepoch)
 
             for self.ibatch, batch in enumerate(dloader):
                 success = self.batch_step(data=batch,validation=(category == VALIDATION),)
@@ -1440,10 +1427,7 @@ class Trainer:
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
-            if self.is_dt_active:
-                torch.save(self.model.module.state_dict(), write_to)
-            else:
-                torch.save(self.model.state_dict(), write_to)
+            torch.save(self.model.state_dict(), write_to)
 
     def init_log(self):
         if not self.is_master:
@@ -1749,9 +1733,6 @@ class TrainerWandB(Trainer):
             wandb.watch(self.model, self.loss, **wandb_watch_kwargs)
 
     def end_of_epoch_log(self):
-        if not self.is_master:
-            return
-
         Trainer.end_of_epoch_log(self)
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
@@ -1795,9 +1776,37 @@ class DistributedTrainer(Trainer):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
         self.model = DDP(self.model, device_ids=[self.rank], find_unused_parameters=True)
+    
+    def save_model(self, path, blocking: bool = True):
+        with atomic_write(path, blocking=blocking, binary=True) as write_to:
+            torch.save(self.model.module.state_dict(), write_to)
+    
+    def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
+        # collect targets/predictions from different processes for current batch/key
+        _keys = set(self.metrics.clean_keys)
+        self._sync_dict(out, _keys)
+        self._sync_dict(ref_data, _keys)
+        super()._update_metrics(out, ref_data)
+    
+    @torch.no_grad()
+    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
+        '''
+        during trainining it must be called after backward+optim
+        '''
+        if not validation:
+            assert optim_step_executed
+        self._sync_dict(loss_contrib)
+        syncd_loss = self._sync_tensor(loss)
+        if syncd_loss is not None: # T only for master
+            self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
 
 
 class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
 
     def init(self, **kwargs):
         super(DistributedTrainerWandB, self).init(**kwargs)
+    
+    def end_of_epoch_log(self):
+        if not self.is_master:
+            return
+        super().end_of_epoch_log()
