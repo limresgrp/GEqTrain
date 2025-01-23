@@ -916,7 +916,9 @@ class Trainer:
 
         state_dict = dictionary.pop("state_dict", None)
 
+        logging.info("Loading Trainer...")
         trainer = cls(**dictionary)
+        logging.info("Trainer successfully loaded!")
 
         if state_dict is not None and model is not None:
             logging.debug("Reload optimizer and scheduler states")

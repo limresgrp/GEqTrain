@@ -5,6 +5,7 @@
 
 # This is a weird hack to avoid Intel MKL issues on the cluster when this is called as a subprocess of a process that has itself initialized PyTorch.
 # Since numpy gets imported later anyway for dataset stuff, this shouldn't affect performance.
+import logging
 import warnings
 from geqtrain.utils.test import assert_AtomicData_equivariant
 from geqtrain.scripts._logger import set_up_script_logger
@@ -14,7 +15,6 @@ from geqtrain.model import model_from_config
 from pathlib import Path
 from os.path import isdir
 import torch.distributed as dist
-import logging
 import argparse
 import os
 import shutil
@@ -81,18 +81,18 @@ def main(args=None):
     set_up_script_logger(config.verbose)
     found_restart_file = isdir(f"{config.root}/{config.run_name}")
     if found_restart_file and not (config.append):
-        raise RuntimeError(
-            f"Training instance exists at {config.root}/{config.run_name}; "
-            "either set append to True or use a different root or runname"
-        )
+        raise RuntimeError(f"Training instance exists at {config.root}/{config.run_name}; "
+                            "either set append to True or use a different root or runname")
 
     if not found_restart_file:
         func = fresh_start
     else:
         func = restart
 
+    logging.info("Loading Config file...")
     config = Config.from_dict(config)
     _set_global_options(config)
+    logging.info("Config file successfully loaded!")
     train_dataset, validation_dataset = instanciate_train_val_dsets(config)
 
     if config.use_dt:
@@ -167,9 +167,11 @@ def parse_command_line(args=None):
 
 
 def instanciate_train_val_dsets(config: Config) -> Tuple[Union[InMemoryConcatDataset, LazyLoadingConcatDataset], Union[InMemoryConcatDataset, LazyLoadingConcatDataset]]:
+    logging.info(f"Loading training dataset...")
     train_dataset = dataset_from_config(config, prefix="dataset")
-    logging.info(f"Successfully loaded the data set of type {train_dataset}...")
+    logging.info(f"Successfully loaded training dataset of type {train_dataset}!")
     try:
+        logging.info(f"Loading validation dataset...")
         validation_dataset = dataset_from_config(config, prefix="validation_dataset")
         logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
     except KeyError:
