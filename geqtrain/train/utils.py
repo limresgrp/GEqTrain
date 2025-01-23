@@ -3,7 +3,9 @@ import logging
 from typing import List
 import torch
 
-def parse_dict(components: dict):
+def parse_loss_metrics_dict(components: dict):
+    # parses loss and metric yaml blocks
+    # key:str, coeff:flat, func:eg:MSELoss, func_params:dict for init of func
     for key, value in components.items():
         logging.debug(f" parsing {key} {value}")
         coeff = 1.0

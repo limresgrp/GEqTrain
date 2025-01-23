@@ -73,12 +73,11 @@ class SimpleLoss:
     ):
         ref_key = ref.get(key, None)
         assert isinstance(ref_key, torch.Tensor)
-        not_nan_filter = self._get_not_nan(ref_key, key)
-
         pred_key = pred.get(key, None)
         assert isinstance(pred_key, torch.Tensor)
         pred_key = pred_key.view_as(ref_key)
 
+        not_nan_filter = self._get_not_nan(pred_key, key) * self._get_not_nan(ref_key, key)
         return torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.), not_nan_filter
     
     def _get_not_nan(self, ref_key: torch.Tensor, key: str):

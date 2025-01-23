@@ -1,18 +1,28 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
+from typing import (
+    List,
+    Optional,
+    Tuple,
+    Union,
+    Dict
+)
+import bisect
+import warnings
 import numpy as np
 import logging
 import inspect
 import yaml
 import hashlib
 import torch
-
+import copy
 from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
+
 
 import geqtrain
 from geqtrain.utils import load_callable
@@ -26,6 +36,14 @@ from geqtrain.data import (
 )
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
+from torch.utils.data import ConcatDataset
+
+from geqtrain.utils import (
+    instantiate,
+    get_w_prefix,
+    Config
+)
+
 
 def fix_batch_dim(arr):
     if arr is None:
@@ -34,6 +52,7 @@ def fix_batch_dim(arr):
         return arr.reshape(1)
     return arr
 
+
 def parse_attrs(
     _attributes: Dict,
     _fields: Dict,
@@ -41,6 +60,17 @@ def parse_attrs(
 ) -> Dict[str, Any]:
     '''
     parses field properties
+
+    handles:
+
+    num_types: 8
+    node_attributes:
+      node_types: # this kword must match the red kword in key_mapping
+        # num_types: 8 # 5 ! a +1 is always added due to "unspecified" class
+        embedding_dimensionality: 16
+        fixed: true # if equal for each frame, if so they must not have the batch dim in the npz
+        # unspecified: t/f
+
     todo: describe logic
     '''
     for key, options in _attributes.items():
@@ -51,7 +81,7 @@ def parse_attrs(
             elif key in _fixed_fields:
                 val: Optional[np.ndarray] = _fixed_fields[key]
 
-            if "embedding_dimensionality" not in options: # this is not an attribute to parse
+            if "embedding_dimensionality" not in options:  # this is not an attribute to parse
                 continue
             if val is None:
                 val = np.array([np.nan])
@@ -85,6 +115,105 @@ def parse_attrs(
 
     return _fields, _fixed_fields
 
+class InMemoryConcatDataset(ConcatDataset):
+
+    def __init__(self, datasets):
+        super().__init__(datasets)
+        self._n_observations = np.diff(self.cumulative_sizes, prepend=0)
+
+    @property
+    def n_observations(self):
+        return self._n_observations
+    
+    def __getdataset__(self, dataset_idx):
+        return self.datasets[dataset_idx]
+
+
+class LazyLoadingConcatDataset(Dataset):
+    datasets_list: List[dict]
+    class_name: str
+    prefix: str
+
+    def __init__(self, class_name, prefix, config, datasets_list: List[dict]):
+        super().__init__()
+        self._class_name    = class_name
+        self._prefix        = prefix
+        self._config        = config
+        self._lazy_dataset  = [i.pop('lazy_dataset') for i in datasets_list]
+        self._datasets_list = datasets_list
+        self._cumsum        = None
+
+    @property
+    def _n_observations(self):
+        # list of num_of_obs present in each npz
+        return np.array([len(_idcs) for _idcs in self._lazy_dataset])
+
+    @property
+    def n_observations(self):
+        return self._n_observations
+
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def cumsum(self):
+        if self._cumsum is not None:
+            return self._cumsum
+        self._cumsum = np.cumsum(self.n_observations)
+        return self._cumsum
+
+    def set_lazy_dataset(self, dataset):
+        self._lazy_dataset = dataset
+        self._cumsum = None  # Force to recompute cumsum as indices changes
+
+    def __len__(self):
+        return sum(self.n_observations)
+
+    @property
+    def datasets(self):
+        return self._lazy_dataset
+
+    def __getitem__(self, idx):
+        '''
+        instanciate each NpzDataset,
+        if first time of loading of npz, writes it in preprocessed_path
+        if not first time loads preprocessed_path/file and instanciates the NpzDataset instead of keeping it in mem
+        '''
+
+        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of NpzDataset)
+        # dataset_idx: index of the npz file that contains the mol requested
+        if idx < 0:
+            if -idx > len(self):
+                raise ValueError("absolute value of index should not exceed dataset length")
+            idx = len(self) + idx
+        dataset_idx = bisect.bisect_right(self.cumsum, idx)
+
+        # 2) instanciate NpzDataset
+        instance = self.__getdataset__(dataset_idx)
+
+        # 3) index into it: find sample_idx
+        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
+        if dataset_idx == 0:
+            sample_idx = idx
+        else:
+            sample_idx = idx - self.cumsum[dataset_idx - 1]
+        return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+
+    def __getdataset__(self, dataset_idx):
+        _config = copy.deepcopy(self.config)
+        file_name_key = f"{self._prefix}_file_name"
+        _config[file_name_key] = self._datasets_list[dataset_idx][file_name_key]
+
+        instance, _ = instantiate(
+            self._class_name, # dataset type selected for instanciation eg NpzDataset
+            prefix=self._prefix, # looks for {prefix}_ in yaml to select ctor params (default: 'dataset')
+            positional_args={},
+            optional_args=_config, # the whole yaml parsed and wrapped in a dict
+        )
+
+        return instance
+
 
 class AtomicDataset(Dataset):
     """The base class for all datasets."""
@@ -102,15 +231,16 @@ class AtomicDataset(Dataset):
         '''
         super().__init__(
             root=root,
-            transform = Compose([load_callable(transf) for transf in transforms]) if transforms else None
+            transform=Compose([load_callable(transf)
+                              for transf in transforms]) if transforms else None
         )
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
         pnames = list(inspect.signature(self.__init__).parameters)
         IGNORE_KEYS = {
-            AtomicDataDict.DATASET_INDEX_KEY,
             "embedding_dimensionality",
+            "transforms",
         }
 
         def filter_attributes(self, pnames, IGNORE_KEYS):
@@ -181,10 +311,10 @@ class AtomicInMemoryDataset(AtomicDataset):
     def __init__(
         self,
         root: str,
-        dataset_id: int,
         pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
+        ignore_fields: List = [],
         extra_fixed_fields: Dict[str, Any] = {},
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
@@ -195,13 +325,12 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_attributes: Dict = {},
         transforms: Optional[List[Callable]] = None,
     ):
-        self.dataset_id = dataset_id
         self.pbc = pbc
-        self.file_name = (
-            getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
-        )
+        self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         self.url = getattr(type(self), "URL", url)
 
+        ignore_fields.extend([AtomicDataDict.R_MAX_KEY, AtomicDataDict.DATASET_RAW_FILE_NAME])
+        self.ignore_fields = ignore_fields
         self.extra_fixed_fields = extra_fixed_fields
         self.include_frames = include_frames
         self.target_indices = target_indices
@@ -228,18 +357,19 @@ class AtomicInMemoryDataset(AtomicDataset):
         # Initialize the InMemoryDataset, which runs download and process
         # See https://pytorch-geometric.readthedocs.io/en/latest/notes/create_dataset.html#creating-in-memory-datasets
         # Then pre-process the data if disk files are not found
+        # disk files are:
+        # for each .npz exists a folder in /processed_datasets, the folder is named via unique hash
+        # eg: ['/processed_datasets/processed_dataset_51e456f.../data.pth', '/processed_datasets/processed_dataset_51e456f.../params.yaml']
+        # each mol can be loaded in ram via .pth
+        # for the not-in-memory version files are written once and reloaded every time the npz is sampled via dataloader
         super().__init__(root=root, transforms=transforms)
         if self.data is None:
-            self.data, self.fixed_fields, include_frames = torch.load(
+            self.data, self.fixed_fields, include_frames = torch.load(  # load hashed (already) processed data
                 self.processed_paths[0],
                 weights_only=False,
             )
             if not np.all(include_frames == self.include_frames):
-                raise ValueError(
-                    f"the include_frames is changed. "
-                    f"please delete the processed folder and rerun {self.processed_paths[0]}"
-                )
-            self.fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = self.fixed_fields.get(AtomicDataDict.DATASET_INDEX_KEY, 0) * 0 + self.dataset_id
+                raise ValueError(f"the include_frames is changed. Please delete the processed folder and rerun {self.processed_paths[0]}")
         if self.target_indices is not None:
             assert self.target_key is not None
             self.data[self.target_key] = self.data[self.target_key][..., np.array(self.target_indices)]
@@ -300,11 +430,12 @@ class AtomicInMemoryDataset(AtomicDataset):
             node_fields, edge_fields, graph_fields, extra_fields, fixed_fields = data
 
             fixed_fields.update(self.extra_fixed_fields)
+            fixed_fields[AtomicDataDict.DATASET_RAW_FILE_NAME] = self.raw_file_names[0]
 
             # node fields
             node_fields, fixed_fields = parse_attrs(
                 _attributes=self.node_attributes,
-                _fields=node_fields ,
+                _fields=node_fields,
                 _fixed_fields=fixed_fields,
             )
 
@@ -321,9 +452,9 @@ class AtomicInMemoryDataset(AtomicDataset):
                 _fields=graph_fields,
             )
 
-            # check keys
-            node_fields =  {k: v for k,v in node_fields.items()  if v is not None}
-            edge_fields =  {k: v for k,v in edge_fields.items()  if v is not None}
+            # check keys (refactor this)
+            node_fields  = {k: v for k, v in node_fields.items() if v is not None}
+            edge_fields  = {k: v for k, v in edge_fields.items() if v is not None}
             graph_fields = {k: v for k,v in graph_fields.items() if v is not None}
             extra_fields = {k: v for k,v in extra_fields.items() if v is not None}
 
@@ -335,16 +466,14 @@ class AtomicInMemoryDataset(AtomicDataset):
             # check dimesionality
             num_examples = set([len(x) for x in [val for val in node_fields.values() if val is not None]])
             if not len(num_examples) == 1:
-                raise ValueError(
-                    f"This dataset is invalid: expected all node_fields to have same length (same number of examples), but they had shapes { {f: v.shape for f, v in node_fields.items() } }"
-                )
+                raise ValueError(f"This dataset is invalid: expected all node_fields to have same length (same number of examples), but they had shapes {f: v.shape for f, v in node_fields.items()}")
             num_examples = next(iter(num_examples))
 
             # Check that the number of frames is consistent for all node and edge fields
             assert all([len(v) == num_examples for v in node_fields.values() if v is not None])
             # assert all([len(v) == num_examples for v in edge_fields.values() if v is not None]) !!! TODO
 
-            include_frames = self.include_frames # all frames by default
+            include_frames = self.include_frames  # all frames by default
             if include_frames is None:
                 include_frames = range(num_examples)
 
@@ -358,7 +487,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.R_MAX_KEY in all_keys
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
-            data_list = [ # list of AtomicData-pyg-object objects
+            data_list = [  # list of AtomicData-pyg-object objects
                 constructor(
                     **{
                         **{f: v[i] for f, v in node_fields.items() if v is not None},
@@ -366,7 +495,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                         **{f: v[i] if len(v.shape) > 1 else v for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
-                }, pbc=self.pbc)
+                    }, pbc=self.pbc, ignore_fields=self.ignore_fields)
                 for i in include_frames
             ]
 
@@ -381,15 +510,11 @@ class AtomicInMemoryDataset(AtomicDataset):
         del edge_fields
         del graph_fields
 
-        # type conversion
-        _process_dict(fixed_fields, ignore_fields=[AtomicDataDict.R_MAX_KEY, "smiles"])
+        # type conversion. ignore_fields: fields mapped in yaml but not casted to tensor
+        _process_dict(fixed_fields, ignore_fields=self.ignore_fields)
 
-        total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (
-            1024 * 1024
-        )
-        logging.info(
-            f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB"
-        )
+        total_MBs = sum(item.numel() * item.element_size() for _, item in data) / (1024 * 1024)
+        logging.info(f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
         del total_MBs
 
         # use atomic writes to avoid race conditions between
@@ -441,7 +566,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
     ```yaml
     dataset: npz
-    dataset_file_name: example.npz
+    dataset_file_name: path/to/example.npz
     include_keys:
       - user_label1
       - user_label2
@@ -451,17 +576,16 @@ class NpzDataset(AtomicInMemoryDataset):
       position: pos
       node_types: node_types
     ```
-
     """
 
     def __init__(
         self,
         root: str,
-        dataset_id: int,
         pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
+        ignore_fields: List = [],
         extra_fixed_fields: Dict[str, Any] = {},
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
@@ -475,11 +599,11 @@ class NpzDataset(AtomicInMemoryDataset):
         self.key_mapping = key_mapping
 
         super().__init__(
-            dataset_id=dataset_id,
             pbc=pbc,
             file_name=file_name,
             url=url,
             root=root,
+            ignore_fields=ignore_fields,
             extra_fixed_fields=extra_fixed_fields,
             include_frames=include_frames,
             target_indices=target_indices,
@@ -501,10 +625,14 @@ class NpzDataset(AtomicInMemoryDataset):
 
     def get_data(self):
 
-        # loads npz and get all keys
-
-        print(self.raw_dir + "/" + self.raw_file_names[0])
-        data = np.load(self.raw_dir + "/" + self.raw_file_names[0], allow_pickle=True)
+        # loads each sing .npz and get all keys + maps wrt yaml keys
+        _dir = self.raw_dir + "/" + self.raw_file_names[0]
+        print(_dir)
+        try:
+            data = np.load(_dir, allow_pickle=True)
+        except:
+            logging.error(f"File {_dir} not found")
+            raise FileNotFoundError(f"File {_dir} not found")
 
         # only the keys explicitly mentioned in the yaml file will be parsed (registered via register fields section)
         keys = set(list(self.key_mapping.keys()))
@@ -520,12 +648,11 @@ class NpzDataset(AtomicInMemoryDataset):
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: v for k, v in mapped.items()
-            if self.node_attributes.get(k, {}).get('fixed', False)
-            or self.edge_attributes.get(k, {}).get('fixed', False)
+            if  self.node_attributes.get(k, {}).get('fixed', False)
+            or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)
             or self.extra_attributes.get(k, {}).get('fixed', False)
         }
-        fixed_fields[AtomicDataDict.DATASET_INDEX_KEY] = np.array(self.dataset_id)
 
         node_fields = {
             k: v for k, v in mapped.items()
@@ -554,4 +681,5 @@ class NpzDataset(AtomicInMemoryDataset):
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
-        return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields # k:v k field, v the value grabbed from the npz
+        # k:v k field, v the value grabbed from the npz in np.array form
+        return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields
