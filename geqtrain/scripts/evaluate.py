@@ -98,7 +98,7 @@ def infer(dataloader, model, device, output_keys=[], per_node_outputs_keys=[], c
             )
 
             for callback in chunk_callbacks:
-                callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs)
+                callback(batch_index, chunk_index, out, ref_data, data, pbar, **kwargs)
 
             chunk_index += 1
             already_computed_nodes = evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_nodes, num_batch_center_nodes)
@@ -281,12 +281,12 @@ def main(args=None, running_as_script: bool = True):
     # Load dataset
     logger.info(f"Loading dataset...")
     try:
-        dataset = dataset_from_config(config, prefix="test_dataset", loss=metrics)
+        dataset = dataset_from_config(config, prefix="test_dataset")
     except KeyError:
         try:
-            dataset = dataset_from_config(config, prefix="validation_dataset", loss=metrics)
+            dataset = dataset_from_config(config, prefix="validation_dataset")
         except KeyError:
-            dataset = dataset_from_config(config, loss=metrics)
+            dataset = dataset_from_config(config)
 
     logger.info(f"Dataset specified in {args.test_config.name} loaded!")
 
@@ -303,7 +303,7 @@ def main(args=None, running_as_script: bool = True):
     # run inference
     logger.info("Starting...")
 
-    def metrics_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
+    def metrics_callback(batch_index, chunk_index, out, ref_data, data, pbar, **kwargs): # Keep **kwargs or callback fails
         # accumulate metrics
         batch_metrics = metrics(pred=out, ref=ref_data)
 
@@ -324,14 +324,13 @@ def main(args=None, running_as_script: bool = True):
 
         del out, ref_data
 
-    def out_callback(batch_index, chunk_index, out, ref_data, pbar, **kwargs): # Keep **kwargs or callback fails
+    def out_callback(batch_index, chunk_index, out, ref_data, data, pbar, **kwargs): # Keep **kwargs or callback fails
 
-        def format_csv(data, ref_data, batch_index, chunk_index):
+        def format_csv(data, ref_data, batch_index, chunk_index, dataset_raw_file_name):
             try:
                 # Extract fields from data
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
-                dataset_raw_file_name = data[AtomicDataDict.DATASET_RAW_FILE_NAME]
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
@@ -390,7 +389,7 @@ def main(args=None, running_as_script: bool = True):
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
 
-        csvlogger.info(format_csv(out, ref_data, batch_index, chunk_index))
+        csvlogger.info(format_csv(out, ref_data, batch_index, chunk_index, data[AtomicDataDict.DATASET_RAW_FILE_NAME][0]))
         xyzlogger.info(format_xyz(out, ref_data))
 
         del out, ref_data
