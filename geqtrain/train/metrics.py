@@ -12,7 +12,6 @@ import torch
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.train.loss import Loss
-from geqtrain.train.utils import parse_dict
 from torch_runstats import RunningStats, Reduction
 
 from ._loss import instantiate_loss_function
@@ -91,7 +90,7 @@ class Metrics(Loss):
             kwargs.pop("PerTarget")
             kwargs.pop("functional")
             kwargs.pop("reduction")
-            
+
             self.kwargs[key].update(kwargs)
             self.params[key] = (reduction.value, func_params)
 
@@ -125,7 +124,7 @@ class Metrics(Loss):
     def hash_component(component):
         buffer = yaml.dump(component).encode("ascii")
         return sha1(buffer).hexdigest()
-    
+
     @property
     def clean_keys(self):
         for key in self.keys:
@@ -138,8 +137,11 @@ class Metrics(Loss):
     ) -> Dict[str, torch.Tensor]:
 
         metrics = {}
-        
+
         for key in self.keys:
+            # for each key on which to compute metric1, metric2, etc (eg: MAE, MSE) that are unfortunately named eg out_0, out_1
+            # compute metric1, metric2, ... on out <-key_clean used to access pred, ref
+            # then creates out_0, out_1, ... to keep running stats and return the results of metric1, metric2 wrt current input only
             clean_key = self.remove_suffix(key)
             error: torch.Tensor = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
                 pred=pred,
@@ -234,7 +236,7 @@ class Metrics(Loss):
                     flat_dict[f"{type_name}_{metric_key}"] = value_row
             else:
                 flat_dict[metric_key] = value
-            
+
             if per_target:
                 for flat_key in list(flat_dict.keys()):
                     if flat_key.endswith(metric_key):

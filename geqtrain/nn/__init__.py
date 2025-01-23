@@ -1,5 +1,5 @@
 from .kan import KAN
-from ._fc import ScalarMLPFunction
+from ._fc import ScalarMLPFunction, select_nonlinearity
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
@@ -12,7 +12,7 @@ from ._edgewise import (  # noqa: F401
 )  # noqa: F401
 from .interaction import InteractionModule
 from .readout import ReadoutModule
-from ._scale import PerTypeScaleModule
+from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 
@@ -30,6 +30,7 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
+    PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
     FiLMFunction,
@@ -37,4 +38,5 @@ __all__ = [
     ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
+    select_nonlinearity,
 ]

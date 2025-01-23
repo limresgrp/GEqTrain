@@ -1,3 +1,4 @@
+import functools
 from typing import List, Optional
 import torch
 
@@ -5,8 +6,49 @@ from e3nn.o3 import Irreps
 from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn import GraphModuleMixin
+from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 
+
+@compile_mode("script")
+class PerNodeAttrsScaleModule(GraphModuleMixin, torch.nn.Module):
+    """
+    """
+
+    def __init__(
+        self,
+        field: str,
+        out_field: str,
+        readout_latent        = ScalarMLPFunction,
+        readout_latent_kwargs = {},
+        # Other:
+        irreps_in = None,
+    ):
+        super().__init__()
+        self.field = field
+        self.out_field = out_field
+        out_irreps = Irreps("0e")
+        
+        # check and init irreps
+        self._init_irreps(
+            irreps_in=irreps_in,
+            required_irreps_in=[AtomicDataDict.NODE_ATTRS_KEY],
+            my_irreps_in={self.field: out_irreps},
+        )
+
+        readout_latent = functools.partial(readout_latent, **readout_latent_kwargs)
+        self.latent = readout_latent(
+            mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].num_irreps,
+            mlp_latent_dimensions = [64, 64],
+            mlp_output_dimension=out_irreps.num_irreps,
+        )
+
+        self.irreps_out.update({self.out_field: out_irreps})
+
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        node_features = data[self.field]
+        bias = self.latent(data[AtomicDataDict.NODE_ATTRS_KEY])
+        data[self.out_field] = node_features + bias
+        return data
 
 @compile_mode("script")
 class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):

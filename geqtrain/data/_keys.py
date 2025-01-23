@@ -35,8 +35,8 @@ EDGE_TYPE_KEY: Final[str] = "edge_types"
 
 # [n_batch_nodes] index tensor of the node batch
 BATCH_KEY: Final[str] = "batch"
-# [n_batch_nodes] index tensor of the node dataset
-DATASET_INDEX_KEY: Final[str] = "dataset_id"
+# [n_batch_nodes] list of dataset raw file names
+DATASET_RAW_FILE_NAME: Final[str] = "dataset_raw_file_name"
 
 INPUT_STRUCTURE_KEYS: Final[List[str]] = [
     POSITIONS_KEY,
