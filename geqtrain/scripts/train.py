@@ -174,7 +174,7 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
 
 def restart(rank, world_size, config, train_dataset, validation_dataset):
 
-    def check_for_param_updates():
+    def check_for_config_updates():
         # compare old_config to config and update stop condition related arguments
 
         modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
@@ -203,7 +203,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
             enforced_format="torch",
         )
 
-        check_for_param_updates()
+        check_for_config_updates()
 
         config = Config(old_config, exclude_keys=["state_dict", "progress"])
         _set_global_options(config)
