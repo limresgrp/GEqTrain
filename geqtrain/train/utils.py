@@ -2,6 +2,10 @@ import re
 import logging
 from typing import List
 import torch
+from typing import Dict, Optional, Tuple, Union
+from geqtrain.data import dataset_from_config
+from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
+from geqtrain.utils import Config
 
 def parse_loss_metrics_dict(components: dict):
     # parses loss and metric yaml blocks
@@ -59,3 +63,45 @@ def evaluate_end_chunking_condition(already_computed_nodes, batch_chunk_center_n
         assert len(already_computed_nodes) + len(batch_chunk_center_nodes) < num_batch_center_nodes
         already_computed_nodes = torch.cat([already_computed_nodes, batch_chunk_center_nodes], dim=0)
     return already_computed_nodes
+
+def instanciate_train_val_dsets(config: Config) -> Tuple[Union[InMemoryConcatDataset, LazyLoadingConcatDataset], Union[InMemoryConcatDataset, LazyLoadingConcatDataset]]:
+    train_dataset = dataset_from_config(config, prefix="dataset")
+    logging.info(f"Successfully loaded the data set of type {train_dataset}...")
+    try:
+        validation_dataset = dataset_from_config(config, prefix="validation_dataset")
+        logging.info(f"Successfully loaded the validation data set of type {validation_dataset}...")
+    except KeyError:
+        logging.warning("No validation dataset was provided. Using a subset of the train dataset as validation dataset.")
+        validation_dataset = None
+    return train_dataset, validation_dataset
+
+def load_trainer_and_model(rank: int, world_size: int, config: Config, old_config: Optional[Dict] = None, is_restart=False):
+    if old_config is None:
+        old_config = dict(config)
+    if config.use_dt:
+        old_config.update({
+            "rank": rank,
+            "world_size": world_size,
+        })
+    if config.wandb:
+        if rank == 0:
+            if is_restart:
+                from geqtrain.utils.wandb import resume
+                resume(config)
+            else:
+                from geqtrain.utils.wandb import init_n_update
+                init_n_update(config)
+        if config.use_dt:
+            from geqtrain.train import DistributedTrainerWandB
+            trainer, model = DistributedTrainerWandB.from_dict(old_config)
+        else:
+            from geqtrain.train import TrainerWandB
+            trainer, model = TrainerWandB.from_dict(old_config)
+    else:
+        if config.use_dt:
+            from geqtrain.train import DistributedTrainer
+            trainer, model = DistributedTrainer.from_dict(old_config)
+        else:
+            from geqtrain.train import Trainer
+            trainer, model = Trainer.from_dict(old_config)
+    return trainer, model

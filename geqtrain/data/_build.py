@@ -139,6 +139,7 @@ def dataset_from_config(config,
     """
 
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
+    assert len(config_dataset_list) == 1, f"Only one dataset can be specified in {prefix}_list"
     for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:

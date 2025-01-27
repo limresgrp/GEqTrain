@@ -51,24 +51,55 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
-def is_dt_active():
-    try:
-        dist.get_world_size()
-        return True
-    except RuntimeError:
-        return False
 
-def gather(tensor, tensor_list=None, is_master=False, group=None):
-    """Sends tensor to root process, which store it in tensor_list.
-    https://medium.com/@cresclux/example-on-torch-distributed-gather-7b5921092cbc
+def _sync_tensor(tensor: torch.Tensor, world_size:int, group=None) -> list[torch.Tensor]:
+    """Gather tensors with the same number of dimensions but different lengths across multiple GPUs.
+    This function gathers tensors from multiple GPUs, ensuring that tensors with different lengths but the same number of dimensions are correctly aggregated. The function is modified from: https://stackoverflow.com/a/78934638.
+    Args:
+        tensor (torch.Tensor): The tensor to be gathered from each GPU.
+        world_size (int): The number of GPUs involved in the gathering process.
+        group (optional): The process group to work on. If None, the default process group is used.
+    Returns:
+        list[torch.Tensor]: A list of gathered tensors. If the tensors are multi-dimensional, they are concatenated along the first dimension. If the tensors are scalar, they are stacked along the first dimension.
     """
     if group is None:
         group = dist.group.WORLD
-    if is_master:
-        assert(tensor_list is not None)
-        dist.gather(tensor, gather_list=tensor_list, group=group) # this blocking: it will not return until the gather operation is completed across all participating processes
-    else:
-        dist.gather(tensor, dst=0, group=group) # this is not blocking
+
+    # Gather lengths of tensors on each GPU
+    shape = torch.as_tensor(tensor.shape, device=tensor.device) # local for each gpu
+    shapes = [torch.empty_like(shape) for _ in range(world_size)]
+    dist.all_gather(shapes, shape, group=group) # now shapes have been communicated to all gpus
+
+    # Gather data
+    inputs = [tensor] * world_size # local input for each gpu
+
+    # create output buffer wrt the shapes of the tensors on the other gpus
+    # builds a list of tensors with the same shape as the tensors on the other gpus
+    # if tensor is scalar -> then we are handling the a loss func output value
+    if tensor.dim() == 0:
+        outputs = [
+            torch.empty((), dtype=tensor.dtype, device=tensor.device)
+            for _ in shapes
+        ]
+    # if not scalar then we are handling a batched multi-dim-tensor (e.g. node lvl predictions or graph lvl predictions)
+    elif tensor.dim()>=2:
+        outputs = [
+            torch.empty(*_shape, dtype=tensor.dtype, device=tensor.device)
+            for _shape in shapes
+        ]
+
+    dist.all_to_all(outputs, inputs, group=group)
+
+    # to gather metrics: create a single tensor with the cat the atoms from the batches of the different processes
+    if outputs[0].dim()>=2:
+        outputs = torch.cat(outputs, dim=0)
+        assert sum(s[0] for s in shapes).item() == outputs.shape[0]
+        return outputs
+
+    # to gather loss values: create a list of tensors with the loss values from the batches of the different processes
+    outputs = torch.stack(outputs, dim=0)
+    assert outputs.shape[0] == world_size # one loss val from each gpu
+    return outputs
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
@@ -150,8 +181,7 @@ def run_inference(
             ref_data[f"{slices_key}_slices"] = val
 
     if noise is not None:
-        ref_data[AtomicDataDict.NOISE_KEY] = noise * \
-            torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
+        ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
         input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
 
     with cm, precision:
@@ -435,9 +465,6 @@ class Trainer:
         use_warmup: bool = False,
         **kwargs,
     ):
-        # is this instance of trainer working in a distributed training env?
-        self.is_dt_active = is_dt_active()
-
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self._initialized = False
         self.cumulative_wall = 0
@@ -530,9 +557,8 @@ class Trainer:
         self.norms = []
 
         self.train_on_keys = self.loss.keys
-        if train_on_keys is not None:
-            if set(train_on_keys) != set(self.train_on_keys):
-                logging.info("Different training keys found.")
+        if (train_on_keys is not None) and (set(train_on_keys) != set(self.train_on_keys)):
+            logging.info("Different training keys found.")
 
         # --- initialize n_train and n_val
 
@@ -1162,38 +1188,18 @@ class Trainer:
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
 
-    def _sync_tensor(self, tensor: torch.Tensor) -> Union[torch.Tensor, None]:
-        '''
-        must be called by ALL processes
-        sincronize tensor across processes
-
-        return:
-         - if master process is caller: list of gathered tensors,
-         - None otherwise
-        '''
-        if self.is_master:
-            l = [torch.zeros_like(tensor) for _ in range(self.world_size)]
-            gather(tensor=tensor, tensor_list=l, is_master=self.is_master)
-            if l[0].dim()>=2: # i.e. if list of batched multi-dim-tensors
-                return torch.cat(l, dim=0) # used to gather metrics
-            else: # list of scalar-tensors
-                return torch.stack(l, dim=0) # used to gather loss values
-        else:
-            gather(tensor=tensor, is_master=self.is_master)
-
     def _sync_dict(self, tensor_dict: Dict[str, torch.Tensor], keys_to_sync:Iterable[str]=None) -> None:
         '''
         must be called by ALL processes
         acts in place on tensor_dict
         default behavior: assume all values indexed via keys_to_sync are torch.tensors that need to be sync
         '''
-        # todo: enforce inability to access to content in here after this step since all content will be rank dependant
+        # todo: enforce inability to access to content in dict after this step since all content will be rank dependant
+        # option pop everything but keys_to_sync
         if keys_to_sync is None:
             keys_to_sync = tensor_dict.keys()
         for k in keys_to_sync:
-            out = self._sync_tensor(tensor_dict[k])
-            if out is not None: # T only for master
-                tensor_dict[k] = out
+            tensor_dict[k] = _sync_tensor(tensor_dict[k], self.world_size)
 
     @torch.no_grad()
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
@@ -1220,16 +1226,16 @@ class Trainer:
                 self._epoch_lvl_lrscheduler_step()
 
     def batch_step(self, data, validation:bool=False) -> bool:
-        self.optim.zero_grad(set_to_none=True)
         optim_step_executed = False
-        self.model.train()
         if validation:
-            self.model.eval()
+            self.model.eval() # this could be done at lvl above
+        else:
+            self.optim.zero_grad(set_to_none=True)
+            self.model.train() # this could be done at lvl above
 
         cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
         already_computed_nodes = None
         while True:
-
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
                 model=self.model,
                 data=data,
@@ -1317,7 +1323,7 @@ class Trainer:
                 self.dl_train.sampler.set_epoch(self.iepoch)
 
             for self.ibatch, batch in enumerate(dloader):
-                success = self.batch_step(data=batch,validation=(category == VALIDATION),)
+                success = self.batch_step(data=batch, validation=(category == VALIDATION))
 
                 if success:
                     self.end_of_batch_log(batch_type=category)
@@ -1677,15 +1683,15 @@ class Trainer:
         dl_kwargs = dict(
             exclude_keys=self.exclude_keys,
             # keep stuff around in memory
-            persistent_workers=(using_multiple_workers and self.max_epochs > 1),
+            persistent_workers=using_multiple_workers and self.max_epochs > 1,
             # PyTorch recommends this for GPU since it makes copies much faster
-            pin_memory=(self.torch_device != torch.device("cpu")),
-            # avoid getting stuck
-            timeout=(config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0),
-            # use the right randomness
+            pin_memory=self.torch_device != torch.device("cpu"),
+            timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
-            prefetch_factor=config.get('dloader_prefetch_factor', 2),
         )
+
+        if using_multiple_workers:
+            dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
@@ -1777,19 +1783,22 @@ class DistributedTrainer(Trainer):
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
-        self.model = DDP(self.model, device_ids=[self.rank], find_unused_parameters=True)
-    
+        self.model = DDP(self.model, device_ids=[self.rank]) # find_unused_parameters=True is for debug purposes only, heavy hit on performance
+
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
             torch.save(self.model.module.state_dict(), write_to)
-    
+
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
-        # collect targets/predictions from different processes for current batch/key
+        # collect targets/predictions from different processes for current batch/key, preds/targets can be of different shapes across processes (e.g. if atom-wise, whereas in mol-wise they SHOULD be the same as batch size)
         _keys = set(self.metrics.clean_keys)
         self._sync_dict(out, _keys)
         self._sync_dict(ref_data, _keys)
+
+        if not self.is_master:
+            return
         super()._update_metrics(out, ref_data)
-    
+
     @torch.no_grad()
     def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
         '''
@@ -1797,17 +1806,19 @@ class DistributedTrainer(Trainer):
         '''
         if not validation:
             assert optim_step_executed
+
         self._sync_dict(loss_contrib)
-        syncd_loss = self._sync_tensor(loss)
-        if syncd_loss is not None: # T only for master
+        syncd_loss = _sync_tensor(loss, self.world_size)
+        if syncd_loss is not None:
             self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
+
 
 
 class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
 
     def init(self, **kwargs):
         super(DistributedTrainerWandB, self).init(**kwargs)
-    
+
     def end_of_epoch_log(self):
         if not self.is_master:
             return
