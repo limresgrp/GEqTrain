@@ -54,7 +54,7 @@ class FiLMFunction(ScalarMLPFunction):
 
         self._dim = mlp_output_dimension
 
-    def forward(self, x:torch.Tensor, conditioning:torch.Tensor, batch=None):
+    def forward(self, x:torch.Tensor, conditioning:torch.Tensor, batch: Optional[torch.Tensor]=None):
         """
         Applies the FiLM conditioning to the input tensor.
 

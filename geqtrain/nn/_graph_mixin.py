@@ -173,7 +173,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                     flat_modules[prefix + safe_name] = submodule
 
         # Start the recursive flattening
-        for name, module in self:
+        for name, module in self.named_children():
             if isinstance(module, SequentialGraphNetwork):
                 recursive_flatten(self)
             else:
@@ -411,6 +411,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
     # Copied from https://pytorch.org/docs/stable/_modules/torch/nn/modules/container.html#Sequential
     # with type annotations added
     def forward(self, input: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        for name, module in self:
+        for name, module in self.named_children():
             input = module(input)
         return input

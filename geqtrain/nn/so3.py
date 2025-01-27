@@ -32,17 +32,17 @@ class SO3_Linear(torch.nn.Module):
             params (torch.nn.ParameterDict): Dictionary of weight parameters for different l values.
             l_dims_in (list): List of input dimensions for each l value.
             l_dims_out (list): List of output dimensions for each l value.
-        
+
         Example Usage:
             in_irreps = o3.Irreps('8x0e+8x0e+8x1o')
             out_irreps = o3.Irreps('8x0e+8x1o+8x1o')
-            
+
             so3_linear = SO3_Linear(
                 in_irreps=in_irreps,
                 out_irreps=out_irreps,
                 bias=True,
             )
-            
+
             x = in_irreps.randn(10, -1).reshape(10, 8, -1)
             output = so3_linear(x)
         '''
@@ -53,7 +53,7 @@ class SO3_Linear(torch.nn.Module):
         self.mul_in = in_irreps[0].mul
         self.mul_out = out_irreps[0].mul
         self.bias = None
-        
+
         scalars = 0
         params = {}
         lengths = []
@@ -67,7 +67,7 @@ class SO3_Linear(torch.nn.Module):
             l_out_irr = [irr for irr in out_irreps if irr.ir.l == l]
             assert all([irr.mul == self.mul_out for irr in l_out_irr]) # assert all have same multiplicity
             out_features = self.mul_out * len(l_out_irr)
-            
+
             l_weight = torch.nn.Parameter(torch.randn(out_features, in_features))
             bound = 1 / math.sqrt(in_features)
             torch.nn.init.uniform_(l_weight, -bound, bound)
@@ -83,7 +83,7 @@ class SO3_Linear(torch.nn.Module):
             if l == 0 and bias:
                 scalars = len(l_out_irr)
                 self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, scalars))
-        
+
         self.scalars            = scalars
         self.lengths            = lengths
         self.params             = torch.nn.ParameterDict(params)
@@ -112,7 +112,7 @@ class SO3_Linear(torch.nn.Module):
 
             out.append(feature)
             start += _length
-        
+
         out = torch.cat(out, dim=-1)
         if self.bias is not None:
             out[..., :self.scalars] += self.bias.unsqueeze(0)
@@ -141,7 +141,7 @@ class SO3_LayerNorm(torch.nn.Module):
         Args:
             irreps (o3.Irreps): Input irreducible representations.
             bias (bool): Whether to include a bias term. Default is True.
-            normalization (Optional[str]): Normalization method, either 'norm', 'component' or 'std'. Default is None.
+            normalization (Optional[str]): Normalization method, either 'norm', 'component' or 'std'. Default is std.
             eps (float): A small value to avoid division by zero in normalization. Default is 1e-5.
 
         Attributes:
@@ -151,18 +151,18 @@ class SO3_LayerNorm(torch.nn.Module):
             params (torch.nn.ParameterDict): Dictionary of weight parameters for different l values.
             l_dims_in (list): List of input dimensions for each l value.
             l_dims_out (list): List of output dimensions for each l value.
-        
+
         Example Usage:
             in_irreps = o3.Irreps('8x0e+8x0e+8x1o')
             out_irreps = o3.Irreps('8x0e+8x1o+8x1o')
-            
+
             so3_linear = SO3_Linear(
                 in_irreps=in_irreps,
                 out_irreps=out_irreps,
                 bias=True,
                 normalization='component'
             )
-            
+
             x = in_irreps.randn(10, -1).reshape(10, 8, -1)
             output = so3_linear(x)
         '''
@@ -175,7 +175,7 @@ class SO3_LayerNorm(torch.nn.Module):
         assert normalization in ['norm', 'component', 'std']
         self.normalization = normalization
         self.eps = eps
-        
+
         l_dims = []
         lengths = []
         l_dim0_list = []
@@ -200,15 +200,15 @@ class SO3_LayerNorm(torch.nn.Module):
 
             rearrange_in_list.append( Rearrange('b m (i l) -> b l (m i)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
             rearrange_out_list.append(Rearrange('b l (m i) -> b m (i l)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
-            
+
             if self.normalization == 'std':
                 self.balance_degree_weight[start : (start + _l_dim0), :] = (1.0 / (_l_dim0 * len(set(irreps.ls))))
-            
+
             start += _l_dim0
 
             if l == 0 and bias:
                 self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_irr)))
-        
+
         self.l_dims = l_dims
         self.lengths            = tuple(lengths)
         self.l_dim0_list        = tuple(l_dim0_list)
@@ -240,7 +240,7 @@ class SO3_LayerNorm(torch.nn.Module):
         l_start = 0
         for idx, (rearrange_in, rearrange_out) in enumerate(zip(self.rearrange_in_list, self.rearrange_out_list)):
             _length, _l_dim0 = self.lengths[idx], self.l_dim0_list[idx]
-            
+
             feature = x.narrow(dim=-1, start=start, length=_length)
             feature = rearrange_in(feature)
 
@@ -264,7 +264,7 @@ class SO3_LayerNorm(torch.nn.Module):
             out.append(feature)
             start += _length
             l_start += _l_dim0
-        
+
         out = torch.cat(out, dim=-1)
         if self.bias is not None:
             out[..., :sum(self.l_dims[0])] += self.bias.unsqueeze(0)

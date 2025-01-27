@@ -241,7 +241,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 )
             )
 
-        if self.linear_out_irreps: self.last_eq_norm = SO3_LayerNorm(self.linear_out_irreps)
+        if self.linear_out_irreps:
+            self.last_eq_norm = SO3_LayerNorm(self.linear_out_irreps)
 
         # - End Interaction Layers - #
 
@@ -290,8 +291,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_attr       = data[self.edge_equivariant_field]
         edge_invariants = data[self.edge_invariant_field]
         node_invariants = data[self.node_invariant_field]
-        num_edges: int  = len(edge_invariants)
-        num_nodes: int  = len(node_invariants)
+        num_edges: int  = edge_invariants.shape[0]
+        num_nodes: int  = node_invariants.shape[0]
 
         # Initialize state
         out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_attr.device)
@@ -456,7 +457,10 @@ class InteractionLayer(torch.nn.Module):
 
         # Build tensor product between env-aware node feats and edge attrs
         self.eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in l_arg_irreps])
-        self.eq_features_irreps_norm = SO3_LayerNorm(self.eq_features_irreps)
+
+        if self.layer_index == 0:
+            self.eq_features_irreps_norm = SO3_LayerNorm(self.eq_features_irreps)
+
         self.tp = Contracter(
             irreps_in1=self.eq_features_irreps,
             irreps_in2=o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in env_embed_irreps]),
@@ -580,7 +584,7 @@ class InteractionLayer(torch.nn.Module):
             )
 
 
-    def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent):
+    def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
             node_invariants[edge_center],
             node_invariants[edge_neighbor],
@@ -603,7 +607,7 @@ class InteractionLayer(torch.nn.Module):
         return torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
 
 
-    def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers):
+    def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers) -> torch.Tensor:
         # Asserts needed for JIT
         assert self.product is not None
         assert self.reshape_in_module is not None
@@ -614,6 +618,31 @@ class InteractionLayer(torch.nn.Module):
         # updated local_env_per_active_atom
         return self.reshape_in_module(expanded_features_per_active_atom)
 
+
+    def apply_residual_stream(self, latents, new_latents, this_layer_update_coeff, active_edges):
+        if self.layer_index > 0:
+            assert this_layer_update_coeff is not None
+            # At init, we assume new and old to be approximately uncorrelated
+            # Thus their variances add
+            # we always want the latent space to be normalized to variance = 1.0,
+            # because it is critical for learnability. Still, we want to preserve
+            # the _relative_ magnitudes of the current latent and the residual update
+            # to be controled by `this_layer_update_coeff`
+            # Solving the simple system for the two coefficients:
+            #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+            # gives
+            #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+            # rsqrt is reciprocal sqrt
+            coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
+            coefficient_new = this_layer_update_coeff * coefficient_old
+            # Residual update
+            # Note that it only runs when there are latents to resnet with, so not at the first layer
+            # index_add adds only to the edges for which we have something to contribute
+            return torch.index_add(coefficient_old * latents, 0, active_edges, coefficient_new * new_latents)
+
+        # Normal (non-residual) update
+        # index_copy replaces, unlike index_add
+        return torch.index_copy(latents, 0, active_edges, new_latents)
 
     def forward(
         self,
@@ -639,34 +668,13 @@ class InteractionLayer(torch.nn.Module):
             new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
         new_latents = self.post_norm(new_latents)
 
-        if self.layer_index > 0:
-            assert this_layer_update_coeff is not None
-            # At init, we assume new and old to be approximately uncorrelated
-            # Thus their variances add
-            # we always want the latent space to be normalized to variance = 1.0,
-            # because it is critical for learnability. Still, we want to preserve
-            # the _relative_ magnitudes of the current latent and the residual update
-            # to be controled by `this_layer_update_coeff`
-            # Solving the simple system for the two coefficients:
-            #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
-            # gives
-            #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
-            # rsqrt is reciprocal sqrt
-            coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
-            coefficient_new = this_layer_update_coeff * coefficient_old
-            # Residual update
-            # Note that it only runs when there are latents to resnet with, so not at the first layer
-            # index_add adds only to the edges for which we have something to contribute
-            latents = torch.index_add(coefficient_old * latents, 0, active_edges, coefficient_new * new_latents)
-        else:
-            # Normal (non-residual) update
-            # index_copy replaces, unlike index_add
-            latents = torch.index_copy(latents, 0, active_edges, new_latents)
+        latents = self.apply_residual_stream(latents, new_latents, this_layer_update_coeff, active_edges)
 
         # From the latents, compute the weights for active edges:
         weights = self.env_embed_mlp(latents)
 
-        if self.film is not None: weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
+        if self.film is not None:
+            weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
 
         w_index: int = 0
         if self.layer_index == 0:
@@ -674,18 +682,20 @@ class InteractionLayer(torch.nn.Module):
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
-            eq_features = self.eq_features_irreps_norm(eq_features) # TODO it's better if this comes before
+            eq_features = self.eq_features_irreps_norm(eq_features) # TODO it's better if this comes before #! THIS ACTS ON LY AT FIRST LAYER!
 
         # Extract weights for the edge attrs
         env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
         w_index += self._env_weighter.weight_numel
         emb_latent = self._env_weighter(edge_attr, env_w) # emb_latent is normalized below
 
-        if self.use_attention: emb_latent = self.apply_attention(node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent)
+        if self.use_attention:
+            emb_latent = self.apply_attention(node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent)
 
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
-        if not self.use_attention: local_env_per_node = local_env_per_node * self.env_sum_normalization
+        if not self.use_attention:
+            local_env_per_node = local_env_per_node * self.env_sum_normalization
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
@@ -693,7 +703,8 @@ class InteractionLayer(torch.nn.Module):
         local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
 
-        if self.use_mace_product: local_env_per_active_atom = self.apply_mace(local_env_per_active_atom, node_invariants, active_node_centers)
+        if self.use_mace_product:
+            local_env_per_active_atom = self.apply_mace(local_env_per_active_atom, node_invariants, active_node_centers)
 
         expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
         expanded_features_per_node[active_node_centers] = local_env_per_active_atom

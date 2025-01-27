@@ -151,6 +151,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             )
 
         # if the out irreps requested has more elements then the request number of scalars to be provided in output
+        self.reshape_in: Optional[reshape_irreps] = None
         if out_irreps.dim > self.n_scalars_out:
             self.has_equivariant_output = True
             eq_linear_input_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
@@ -172,7 +173,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     f"If features come from InteractionModule, you can add the parameter 'output_ls=[0]' in the constructor." +
                     "If you want to allow this behavior, set 'strict_irreps=False'."
                 )
-            self.reshape_in = None
 
         if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
@@ -200,7 +200,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # get features from input and create empty tensor to store output
         features = data[self.field]
         out_features = torch.zeros(
-            (len(features), self.out_irreps_dim),
+            (features.shape[0], self.out_irreps_dim),
             dtype=torch.float32,
             device=features.device
         )
