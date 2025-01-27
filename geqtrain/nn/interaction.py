@@ -290,8 +290,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_attr       = data[self.edge_equivariant_field]
         edge_invariants = data[self.edge_invariant_field]
         node_invariants = data[self.node_invariant_field]
-        num_edges: int  = len(edge_invariants)
-        num_nodes: int  = len(node_invariants)
+        num_edges: int  = edge_invariants.shape[0]
+        num_nodes: int  = node_invariants.shape[0]
 
         # Initialize state
         out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_attr.device)
@@ -580,7 +580,7 @@ class InteractionLayer(torch.nn.Module):
             )
 
 
-    def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent):
+    def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
             node_invariants[edge_center],
             node_invariants[edge_neighbor],
@@ -603,7 +603,7 @@ class InteractionLayer(torch.nn.Module):
         return torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
 
 
-    def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers):
+    def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers) -> torch.Tensor:
         # Asserts needed for JIT
         assert self.product is not None
         assert self.reshape_in_module is not None

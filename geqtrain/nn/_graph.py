@@ -44,7 +44,7 @@ class EmbeddingGraphAttrs(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if not self.attr_modules: return data
+        if len(self.attr_modules) == 0: return data
         out = []
         for attribute_name, emb_layer in self.attr_modules.items():
             x = data[attribute_name].squeeze(-1)

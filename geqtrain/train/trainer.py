@@ -979,7 +979,7 @@ class Trainer:
                 device=torch.device(device),
                 dtype=torch.float32,
             )
-            model_state_dict = torch.load(traindir + "/" + model_name, map_location=device)
+            model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
             model.load_state_dict(model_state_dict)
 
         return model, config
