@@ -7,11 +7,12 @@ from geqtrain.nn import (
     ReadoutModule,
 )
 
+from geqtrain.utils import Config
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 
 
-def Heads(model, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
 
     logging.info("--- Building Heads Module ---")
 

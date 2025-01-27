@@ -4,6 +4,8 @@ from typing import Optional
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
@@ -18,7 +20,7 @@ from geqtrain.nn import (
 
 
 def GlobalGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None,
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None,
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -38,7 +40,7 @@ def GlobalGraphModel(
     )
 
 def HeadlessGlobalGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None,
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None,
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -50,7 +52,7 @@ def HeadlessGlobalGraphModel(
         layers=layers,
     )
 
-def buildGlobalGraphModelLayers(config):
+def buildGlobalGraphModelLayers(config:Config):
     logging.info("--- Building Global Graph Model")
 
     update_config(config)

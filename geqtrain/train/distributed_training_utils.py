@@ -50,6 +50,8 @@ def configure_dist_training(args):
 
 def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) -> list[torch.Tensor]:
     """Gather tensors with the same number of dimensions but different lengths across multiple GPUs.
+
+    This function must be called by all processes.
     This function gathers tensors from multiple GPUs, ensuring that tensors with different lengths but the same number of dimensions are correctly aggregated. The function is modified from: https://stackoverflow.com/a/78934638.
     Args:
         tensor (torch.Tensor): The tensor to be gathered from each GPU.
@@ -100,7 +102,6 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
 
 def sync_dic_of_tensors_across_GPUs(tensor_dict: Dict[str, torch.Tensor], world_size:int, keys_to_sync:Iterable[str]=None) -> None:
     """Synchronize a dictionary of tensors across multiple GPUs.
-
     This function must be called by all processes.
     It synchronizes the tensors in the provided dictionary across all GPUs involved in the distributed training.
     The synchronization is done in place, modifying the original dictionary.

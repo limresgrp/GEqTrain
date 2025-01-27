@@ -3,10 +3,11 @@ from typing import Optional
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.data import AtomicDataset
 from geqtrain.utils import load_callable
+from geqtrain.utils import Config
 
 
 def model_from_config(
-    config,
+    config:Config,
     initialize: bool = False,
     dataset: Optional[AtomicDataset] = None,
     deploy: bool = False,

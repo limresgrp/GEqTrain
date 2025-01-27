@@ -4,6 +4,8 @@ import logging
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
@@ -18,7 +20,7 @@ from geqtrain.nn import (
 
 
 def GraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -39,7 +41,7 @@ def GraphModel(
 
 
 def HeadlessGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -51,7 +53,7 @@ def HeadlessGraphModel(
         layers=layers,
     )
 
-def buildHeadlessGraphModelLayers(config):
+def buildHeadlessGraphModelLayers(config:Config):
     logging.info("--- Building Graph Model ---")
 
     update_config(config)
@@ -81,5 +83,5 @@ def buildHeadlessGraphModelLayers(config):
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
         )),
     })
-    
+
     return layers

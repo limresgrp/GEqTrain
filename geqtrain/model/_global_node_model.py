@@ -4,6 +4,8 @@ from typing import Optional
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
@@ -16,7 +18,7 @@ from geqtrain.nn import (
 )
 
 
-def GlobalNodeModel(config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def GlobalNodeModel(config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
@@ -25,7 +27,7 @@ def GlobalNodeModel(config, initialize: bool, dataset: Optional[ConcatDataset] =
     layers.update({
         "head": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            out_field=AtomicDataDict.NODE_OUTPUT_KEY,
+            out_field=config.get('target_key', AtomicDataDict.NODE_OUTPUT_KEY),
         )),
     })
 
@@ -34,7 +36,7 @@ def GlobalNodeModel(config, initialize: bool, dataset: Optional[ConcatDataset] =
         layers=layers,
     )
 
-def HeadlessGlobalNodeModel(config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def HeadlessGlobalNodeModel(config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
@@ -45,7 +47,7 @@ def HeadlessGlobalNodeModel(config, initialize: bool, dataset: Optional[ConcatDa
         layers=layers,
     )
 
-def buildHeadlessGlobalNodeModelLayers(config):
+def buildHeadlessGlobalNodeModelLayers(config:Config):
     logging.info("--- Building Global Node Model ---")
 
     update_config(config)
