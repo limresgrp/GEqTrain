@@ -35,6 +35,7 @@ setup(
         "e3nn>=0.4.4",
         "pyyaml",
         "torch-runstats>=0.2.0",
+        "pytorch_warmup",
     ],
     zip_safe=True,
 )
