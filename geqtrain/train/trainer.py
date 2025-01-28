@@ -99,6 +99,7 @@ def run_inference(
     ignore_chunk_keys: List[str] = [],
     **kwargs,
 ):
+    #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available(
     ) else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
     # AtomicDataDict is the dstruct that is taken as input from each forward
@@ -868,32 +869,26 @@ class Trainer:
         iepoch = -1
         if "model" in dictionary:
             model = dictionary.pop("model")
+        elif "fine_tune" in dictionary:
+            model_pth_path = Path(dictionary["fine_tune"])
+            assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
         elif "progress" in dictionary:
+            # ! progress implies that we are resuming training from last_model_path
             progress = dictionary["progress"]
-
-            # load the model from file
-            if dictionary.get("fine_tune"):
-                if isfile(progress["best_model_path"]):
-                    load_path = Path(progress["best_model_path"])
-                else:
-                    raise AttributeError("model weights & bias are not saved")
-            else:
-                iepoch = progress["iepoch"]
-                if isfile(progress["last_model_path"]):
-                    load_path = Path(progress["last_model_path"])
-                else:
-                    raise AttributeError("model weights & bias are not saved")
-
-            model, _ = cls.load_model_from_training_session(
-                traindir=load_path.parent,
-                model_name=load_path.name,
-                config_dictionary=dictionary,
-            )
-            logging.debug(f"Reload the model from {load_path}")
-
+            iepoch = progress["iepoch"]
+            model_pth_path = Path(progress["last_model_path"])
+            assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
             dictionary.pop("progress")
 
-        state_dict = dictionary.pop("state_dict", None)
+        if "progress" in dictionary or "fine_tune" in dictionary:
+            model, _ = cls.load_model_from_training_session(
+                traindir=model_pth_path.parent,
+                model_name=model_pth_path.name,
+                config_dictionary=dictionary,
+            )
+            logging.debug(f"Reload the model from {model_pth_path}")
+
+        state_dict = dictionary.pop("state_dict", None) # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
 
         logging.info("Loading Trainer...")
         trainer = cls(**dictionary)
@@ -913,14 +908,14 @@ class Trainer:
             if torch.cuda.is_available():
                 torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
 
+        trainer.best_metrics = float("inf")
+        trainer.best_epoch = 0
+        stop_arg = None
         if "progress" in dictionary:
             trainer.best_metrics = progress["best_metrics"]
             trainer.best_epoch = progress["best_epoch"]
             stop_arg = progress.pop("stop_arg", None)
-        else:
-            trainer.best_metrics = float("inf")
-            trainer.best_epoch = 0
-            stop_arg = None
+
         trainer.iepoch = iepoch
 
         # final sanity check
@@ -942,15 +937,16 @@ class Trainer:
         traindir = str(traindir)
         model_name = str(model_name)
 
-        if config_dictionary is not None:
-            config = Config.from_dict(config_dictionary)
-        else:
-            config = Config.from_file(traindir + "/config.yaml")
+        if config_dictionary is None:
+            config_dictionary = traindir + "/config.yaml"
 
-        model: torch.nn.Module = model_from_config(
+        config = Config.from_dict(config_dictionary)
+
+        model, weights_to_train_from_scratch = model_from_config(
             config=config,
             initialize=False,
         )
+        
         if model is not None:  # TODO: why would it be?
             # TODO: this is not exactly equivalent to building with
             # this set as default dtype... does it matter?
@@ -959,7 +955,9 @@ class Trainer:
                 dtype=torch.float32,
             )
             model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
-            model.load_state_dict(model_state_dict)
+            # drop weights that must be initialized from scratch (if any)
+            model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
+            model.load_state_dict(model_state_dict, strict=False)
 
         return model, config
 
@@ -1360,7 +1358,7 @@ class Trainer:
                 self.best_model_saved_at_epoch = self.iepoch
                 self.save_model(self.best_model_path, blocking=False)
 
-                self.logger.info(f"! Best model {self.best_epoch:8d} {self.best_metrics:8.3f}")
+                self.logger.info(f"! Best model saved {self.best_epoch:8d} {self.best_metrics:8.3f}")
 
             if (self.iepoch + 1) % self.log_epoch_freq == 0:
                 self.save(blocking=False)

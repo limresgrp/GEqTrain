@@ -130,8 +130,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         assert (env_embed_irreps[0].ir == SCALAR), "env_embed_irreps must start with scalars"
 
         # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
-        if out_irreps is None: out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
-        else: out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+        if out_irreps is None:
+            out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
+        else:
+            out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+
         if 0 not in out_irreps.ls: # add scalar (l=0) if missing from out_irreps
             out_irreps = o3.Irreps([(mul, o3.Irrep('0e')) for mul, _ in out_irreps[:1]]) + out_irreps
 
@@ -143,7 +146,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             f"Required output ls {output_ls} cannot be computed using l_max={max(input_edge_eq_irreps.ls)}"
 
         # [optional] set out_irreps multiplicity
-        if output_mul is None: output_mul = out_irreps[0].mul
+        if output_mul is None:
+            output_mul = out_irreps[0].mul
         if isinstance(output_mul, str):
             if output_mul == 'hidden':
                 output_mul = self.latent_dim
@@ -216,9 +220,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         for layer_index, tps_irreps in enumerate(zip(tps_irreps_in, tps_irreps_out)):
             is_last_layer = layer_index == self.num_layers - 1
 
-            self.linear_out_irreps = o3.Irreps(
-                [(mul, ir) for mul, ir in out_irreps if ir.l > 0]
-            ) if is_last_layer else env_embed_irreps
+            self.linear_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0]) if is_last_layer else env_embed_irreps
 
             self.interaction_layers.append(
                 InteractionLayer(
@@ -278,8 +280,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
         # - End build modules - #
-        out_feat_elems = []
-        for irr in out_irreps: out_feat_elems.append(irr.ir.dim)
+        out_feat_elems = (irr.ir.dim for irr in out_irreps)
         self.out_feat_elems = sum(out_feat_elems)
         self.out_irreps = out_irreps
         self.irreps_out.update({self.out_field: self.out_irreps})

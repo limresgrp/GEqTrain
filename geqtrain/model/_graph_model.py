@@ -18,28 +18,6 @@ from geqtrain.nn import (
     ReadoutModule,
 )
 
-
-def GraphModel(
-    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
-) -> SequentialGraphNetwork:
-    """Base model architecture.
-
-    """
-    layers = buildHeadlessGraphModelLayers(config)
-
-    layers.update({
-        "head": (ReadoutModule, dict(
-            field=AtomicDataDict.GRAPH_FEATURES_KEY,
-            out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
-        )),
-    })
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )
-
-
 def HeadlessGraphModel(
     config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
@@ -54,6 +32,15 @@ def HeadlessGraphModel(
     )
 
 def buildHeadlessGraphModelLayers(config:Config):
+    '''
+    returns dict:
+        - keys: layer names
+        - values:
+            either:
+            - obj that inherits from (GraphModuleMixin, torch.nn.Module)
+            - tuple of (obj that inherits from (GraphModuleMixin, torch.nn.Module), dict)
+                where dict is kwargs for the associated obj constructor
+    '''
     logging.info("--- Building Graph Model ---")
 
     update_config(config)

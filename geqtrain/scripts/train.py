@@ -98,7 +98,7 @@ def main(args=None):
             "either set append to True or use a different root or runname"
         )
 
-    if not found_restart_file:
+    if not found_restart_file or config.fine_tune:
         func = fresh_start
     else:
         func = restart
@@ -140,7 +140,7 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         # = Build model =
         if model is None:
             logging.info("Building the network...")
-            model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+            model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
             logging.info("Successfully built the network!")
 
         # Equivar test

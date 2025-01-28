@@ -18,27 +18,9 @@ from geqtrain.nn import (
 )
 
 
-def GlobalNodeModel(config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
-    """Base model architecture.
-
-    """
-    layers = buildHeadlessGlobalNodeModelLayers(config)
-
-    layers.update({
-        "head": (ReadoutModule, dict(
-            field=AtomicDataDict.NODE_FEATURES_KEY,
-            out_field=config.get('target_key', AtomicDataDict.NODE_OUTPUT_KEY),
-        )),
-    })
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )
-
 def HeadlessGlobalNodeModel(config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
     """Base model architecture.
-
+    callable builder
     """
     layers = buildHeadlessGlobalNodeModelLayers(config)
 
