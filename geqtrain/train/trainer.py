@@ -884,10 +884,6 @@ class Trainer:
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
 
         if "progress" in dictionary or "fine_tune" in dictionary:
-
-            if "progress" in dictionary:
-                dictionary.pop("progress") # ok to pop progress here, as it is not needed in trainer instanciation
-
             model, _ = cls.load_model_from_training_session(
                 traindir=model_pth_path.parent,
                 model_name=model_pth_path.name,
@@ -895,13 +891,22 @@ class Trainer:
             )
             logging.debug(f"Reload the model from {model_pth_path}")
 
-        state_dict = dictionary.pop("state_dict", None) # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
-
+        # set up the trainer with the default "fresh_start" configuration
         logging.info("Loading Trainer...")
         trainer = cls(**dictionary)
         logging.info("Trainer successfully loaded!")
 
-        if state_dict is not None:
+        trainer.best_metrics = float("inf")
+        trainer.best_epoch = 0
+        trainer.iepoch = iepoch
+        stop_arg = None
+
+        # then eventually load state since state_dict exists only iff progress=T
+        if "state_dict" in dictionary:
+            assert "progress" in dictionary, "progress must be in dictionary if loading a state_dict"
+            state_dict = dictionary.pop("state_dict") # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
+            dictionary.pop("progress") # ok to pop progress here, as it is not needed in trainer instanciation
+
             logging.debug("Reload optimizer and scheduler states")
             for key in cls.object_keys:
                 item = getattr(trainer, key, None)
@@ -915,24 +920,14 @@ class Trainer:
             if torch.cuda.is_available():
                 torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
 
-        trainer.best_metrics = float("inf")
-        trainer.best_epoch = 0
-        trainer.iepoch = iepoch
-        stop_arg = None
-        if "progress" in dictionary:
             trainer.best_metrics = progress["best_metrics"]
             trainer.best_epoch = progress["best_epoch"]
             stop_arg = progress.pop("stop_arg", None)
 
+            if trainer.stop_cond:
+                raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
-        # final sanity check
-        if trainer.stop_cond:
-            raise RuntimeError(
-                f"The previous run has properly stopped with {stop_arg}."
-                "Please either increase the max_epoch or change early stop criteria"
-            )
-
-        return trainer, model
+        return trainer, model # care, here model CAN be None if no fine-tuning nor progress
 
     @staticmethod
     def load_model_from_training_session(

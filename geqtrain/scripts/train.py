@@ -98,8 +98,9 @@ def main(args=None):
             "either set append to True or use a different root or runname"
         )
 
-    if not found_restart_file or config.fine_tune:
-        if config.fine_tune:
+    fine_tune = config.get("fine_tune", False)
+    if not found_restart_file or fine_tune:
+        if fine_tune:
             logging.info("--- Fine-tuning model ---")
         elif not found_restart_file:
             logging.info("--- Starting fresh training ---")
@@ -141,11 +142,11 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
-        #? = Build model =
-        #? if model is None:
-        #?     logging.info("Building the network...")
-        #?     model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
-        #?     logging.info("Successfully built the network!")
+        # = Build model =
+        if model is None:
+            logging.info("Building the network...")
+            model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+            logging.info("Successfully built the network!")
 
         # Equivar test
         if config.equivariance_test:
@@ -206,6 +207,8 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
             filename=restart_file,
             enforced_format="torch",
         )
+        if old_config.get("fine_tune", False):
+            raise ValueError("Cannot restart training of a fine-tuning run")
 
         check_for_config_updates()
 

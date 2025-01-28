@@ -18,12 +18,35 @@ def parse_model_builders(config):
         if isinstance(builder, dict):
             assert len(builder) == 1, "Only one builder can be specified at a time"
             _callable = list(builder.keys())[0] # get the only key
-            builders_and_params[_callable] = list(builder.values()) # for now a list but l8r will be dict for lr, freeze etc
+            assert len(builder.values()) == 1, "Only one set of parameters can be specified at a time for now"
+            builders_and_params[_callable] = list(builder.values()) # assert list(builder.values())
         elif isinstance(builder, str):
-            builders_and_params[builder] = {}
+            builders_and_params[builder] = []
 
     return builders_and_params #! todo do list k: [k:{load:T, lr:x, freeze:y}]
 
+
+def flatten_list(nested_list):
+    """
+    Flattens a nested list of arbitrary depth, including handling empty lists and None values.
+
+    Args:
+        nested_list (list): A potentially nested list to be flattened.
+
+    Returns:
+        list: A single flattened list with no nested elements.
+    """
+    flattened = []
+
+    for element in nested_list:
+        if isinstance(element, list):
+            # Recursive call to handle nested lists
+            flattened.extend(flatten_list(element))
+        elif element is not None:
+            # Include non-None elements
+            flattened.append(element)
+
+    return flattened
 
 
 def model_from_config(
@@ -59,6 +82,15 @@ def model_from_config(
     for k, v in model_builders.items():
         builders.append(load_callable(k, prefix="geqtrain.model"))
         fine_tune_params.append(v)
+
+    model_for_fine_tuning = config.get("fine_tune", False) # if present, target pth has been already validated
+    fine_tune_params_provided = any(flatten_list(fine_tune_params))
+    if not model_for_fine_tuning and fine_tune_params_provided:
+        raise ValueError("fine_tune_params provided in model_builders but fine_tune model is not provided")
+
+    if model_for_fine_tuning:
+        assert fine_tune_params_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not fine_tune_params provided in model_builders"
+
 
     model = None
     weights_to_drop_from_model_state: List[str] = set() # used in case of fine-tuning
