@@ -99,6 +99,10 @@ def main(args=None):
         )
 
     if not found_restart_file or config.fine_tune:
+        if config.fine_tune:
+            logging.info("--- Fine-tuning model ---")
+        elif not found_restart_file:
+            logging.info("--- Starting fresh training ---")
         func = fresh_start
     else:
         func = restart
@@ -137,11 +141,11 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         # = Update config with dataset-related params = #
         config.update(trainer.dataset_params)
 
-        # = Build model =
-        if model is None:
-            logging.info("Building the network...")
-            model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
-            logging.info("Successfully built the network!")
+        #? = Build model =
+        #? if model is None:
+        #?     logging.info("Building the network...")
+        #?     model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+        #?     logging.info("Successfully built the network!")
 
         # Equivar test
         if config.equivariance_test:

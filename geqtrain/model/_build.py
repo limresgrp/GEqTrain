@@ -95,9 +95,17 @@ def model_from_config(
         model = builder(**params)
         current_model_param_names = set(k for k, _ in model.named_parameters())
 
-        if not ft_params:
-            weights_to_drop_from_model_state.update(current_model_param_names - weights_already_loaded)
+        params_just_added = current_model_param_names - weights_already_loaded
+        if not ft_params: # if no fine-tuning params, then params of module must be dropped when loading model params
+            weights_to_drop_from_model_state.update(params_just_added)
+        else:
+            # opt1: freeze
+            if "freeze" in ft_params:
+                for n, p in model.named_parameters():
+                    if n in params_just_added:
+                        p.requires_grad = False
 
         weights_already_loaded.update(current_model_param_names)
 
+    assert model is not None, "Model is not loaded, check model_builders in yaml"
     return model, weights_to_drop_from_model_state

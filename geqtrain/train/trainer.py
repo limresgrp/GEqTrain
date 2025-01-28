@@ -549,14 +549,12 @@ class Trainer:
         # initialize optimizer
 
         # get all params that require grad
-        param_dict = {name: param for name,
-                      param in self.model.named_parameters() if param.requires_grad}
+        param_dict = {name: param for name, param in self.model.named_parameters() if param.requires_grad}
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
-            'dampen':       {'lr': self.learning_rate * 1.e-1},
-            'strengthen':   {'lr': self.learning_rate * 1.e1},
-            'nowd':         {'weight_decay': 0.},
+            'dampen':       {'lr': self.learning_rate * 1.e-1}, # dampen lr from cfg?
+            'nowd':         {'weight_decay': 0.0},
         }
 
         def merge_groups(param, param_groups):
@@ -585,21 +583,27 @@ class Trainer:
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
-        # parsing params to build optim groups
+        # gathering/parsing params to build optim groups
         # atm only ['nowd', 'dampen', 'strengthen'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
             if getattr(p, 'tags', None) is not None:
                 for tag in getattr(p, 'tags'):
-                    if tag == 'strengthen':
-                        pass
                     param_groups.append(tag)
             if p.dim() < 2:
                 param_groups.append('nowd')
+            # here if tag=freeze then req grad to F
 
             group = merge_groups(p, param_groups)
             merge_or_create_group(optim_groups, group)
+
+        # tag setted at model_from_config execution
+        # parse all params with tag freeze and set thier req grad to F
+        # check that head has req grad to T
+        # in  - HeadlessGlobalNodeModel: load # {lr, freeze} <- apply tags here, needed to be set
+        # another tag for trunk 1e-6
+
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -878,9 +882,12 @@ class Trainer:
             iepoch = progress["iepoch"]
             model_pth_path = Path(progress["last_model_path"])
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
-            dictionary.pop("progress")
 
         if "progress" in dictionary or "fine_tune" in dictionary:
+
+            if "progress" in dictionary:
+                dictionary.pop("progress") # ok to pop progress here, as it is not needed in trainer instanciation
+
             model, _ = cls.load_model_from_training_session(
                 traindir=model_pth_path.parent,
                 model_name=model_pth_path.name,
@@ -894,7 +901,7 @@ class Trainer:
         trainer = cls(**dictionary)
         logging.info("Trainer successfully loaded!")
 
-        if state_dict is not None and model is not None:
+        if state_dict is not None:
             logging.debug("Reload optimizer and scheduler states")
             for key in cls.object_keys:
                 item = getattr(trainer, key, None)
@@ -910,13 +917,13 @@ class Trainer:
 
         trainer.best_metrics = float("inf")
         trainer.best_epoch = 0
+        trainer.iepoch = iepoch
         stop_arg = None
         if "progress" in dictionary:
             trainer.best_metrics = progress["best_metrics"]
             trainer.best_epoch = progress["best_epoch"]
             stop_arg = progress.pop("stop_arg", None)
 
-        trainer.iepoch = iepoch
 
         # final sanity check
         if trainer.stop_cond:
@@ -937,28 +944,19 @@ class Trainer:
         traindir = str(traindir)
         model_name = str(model_name)
 
-        if config_dictionary is None:
-            config_dictionary = traindir + "/config.yaml"
-
+        config_dictionary = config_dictionary or (traindir + "/config.yaml")
         config = Config.from_dict(config_dictionary)
 
         model, weights_to_train_from_scratch = model_from_config(
             config=config,
             initialize=False,
-        )
-        
-        if model is not None:  # TODO: why would it be?
-            # TODO: this is not exactly equivalent to building with
-            # this set as default dtype... does it matter?
-            model.to(
-                device=torch.device(device),
-                dtype=torch.float32,
-            )
-            model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
-            # drop weights that must be initialized from scratch (if any)
-            model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
-            model.load_state_dict(model_state_dict, strict=False)
+        ) # raises if returned model is None
 
+        model.to(device=torch.device(device), dtype=torch.float32)
+        model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
+        # drop weights that must be initialized from scratch (if any)
+        model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
+        model.load_state_dict(model_state_dict, strict=False)
         return model, config
 
     def init_dataset(self, config, train_dset, val_dset):
