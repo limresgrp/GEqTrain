@@ -1,6 +1,19 @@
 import torch
 
-def add_tags_to_parameters(model: torch.nn.Module, tag: str):
+def add_tags_to_parameter(p: torch.nn.Parameter, tag: str):
+    """
+    Adds a tag to the 'tags' attribute of parameter p.
+
+    Args:
+        p (torch.nn.Parameter): The parameter.
+        tag (str): The tag to add to the parameters.
+    """
+    tags = getattr(p, 'tags', [])
+    tags.append(tag)
+    p.tags = tags
+
+
+def add_tags_to_module(model: torch.nn.Module, tag: str):
     """
     Adds a tag to the 'tags' attribute of each parameter in the model.
 
@@ -9,6 +22,4 @@ def add_tags_to_parameters(model: torch.nn.Module, tag: str):
         tag (str): The tag to add to the parameters.
     """
     for p in model.parameters():
-        tags = getattr(p, 'tags', [])
-        tags.append(tag)
-        p.tags = tags
+        add_tags_to_parameter(p, tag)

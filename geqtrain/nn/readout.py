@@ -6,7 +6,7 @@ from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-from geqtrain.utils import add_tags_to_parameters
+from geqtrain.utils import add_tags_to_module
 
 import re
 
@@ -193,7 +193,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.act_on_nodes = self.field in _NODE_FIELDS
 
         if dampen:
-            add_tags_to_parameters(self, 'dampen')
+            add_tags_to_module(self, 'dampen')
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 

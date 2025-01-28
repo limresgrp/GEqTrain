@@ -7,7 +7,7 @@ from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule, SwiGLU
-from geqtrain.utils import add_tags_to_parameters
+from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
 
 
@@ -178,7 +178,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.sequential = torch.nn.Sequential(sequential_dict)
 
         if dampen:
-            add_tags_to_parameters(self, 'dampen')
+            add_tags_to_module(self, 'dampen')
 
     def forward(self, x):
         return self.sequential(x)
