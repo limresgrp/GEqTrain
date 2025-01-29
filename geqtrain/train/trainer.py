@@ -292,7 +292,7 @@ class Trainer:
         lr_scheduler_kwargs (dict): parameters to initialize the scheduler
 
         optimizer_name (str): name for optimizer
-        optim_kwargs (dict): parameters to initialize the optimizer
+        optimizer_kwargs (dict): parameters to initialize the optimizer
 
         batch_size (int): size of each batch
         validation_batch_size (int): batch size for evaluating the model for validation
@@ -553,8 +553,9 @@ class Trainer:
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
-            'dampen':       {'lr': self.learning_rate * 1.e-1}, # dampen lr from cfg?
+            'dampen':       {'lr': self.learning_rate * 1.e-1},
             'nowd':         {'weight_decay': 0.0},
+            'tune':         {'lr': self.kwargs['fine_tune_lr']},
         }
 
         def merge_groups(param, param_groups):
@@ -584,7 +585,6 @@ class Trainer:
             optim_groups.append(group)
 
         # gathering/parsing params to build optim groups
-        # atm only ['nowd', 'dampen', 'strengthen'] are handled
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
@@ -603,7 +603,6 @@ class Trainer:
         # check that head has req grad to T
         # in  - HeadlessGlobalNodeModel: load # {lr, freeze} <- apply tags here, needed to be set
         # another tag for trunk 1e-6
-
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -628,23 +627,18 @@ class Trainer:
         self.lr_sched = None
         self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
-
+            # note: lr_scheduler_T_max is used for schedulers that require max num of steps
+            # e.g. T_max in https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#cosineannealinglr
             if self.lr_scheduler_name == "CosineAnnealingLR":
                 steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * \
-                    self.max_epochs
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
 
             if self.use_warmup:
-                #! for now it has been tested only with CosineAnnealingLR
                 import pytorch_warmup as warmup
                 steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.warmup_steps = steps_per_epoch * \
-                    self.kwargs.get("warmup_epochs", int(
-                        (self.max_epochs/100)*5))  # Default: 5% of max epochs
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * \
-                    self.max_epochs - self.warmup_steps
-                self.warmup_scheduler = warmup.LinearWarmup(
-                    self.optim, self.warmup_steps)
+                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", int((self.max_epochs/100)*5))  # Default: 5% of max epochs
+                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated: lr*=1/warmup_period
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
@@ -679,8 +673,7 @@ class Trainer:
                         new_dict[f"{VALIDATION}_{k}"] = item[k]
                 kwargs[key] = new_dict
                 n_args += len(new_dict)
-        self.early_stopping_conds = EarlyStopping(
-            **kwargs) if n_args > 0 else None
+        self.early_stopping_conds = EarlyStopping(**kwargs) if n_args > 0 else None
 
         if hasattr(self.model, "irreps_out"):
             for key in self.train_on_keys:

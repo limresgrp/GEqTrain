@@ -2,8 +2,7 @@ import inspect
 from typing import Optional
 from geqtrain.nn import GraphModuleMixin
 from geqtrain.data import AtomicDataset
-from geqtrain.utils import load_callable
-from geqtrain.utils import Config
+from geqtrain.utils import load_callable, Config, add_tags_to_parameter
 from typing import List
 
 
@@ -83,14 +82,13 @@ def model_from_config(
         builders.append(load_callable(k, prefix="geqtrain.model"))
         fine_tune_params.append(v)
 
-    model_for_fine_tuning = config.get("fine_tune", False) # if present, target pth has been already validated
+    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
     fine_tune_params_provided = any(flatten_list(fine_tune_params))
     if not model_for_fine_tuning and fine_tune_params_provided:
         raise ValueError("fine_tune_params provided in model_builders but fine_tune model is not provided")
 
     if model_for_fine_tuning:
         assert fine_tune_params_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not fine_tune_params provided in model_builders"
-
 
     model = None
     weights_to_drop_from_model_state: List[str] = set() # used in case of fine-tuning
@@ -131,11 +129,14 @@ def model_from_config(
         if not ft_params: # if no fine-tuning params, then params of module must be dropped when loading model params
             weights_to_drop_from_model_state.update(params_just_added)
         else:
-            # opt1: freeze
-            if "freeze" in ft_params:
-                for n, p in model.named_parameters():
-                    if n in params_just_added:
+            for n, p in model.named_parameters():
+                if n in params_just_added:
+                    # opt1: freeze
+                    if "freeze" in ft_params:
                         p.requires_grad = False
+                    # opt2: tune with initial lr: fine_tune_lr
+                    elif "tune" in ft_params:
+                        add_tags_to_parameter(p, "tune")
 
         weights_already_loaded.update(current_model_param_names)
 
