@@ -26,7 +26,7 @@ from geqtrain.utils import (
 )
 
 from functools import partial
-from multiprocessing import Pool, Value
+from multiprocessing import Pool
 
 def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
     from geqtrain.train.utils import parse_loss_metrics_dict

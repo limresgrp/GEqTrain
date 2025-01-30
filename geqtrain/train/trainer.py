@@ -555,8 +555,11 @@ class Trainer:
         param_groups_dict = {
             'dampen':       {'lr': self.learning_rate * 1.e-1},
             'nowd':         {'weight_decay': 0.0},
-            'tune':         {'lr': self.kwargs['fine_tune_lr']},
         }
+        if 'fine_tune_lr' in self.kwargs:
+            param_groups_dict.update(
+                {'tune':{'lr': self.kwargs['fine_tune_lr']}}
+            )
 
         def merge_groups(param, param_groups):
             # overrides default dict for optim
@@ -1262,7 +1265,6 @@ class Trainer:
                     callback(self)
 
         self.iepoch += 1
-
         self.end_of_epoch_log()
 
         # if the iepoch for the past epoch was -1, it will now be 0
