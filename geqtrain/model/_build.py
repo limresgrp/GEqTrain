@@ -90,9 +90,13 @@ def model_from_config(
     if model_for_fine_tuning:
         assert fine_tune_params_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not fine_tune_params provided in model_builders"
 
-    model = None
-    weights_to_drop_from_model_state: List[str] = set() # used in case of fine-tuning
+    if 'progress' in config and model_for_fine_tuning:
+        raise ValueError("cannot restart and fine-tune at the same time, if you want to fine-tune, do a fresh start")
+
+    weights_to_drop_from_model_state: set[str] = set() # used in case of fine-tuning
     weights_already_loaded = set()
+
+    model = None
     for builder, ft_params in zip(builders, fine_tune_params):
         pnames = inspect.signature(builder).parameters # get kwargs of factory method signature
         params = {}
@@ -123,8 +127,10 @@ def model_from_config(
                 raise RuntimeError(f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't")
 
         model = builder(**params)
-        current_model_param_names = set(k for k, _ in model.named_parameters())
+        if 'progress' in config:
+            continue
 
+        current_model_param_names = set(k for k, _ in model.named_parameters())
         params_just_added = current_model_param_names - weights_already_loaded
         if not ft_params: # if no fine-tuning params, then params of module must be dropped when loading model params
             weights_to_drop_from_model_state.update(params_just_added)

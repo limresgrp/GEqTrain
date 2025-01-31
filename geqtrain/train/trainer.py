@@ -9,7 +9,7 @@ from os.path import isfile
 from time import perf_counter
 from typing import Callable, Optional, Union, Tuple, List, Dict
 from pathlib import Path
-
+import torch.distributed as dist
 import numpy as np
 import torch
 
@@ -947,7 +947,7 @@ class Trainer:
         model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
         # drop weights that must be initialized from scratch (if any)
         model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
-        model.load_state_dict(model_state_dict, strict=False)
+        model.load_state_dict(model_state_dict, strict= not ('fine_tune' in config))
         return model, config
 
     def init_dataset(self, config, train_dset, val_dset):
@@ -1024,6 +1024,8 @@ class Trainer:
         # actual train loop
         while not self.stop_cond:
             self.epoch_step()
+            if hasattr(self, 'world_size'):
+                dist.barrier()
             self.end_of_epoch_save()
 
         for callback in self._final_callbacks:
