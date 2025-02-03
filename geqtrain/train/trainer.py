@@ -947,7 +947,8 @@ class Trainer:
         model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
         # drop weights that must be initialized from scratch (if any)
         model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
-        model.load_state_dict(model_state_dict, strict= not ('fine_tune' in config))
+        out = model.load_state_dict(model_state_dict, strict = not ('fine_tune' in config))
+        print(f"Model loading message: {out}")
         return model, config
 
     def init_dataset(self, config, train_dset, val_dset):

@@ -183,7 +183,9 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         # compare old_config to config and update stop condition related arguments
 
         modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
-                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]
+                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
+                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers",
+                         ]
 
         for k,v in config.items():
             if v != old_config.get(k, ""):
