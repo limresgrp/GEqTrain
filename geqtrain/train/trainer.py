@@ -12,7 +12,7 @@ from pathlib import Path
 import torch.distributed as dist
 import numpy as np
 import torch
-
+import re
 from torch.utils.data import DistributedSampler, Sampler
 
 from geqtrain.data import (
@@ -354,8 +354,7 @@ class Trainer:
     """
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
-    object_keys = ["lr_sched", "optim",
-                   "early_stopping_conds", "warmup_scheduler"]
+    object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
     lr_scheduler_module = torch.optim.lr_scheduler
     optim_module = torch.optim
 
@@ -416,21 +415,28 @@ class Trainer:
         hooks: Dict = {},
         use_grokfast: bool = False,
         debug: bool = False,
-        use_warmup: bool = False,
+        warmup_epochs: int | str = -1,
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
-        self._initialized = False
         self.cumulative_wall = 0
         self.best_model_saved_at_epoch = -1
         self.model = None
         logging.debug("* Initialize Trainer")
 
-        # --- write all self.init_keys in self AND in _local_kwargs
+        # --- write all self.init_keys in self AND in _local_kwargs, init_keys are all kwargs of ctor
         _local_kwargs = {}
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
+
+        # --- parse warmup period from yaml
+        if not isinstance(self.warmup_epochs, int):
+            match = re.match(r'^(\d+(?:\.\d+)?)%$', self.warmup_epochs.strip())
+            if match:
+                self.warmup_epochs = int((self.max_epochs/100)*float(match.group(1)))
+            else:
+                raise ValueError(f"Invalid {match.string} format provided, it must be eg: '7.1%' in yaml, with ''")
 
         # --- get I/O handler
         output = Output.get_output(dict(**_local_kwargs, **kwargs))
@@ -636,12 +642,12 @@ class Trainer:
                 steps_per_epoch = self._get_num_of_steps_per_epoch()
                 self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
 
-            if self.use_warmup:
+            if self.warmup_epochs > 0:
                 import pytorch_warmup as warmup
                 steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.warmup_steps = steps_per_epoch * self.kwargs.get("warmup_epochs", int((self.max_epochs/100)*5))  # Default: 5% of max epochs
+                self.warmup_steps = steps_per_epoch * self.warmup_epochs
                 self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
-                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated: lr*=1/warmup_period
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated inplace now: lr*=1/warmup_period
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
@@ -764,9 +770,7 @@ class Trainer:
             dictionary["state_dict"]["rng_state"] = torch.get_rng_state()
             dictionary["state_dict"]["dataset_rng_state"] = self.dataset_rng.get_state()
             if torch.cuda.is_available():
-                dictionary["state_dict"]["cuda_rng_state"] = torch.cuda.get_rng_state(
-                    device=self.torch_device
-                )
+                dictionary["state_dict"]["cuda_rng_state"] = torch.cuda.get_rng_state(device=self.torch_device)
             dictionary["state_dict"]["cumulative_wall"] = self.cumulative_wall
             dictionary["state_dict"]["best_model_saved_at_epoch"] = self.best_model_saved_at_epoch
 
@@ -774,11 +778,8 @@ class Trainer:
             dictionary["progress"] = {}
             for key in ["iepoch", "best_epoch"]:
                 dictionary["progress"][key] = self.__dict__.get(key, -1)
-            dictionary["progress"]["best_metrics"] = self.__dict__.get(
-                "best_metrics", float("inf")
-            )
-            dictionary["progress"]["stop_arg"] = self.__dict__.get(
-                "stop_arg", None)
+            dictionary["progress"]["best_metrics"] = self.__dict__.get("best_metrics", float("inf"))
+            dictionary["progress"]["stop_arg"] = self.__dict__.get("stop_arg", None)
 
             # TODO: these might not both be available, str defined, but no weights
             dictionary["progress"]["best_model_path"] = self.best_model_path
@@ -842,12 +843,55 @@ class Trainer:
         """
 
         dictionary = load_file(
-            supported_formats=dict(torch=["pth", "pt"], yaml=[
-                                   "yaml"], json=["json"]),
+            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
             filename=filename,
             enforced_format=format,
         )
         return cls.from_dict(dictionary, append)
+
+
+    def load_state_dicts_for_restart(self, dictionary):
+        # ! progress implies that we are resuming training from last_model_path
+        assert "progress" in dictionary, "key: 'progress' not present in dictionary, are you running a restart?"
+        assert "state_dict" in dictionary, "key: 'state_dict' not present in dictionary, are you running a restart?"
+        assert self.optim, "trying to reload state for restart; optimizer must be already instanciated"
+
+        if 'lr_scheduler_name' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+        if 'early_stopping_lower_bounds' in dictionary or 'early_stopping_patiences' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+        if 'warmup_epochs' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+
+        dictionary = deepcopy(dictionary)
+        progress = dictionary["progress"]
+
+        state_dict = dictionary.pop("state_dict") # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
+        dictionary.pop("progress")
+
+        logging.info("Reload optimizer and scheduler states")
+        for key in self.__class__.object_keys:
+            item = getattr(self, key, None)
+            if item is not None:
+                item.load_state_dict(state_dict[key])
+                logging.info(f"{key} state reloaded!")
+            else:
+                logging.info(f"{key} state NOT found cannot reload it")
+
+        self.cumulative_wall = state_dict["cumulative_wall"]
+
+        torch.set_rng_state(state_dict["rng_state"])
+        self.dataset_rng.set_state(state_dict["dataset_rng_state"])
+        if torch.cuda.is_available():
+            torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
+
+        self.iepoch = progress["iepoch"]
+        self.best_metrics = progress["best_metrics"]
+        self.best_epoch = progress["best_epoch"]
+        stop_arg = progress.pop("stop_arg", None)
+
+        if self.stop_cond:
+            raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
     @classmethod
     def from_dict(cls, dictionary, append: Optional[bool] = None):
@@ -858,10 +902,9 @@ class Trainer:
         dictionary (dict):
         append (bool): if True, append the old model files and append the same logfile
         """
-
         dictionary = deepcopy(dictionary)
 
-        # update the restart and append option
+        # update the append option
         if append is not None:
             dictionary["append"] = append
 
@@ -873,10 +916,7 @@ class Trainer:
             model_pth_path = Path(dictionary["fine_tune"])
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
         elif "progress" in dictionary:
-            # ! progress implies that we are resuming training from last_model_path
-            progress = dictionary["progress"]
-            iepoch = progress["iepoch"]
-            model_pth_path = Path(progress["last_model_path"])
+            model_pth_path = Path(dictionary["progress"]["last_model_path"])
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
 
         if "progress" in dictionary or "fine_tune" in dictionary:
@@ -897,31 +937,8 @@ class Trainer:
         trainer.iepoch = iepoch
         stop_arg = None
 
-        # then eventually load state since state_dict exists only iff progress=T
-        if "state_dict" in dictionary:
-            assert "progress" in dictionary, "progress must be in dictionary if loading a state_dict"
-            state_dict = dictionary.pop("state_dict") # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
-            dictionary.pop("progress") # ok to pop progress here, as it is not needed in trainer instanciation
-
-            logging.debug("Reload optimizer and scheduler states")
-            for key in cls.object_keys:
-                item = getattr(trainer, key, None)
-                if item is not None:
-                    item.load_state_dict(state_dict[key])
-            trainer._initialized = True
-            trainer.cumulative_wall = state_dict["cumulative_wall"]
-
-            torch.set_rng_state(state_dict["rng_state"])
-            trainer.dataset_rng.set_state(state_dict["dataset_rng_state"])
-            if torch.cuda.is_available():
-                torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
-
-            trainer.best_metrics = progress["best_metrics"]
-            trainer.best_epoch = progress["best_epoch"]
-            stop_arg = progress.pop("stop_arg", None)
-
-            if trainer.stop_cond:
-                raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
+        if trainer.stop_cond:
+            raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
         return trainer, model # care, here model CAN be None if no fine-tuning nor progress
 
@@ -966,7 +983,6 @@ class Trainer:
         self.init_objects()
         self.init_losses()
         self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
-        self._initialized = True
         self.cumulative_wall = 0
 
     def init_metrics(self):
@@ -1126,7 +1142,7 @@ class Trainer:
     def _is_warmup_period_over(self):
         # this call must be done from all processes in case of distributed training
         # when this returns true -> start normal lr_scheduler.step() call
-        if not self.use_warmup:
+        if self.warmup_epochs == -1:
             return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
@@ -1150,7 +1166,7 @@ class Trainer:
             else:
                 self._batch_lvl_lrscheduler_step()
         else: # epoch lvl
-            if not self.use_warmup:
+            if self.warmup_epochs == -1:
                 self._epoch_lvl_lrscheduler_step()
             elif self._is_warmup_period_over():  # warmup present, just need to check if _is_warmup_period_over
                 self._epoch_lvl_lrscheduler_step()
@@ -1467,7 +1483,7 @@ class Trainer:
 
     def __del__(self):
 
-        if not self._initialized:
+        if not hasattr(self, 'logger', False):
             return
 
         logger = self.logger
@@ -1653,9 +1669,6 @@ class TrainerWandB(Trainer):
 
     def init(self, **kwargs):
         super(TrainerWandB, self).init(**kwargs)
-
-        if not self._initialized:
-            return
 
         if not self.is_master:
             return

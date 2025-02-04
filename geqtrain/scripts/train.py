@@ -235,6 +235,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         trainer, model = load_trainer_and_model(rank, world_size, config, old_config=old_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
         trainer.init(model=model)
+        trainer.load_state_dicts_for_restart(old_config)
         trainer.update_kwargs(config)
 
         # Run training
