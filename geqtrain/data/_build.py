@@ -7,8 +7,7 @@ import numpy as np
 from importlib import import_module
 import logging
 from typing import Dict, List, Optional, Union
-from os import listdir
-from os.path import isdir, isfile, join
+from os.path import isdir
 
 import torch
 from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
@@ -91,7 +90,10 @@ def get_dataset_file_names(prefix, _config_dataset):
     f_name = _config_dataset.get(inpup_key)
 
     if isdir(f_name):  # can be dir
-        return [join(f_name, f) for f in listdir(f_name) if (isfile(join(f_name, f)) and not f.startswith('.'))]
+        # Efficiently pre-filter entries using os.scandir
+        with os.scandir(f_name) as entries:
+            # Filter non-hidden files using entry.is_file() and entry.name
+            return [os.path.join(f_name, entry.name) for entry in entries if entry.is_file() and not entry.name.startswith('.')]
     return [f_name]  # can be 1 file
 
 def node_types_to_keep(config):
@@ -158,6 +160,15 @@ def dataset_from_config(config,
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
         n_workers = int(min(len(dataset_file_names), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
         if n_workers>1:
+            '''
+            ! Known issue:
+            if dataset is "in-memory" and n_workers>1 we have:
+                RuntimeError: unable to mmap ... bytes from file <filename not specified>: Cannot allocate memory (...)
+
+            Solution:
+            - option 1) faster preprocessing but slower training: keep n_workers>1 but use inmemory: false
+            - option 2) slower preprocessing but faster train: keep inmemory: true (which is default behavior) but use n_workers = 1
+            '''
             # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
             chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
             with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
