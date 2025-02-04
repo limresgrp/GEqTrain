@@ -72,9 +72,9 @@ class SimpleLoss:
         **kwargs,
     ):
         ref_key = ref.get(key, None)
-        assert isinstance(ref_key, torch.Tensor)
+        assert isinstance(ref_key, torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(pred_key)}"
         pred_key = pred.get(key, None)
-        assert isinstance(pred_key, torch.Tensor)
+        assert isinstance(pred_key, torch.Tensor), f"Expected prediction tensor for pred key {key}, found {type(pred_key)}"
         pred_key = pred_key.view_as(ref_key)
 
         not_nan_filter = self._get_not_nan(pred_key, key) * self._get_not_nan(ref_key, key)
