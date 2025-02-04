@@ -157,8 +157,7 @@ def dataset_from_config(config,
         key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
         n_workers = int(min(len(dataset_file_names), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
-        use_multiprocessing = _config_dataset.get('use_multiprocessing', n_workers>1)
-        if use_multiprocessing:
+        if n_workers>1:
             # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
             chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
             with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool

@@ -184,8 +184,8 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
 
         modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
                          "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
-                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers",
-                         ]
+                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
+                        ]
 
         for k,v in config.items():
             if v != old_config.get(k, ""):
@@ -198,6 +198,18 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
                 elif k == 'filepath':
                     assert Path(config[k]).resolve() == Path(old_config[k]).resolve()
                     old_config[k] = v
+                elif k in ['dataset_list', 'validation_dataset_list']:
+                    assert isinstance(v, list), "dataset_list/validation_dataset_list must be of type list"
+                    assert isinstance(old_config[k], list), "dataset_list/validation_dataset_list must be of type list"
+                    assert len(v) == 1, "for now only 1 dataset under dataset_list/validation_dataset_list is allowed"
+                    assert len(old_config[k]), "for now only 1 dataset under dataset_list/validation_dataset_list is allowed"
+                    new_dset_and_kwargs = v[0]
+                    old_dset_and_kwargs = old_config[k][0]
+                    for dlist_k in new_dset_and_kwargs.keys():
+                        if dlist_k in modifiable_params:
+                            continue
+                        if new_dset_and_kwargs[dlist_k] != old_dset_and_kwargs[dlist_k]:
+                            raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
                 elif isinstance(v, type(old_config.get(k, ""))):
                     raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
 

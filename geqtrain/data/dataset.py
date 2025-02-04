@@ -124,7 +124,7 @@ class InMemoryConcatDataset(ConcatDataset):
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     def __getdataset__(self, dataset_idx):
         return self.datasets[dataset_idx]
 
@@ -678,7 +678,7 @@ class NpzDataset(AtomicInMemoryDataset):
         for key in mapped.keys():
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
-                    fields[key] = fields[key].astype(np.int64)
+                    fields[key] = fields[key].astype(np.int32)
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
