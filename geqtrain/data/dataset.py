@@ -81,37 +81,44 @@ def parse_attrs(
             elif key in _fixed_fields:
                 val: Optional[np.ndarray] = _fixed_fields[key]
 
-            if "embedding_dimensionality" not in options:  # this is not an attribute to parse
-                continue
-            if val is None:
-                val = np.array([np.nan])
-            num_types = int(options['num_types'])
-            can_be_undefined = options.get('can_be_undefined', False)
-            if 'min_value' in options or 'max_value' in options:
-                mask = np.isnan(val)
-                if np.any(mask) and not can_be_undefined:
-                    raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
-                val[mask] = float(options['max_value'])
-                # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
-                # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
-                # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
-                # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
-                bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
-                _input_type = np.digitize(val, bins)
-                _input_type[_input_type == num_types] -= 1
-                _input_type[_input_type > 0] -= 1
-                _input_type[mask] = num_types
-            else:
-                mask = np.isnan(val)
-                if np.any(mask) and not can_be_undefined:
-                    raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+            if options.get('attribute_type', 'categorical') == 'numerical':
                 _input_type = val
-                _input_type[mask] = num_types
-            # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
+                if options.get('standardize', True):
+                    mean = np.mean(_input_type, axis=-2, keepdims=True)
+                    std = np.std(_input_type, axis=-2, keepdims=True)
+                    _input_type = (_input_type - mean) / (std + 1e-8)
+            else:
+                if "embedding_dimensionality" not in options:  # this is not an attribute to parse
+                    continue
+                if val is None:
+                    val = np.array([np.nan])
+                num_types = int(options['num_types'])
+                can_be_undefined = options.get('can_be_undefined', False)
+                if 'min_value' in options or 'max_value' in options:
+                    mask = np.isnan(val)
+                    if np.any(mask) and not can_be_undefined:
+                        raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+                    val[mask] = float(options['max_value'])
+                    # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
+                    # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
+                    # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
+                    # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
+                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
+                    _input_type = np.digitize(val, bins)
+                    _input_type[_input_type == num_types] -= 1
+                    _input_type[_input_type > 0] -= 1
+                    _input_type[mask] = num_types
+                else:
+                    mask = np.isnan(val)
+                    if np.any(mask) and not can_be_undefined:
+                        raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+                    _input_type = val
+                    _input_type[mask] = num_types
+                    # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
             if key in _fields:
-                _fields[key] = torch.from_numpy(_input_type).long()
+                _fields[key] = torch.from_numpy(_input_type)
             elif key in _fixed_fields:
-                _fixed_fields[key] = torch.from_numpy(_input_type).long()
+                _fixed_fields[key] = torch.from_numpy(_input_type)
 
     return _fields, _fixed_fields
 
