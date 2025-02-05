@@ -1483,7 +1483,7 @@ class Trainer:
 
     def __del__(self):
 
-        if not hasattr(self, 'logger', False):
+        if not hasattr(self, 'logger'):
             return
 
         logger = self.logger

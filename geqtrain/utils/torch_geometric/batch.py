@@ -146,7 +146,11 @@ class Batch(Data):
             cat_dim = ref_data.__cat_dim__(key, item)
             cat_dim = 0 if cat_dim is None else cat_dim
             if isinstance(item, Tensor):
-                batch[key] = torch.cat(items, cat_dim)
+                try:
+                    batch[key] = torch.cat(items, cat_dim)
+                except:
+                    items = [tensor.unsqueeze(-1) if tensor.ndim == 1 else tensor for tensor in items]
+                    batch[key] = torch.cat(items, cat_dim)
             elif isinstance(item, (int, float)):
                 batch[key] = torch.tensor(items)
 
