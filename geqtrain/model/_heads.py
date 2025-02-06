@@ -42,6 +42,7 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
                     out_field=out_field,
                     out_irreps=out_irreps,
                     strict_irreps=False,
+                    ignore_amp=True,
                 ),
             ),
         })
