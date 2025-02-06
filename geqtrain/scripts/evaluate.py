@@ -329,22 +329,27 @@ def main(args=None, running_as_script: bool = True):
         def format_csv(data, ref_data, batch_index, chunk_index, dataset_raw_file_name):
             try:
                 # Extract fields from data
+                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+                if node_output is None:
+                    return ''
+                if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
-                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+                num_node_centers = len(node_centers)
+                if len(atom_number) > num_node_centers: atom_number = atom_number[node_centers]
+                if len(node_output) > num_node_centers: node_output = node_output[node_centers]
+                if ref_node_output is not None and len(ref_node_output) > num_node_centers: ref_node_output = ref_node_output[node_centers]
 
                 # Initialize lines list for CSV format
                 lines = []
                 if pbar.n == 0:
                     lines.append("batch,chunk,atom_number,node_type,pred,ref,dataset_raw_file_name")
-
-                if node_output is not None:
-                    if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
-                    for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
-                        _ref_node_output = ref_node_output[node_centers[idx]].item() if ref_node_output is not None else 0
-                        lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")
+    
+                for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
+                    _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
+                    lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")
             except:
                 return ''
             # Join all lines into a single string for XYZ format
