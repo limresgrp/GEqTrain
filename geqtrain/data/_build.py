@@ -162,7 +162,7 @@ def dataset_from_config(config,
         if n_workers>1:
             '''
             ! Known issue:
-            if dataset is "in-memory" and n_workers>1 we have:
+            if dataset is "in-memory" and n_workers>1 we have AND number of npz >=5000 (approximately):
                 RuntimeError: unable to mmap ... bytes from file <filename not specified>: Cannot allocate memory (...)
 
             Solution:
