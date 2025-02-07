@@ -80,7 +80,7 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
             for _ in shapes
         ]
     # if not scalar then we are handling a batched multi-dim-tensor (e.g. node lvl predictions or graph lvl predictions)
-    elif tensor.dim()>=2:
+    else:
         outputs = [
             torch.empty(*_shape, dtype=tensor.dtype, device=tensor.device)
             for _shape in shapes
@@ -89,7 +89,7 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
     dist.all_to_all(outputs, inputs, group=group)
 
     # to gather metrics: create a single tensor with the cat the atoms from the batches of the different processes
-    if outputs[0].dim()>=2:
+    if not tensor.dim() == 0:
         outputs = torch.cat(outputs, dim=0)
         assert sum(s[0] for s in shapes).item() == outputs.shape[0]
         return outputs
