@@ -31,8 +31,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         2) str castable to o3.Irreps obj (eg: 1x0e)
         3) a irreps_in key (and get its o3.Irreps)
         4) same irreps of out_field (if out_field in GraphModuleMixin.irreps_in dict)
-        5) if none of the above: outs irreps of same size of field
         if out_irreps=None is passed, then option 4 is triggered is valid, else 5)
+        5) if none of the above: outs irreps of same size of field
         if out_irreps is not provided it takes out_irreps from yaml
     '''
 

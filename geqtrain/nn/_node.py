@@ -43,14 +43,15 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
 
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        out = []
-        for attribute_name, emb_layer in self.attr_modules.items():
-            x = data[attribute_name].squeeze()
-            x = emb_layer(x)
-            out.append(x)
+        with torch.cuda.amp.autocast(enabled=False): # choice: embeddings are always kept to high precision
+            out = []
+            for attribute_name, emb_layer in self.attr_modules.items():
+                x = data[attribute_name].squeeze()
+                x = emb_layer(x)
+                out.append(x)
 
-        data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1)
-        return data
+            data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1)
+            return data
 
 
 @compile_mode("script")

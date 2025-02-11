@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import re
 from torch.utils.data import DistributedSampler, Sampler
-
+import math
 from geqtrain.data import (
     DataLoader,
     AtomicData,
@@ -44,7 +44,7 @@ from geqtrain.model import model_from_config
 from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
 from geqtrain.train import (
     sync_tensor_across_GPUs,
-    sync_dic_of_tensors_across_GPUs,
+    sync_dict_of_tensors_across_GPUs,
 )
 
 from .loss import Loss, LossStat
@@ -416,6 +416,7 @@ class Trainer:
         use_grokfast: bool = False,
         debug: bool = False,
         warmup_epochs: int | str = -1,
+        head_wds: float = 0.01,
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
@@ -561,6 +562,7 @@ class Trainer:
         param_groups_dict = {
             'dampen':       {'lr': self.learning_rate * 1.e-1},
             'nowd':         {'weight_decay': 0.0},
+            "_wd":          {'weight_decay': self.head_wds},
         }
         if 'fine_tune_lr' in self.kwargs:
             param_groups_dict.update(
@@ -1684,6 +1686,10 @@ class TrainerWandB(Trainer):
 
     def end_of_epoch_log(self):
         Trainer.end_of_epoch_log(self)
+        if 'validation_loss' in self.mae_dict:
+            self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+        if 'training_loss' in self.mae_dict:
+            self.mae_dict.update({'training_log_loss': math.log(self.mae_dict['training_loss'])})
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
             for norm in v:
@@ -1734,8 +1740,8 @@ class DistributedTrainer(Trainer):
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
         # collect targets/predictions from different processes for current batch/key, preds/targets can be of different shapes across processes (e.g. if atom-wise, whereas in mol-wise they SHOULD be the same as batch size)
         _keys = set(self.metrics.clean_keys)
-        sync_dic_of_tensors_across_GPUs(out, self.world_size, _keys)
-        sync_dic_of_tensors_across_GPUs(ref_data, self.world_size, _keys)
+        sync_dict_of_tensors_across_GPUs(out, self.world_size, _keys)
+        sync_dict_of_tensors_across_GPUs(ref_data, self.world_size, _keys)
 
         if not self.is_master:
             return
@@ -1750,7 +1756,7 @@ class DistributedTrainer(Trainer):
         if not validation:
             assert optim_step_executed
 
-        sync_dic_of_tensors_across_GPUs(loss_contrib, self.world_size)
+        sync_dict_of_tensors_across_GPUs(loss_contrib, self.world_size)
         syncd_loss = sync_tensor_across_GPUs(loss, self.world_size)
         if self.is_master:
             self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
