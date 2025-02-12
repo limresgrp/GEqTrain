@@ -32,9 +32,9 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
             n_types = values.get('actual_num_types', num_types)
             embedding_dim = values['embedding_dimensionality']
             emb_module = torch.nn.Embedding(n_types, embedding_dim)
-            torch.nn.init.normal_(emb_module.weight, mean=0, std=1) # std 1 or math.isqrt(embedding_dim), 1 could be better
+            torch.nn.init.normal_(emb_module.weight, mean=0, std=0.3333*math.isqrt(embedding_dim)) # std 1 or math.isqrt(embedding_dim), 1 could be better
 
-            attr_modules[field] = emb_module
+            attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # smooth embedding
             output_embedding_dim += embedding_dim
 
         self.attr_modules = attr_modules
