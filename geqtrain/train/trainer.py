@@ -416,7 +416,7 @@ class Trainer:
         use_grokfast: bool = False,
         debug: bool = False,
         warmup_epochs: int | str = -1,
-        head_wds: float = 0.01,
+        head_wds: float = 0.0,
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
@@ -1154,7 +1154,7 @@ class Trainer:
         self.batch_metrics = self.metrics(pred=out, ref=ref_data)
 
     @torch.no_grad()
-    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
+    def _accumulate_losses(self, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
         '''
         during trainining it must be called after backward+optim
         '''
@@ -1174,7 +1174,6 @@ class Trainer:
                 self._epoch_lvl_lrscheduler_step()
 
     def batch_step(self, data, validation:bool=False) -> bool:
-        optim_step_executed = False
         if validation:
             self.model.eval() # this could be done at lvl above
         else:
@@ -1205,18 +1204,21 @@ class Trainer:
 
             if not validation:
                 loss.backward()
-                if self.use_grokfast:
-                    self.grads = gradfilter_ema(self.model, grads=self.grads)
+
+                # if self.use_grokfast:
+                #     self.grads = gradfilter_ema(self.model, grads=self.grads)
+
                 # grad clipping: avoid "shocks" to the model (params) during optimization;
                 # returns norms; their expected trend is from high to low and stabilize
                 self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
-                if self.debug:
-                    self._log_updates()
+
+                # if self.debug:
+                #     self._log_updates()
+
                 self.optim.step()
-                optim_step_executed = True
                 self.lr_sched_step(batch_lvl=True)
 
-            self._accumulate_losses(validation, optim_step_executed, loss, loss_contrib)
+            self._accumulate_losses(loss, loss_contrib)
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1749,13 +1751,7 @@ class DistributedTrainer(Trainer):
         super()._update_metrics(out, ref_data)
 
     @torch.no_grad()
-    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
-        '''
-        during trainining it must be called after backward+optim
-        '''
-        if not validation:
-            assert optim_step_executed
-
+    def _accumulate_losses(self, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
         sync_dict_of_tensors_across_GPUs(loss_contrib, self.world_size)
         syncd_loss = sync_tensor_across_GPUs(loss, self.world_size)
         if self.is_master:
