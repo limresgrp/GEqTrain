@@ -185,7 +185,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
                          "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
                          "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
-                         "report_init_validation", "metrics_key",
+                         "report_init_validation", "metrics_key", "max_gradient_norm",
                         ]
 
         for k,v in config.items():

@@ -72,6 +72,7 @@ def set_seed(seed):
 def get_output_keys(loss_func: Loss):
     '''
     returns fields/keys that have to be predicted (i.e. for which we need to compute a loss)
+    can take as input a metrics object (for an example see evaluate.py)
     '''
     output_keys, per_node_outputs_keys = [], []
     if loss_func is not None:
@@ -417,11 +418,12 @@ class Trainer:
         debug: bool = False,
         warmup_epochs: int | str = -1,
         head_wds: float = 0.0,
+        accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
+        metric_criteria:str='decreasing', # or 'increasing'
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self.cumulative_wall = 0
-        self.best_model_saved_at_epoch = -1
         self.model = None
         logging.debug("* Initialize Trainer")
 
@@ -500,7 +502,7 @@ class Trainer:
         # --- initialize training states
         self.output_keys = None
         self.per_node_outputs_keys = None
-        self.best_metrics = float("inf")
+        self.best_metrics = float("inf") if metric_criteria == 'decreasing' else float('-inf')
         self.best_epoch = 0
         self.iepoch = -1 if self.report_init_validation else 0
 
@@ -539,6 +541,13 @@ class Trainer:
 
         if hasattr(self, 'rank'):
             assert self.device == self.rank
+
+        '''Gradient Accumulation: simulate larger BS when hardware memory is insufficient to process large batches.
+        Instead of updating the model parameters after every batch, gradients are accumulated over multiple batches, and the model parameters are updated only after a specified number of steps.
+        accumulation_steps: number of steps over which to accumulate gradients.
+        Accumulation: In the batch_step method, gradients are accumulated over multiple batches. The optimizer's zero_grad method is called only at the start of the accumulation cycle.
+        Optimization Step: After the specified number of accumulation steps, the gradients are used to update the model parameters, and the accumulation counter is reset.'''
+        self.accumulation_counter = 0  # Counter for gradient accumulation
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
@@ -774,7 +783,6 @@ class Trainer:
             if torch.cuda.is_available():
                 dictionary["state_dict"]["cuda_rng_state"] = torch.cuda.get_rng_state(device=self.torch_device)
             dictionary["state_dict"]["cumulative_wall"] = self.cumulative_wall
-            dictionary["state_dict"]["best_model_saved_at_epoch"] = self.best_model_saved_at_epoch
 
         if training_progress:
             dictionary["progress"] = {}
@@ -934,7 +942,6 @@ class Trainer:
         trainer = cls(**dictionary)
         logging.info("Trainer successfully loaded!")
 
-        trainer.best_metrics = float("inf")
         trainer.best_epoch = 0
         trainer.iepoch = iepoch
         stop_arg = None
@@ -950,16 +957,21 @@ class Trainer:
         model_name="best_model.pth",
         device="cpu",
         config_dictionary: Optional[dict] = None,
+        for_inference: bool = False,
     ) -> Tuple[torch.nn.Module, Config]:
         traindir = str(traindir)
         model_name = str(model_name)
 
-        config_dictionary = config_dictionary or (traindir + "/config.yaml")
+        if config_dictionary is None:
+            config_path = traindir + "/config.yaml"
+            config_dictionary = Config.from_file(config_path).as_dict()
+
         config = Config.from_dict(config_dictionary)
 
         model, weights_to_train_from_scratch = model_from_config(
             config=config,
             initialize=False,
+            deploy=for_inference,
         ) # raises if returned model is None
 
         model.to(device=torch.device(device), dtype=torch.float32)
@@ -1042,6 +1054,7 @@ class Trainer:
 
         # actual train loop
         while not self.stop_cond:
+            self.accumulation_counter = 0  # Reset accumulation counter at the start of each epoch
             self.epoch_step()
             if hasattr(self, 'world_size'):
                 dist.barrier()
@@ -1173,14 +1186,7 @@ class Trainer:
             elif self._is_warmup_period_over():  # warmup present, just need to check if _is_warmup_period_over
                 self._epoch_lvl_lrscheduler_step()
 
-    def batch_step(self, data, validation:bool=False) -> bool:
-        if validation:
-            self.model.eval() # this could be done at lvl above
-        else:
-            self.optim.zero_grad(set_to_none=True)
-            self.model.train() # this could be done at lvl above
-
-        cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
+    def batch_step(self, data, ctx_mngr, validation:bool=False) -> bool:
         already_computed_nodes = None
         while True:
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
@@ -1190,7 +1196,7 @@ class Trainer:
                 already_computed_nodes=already_computed_nodes,
                 output_keys=self.output_keys,
                 per_node_outputs_keys=self.per_node_outputs_keys,
-                cm=cm,
+                cm=ctx_mngr,
                 mixed_precision=self.mixed_precision,
                 skip_chunking=self.skip_chunking,
                 noise=self.noise,
@@ -1199,24 +1205,30 @@ class Trainer:
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
+
+            # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
+            # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
+            # thus division is required since self.loss.__call__ has mean=T by default
+            loss = loss / self.accumulation_steps # average of averages
+
             self._update_metrics(out, ref_data)
             del ref_data
 
             if not validation:
                 loss.backward()
+                self.accumulation_counter += 1
 
-                # if self.use_grokfast:
-                #     self.grads = gradfilter_ema(self.model, grads=self.grads)
+                # if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
+                # if self.debug: self._log_updates()
 
-                # grad clipping: avoid "shocks" to the model (params) during optimization;
-                # returns norms; their expected trend is from high to low and stabilize
-                self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
-
-                # if self.debug:
-                #     self._log_updates()
-
-                self.optim.step()
-                self.lr_sched_step(batch_lvl=True)
+                if self.accumulation_counter == self.accumulation_steps:
+                    # grad clipping: avoid "shocks" to the model (params) during optimization;
+                    # returns norms; their expected trend is from high to low and stabilize
+                    self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+                    self.optim.step()
+                    self.optim.zero_grad(set_to_none=True)
+                    self.lr_sched_step(batch_lvl=True)
+                    self.accumulation_counter = 0
 
             self._accumulate_losses(loss, loss_contrib)
 
@@ -1258,7 +1270,6 @@ class Trainer:
     def epoch_step(self):
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
-        # get the right dataloaders for the catagories we actually run
         dataloaders = [dataloaders[c] for c in categories]
         self.metrics_dict = {}
         self.loss_dict = {}
@@ -1268,12 +1279,19 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dloader)
 
+            if category == VALIDATION:
+                self.model.eval()
+            else:
+                self.model.train()
+                self.optim.zero_grad(set_to_none=True)
+
             if category == TRAIN and isinstance(self.dl_train.sampler, DistributedSampler):
                 # https://cerfacs.fr/coop/pytorch-multi-gpu#distributed-data-parallelism-ddp:~:text=train_sampler.set_epoch(epoch)
                 self.dl_train.sampler.set_epoch(self.iepoch)
 
+            cm = contextlib.nullcontext() if (self.model_requires_grads or not category == VALIDATION) else torch.no_grad()
             for self.ibatch, batch in enumerate(dloader):
-                success = self.batch_step(data=batch, validation=(category == VALIDATION))
+                success = self.batch_step(data=batch, ctx_mngr=cm, validation=(category == VALIDATION))
 
                 if success:
                     self.end_of_batch_log(batch_type=category)
@@ -1362,11 +1380,12 @@ class Trainer:
             if not current_metrics:
                 return
 
-            if current_metrics < self.best_metrics:
+            # evaluation criteria of what is 'best'
+            is_improved = current_metrics < self.best_metrics if self.metric_criteria == 'decreasing' else current_metrics > self.best_metrics
+            if is_improved:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
 
-                self.best_model_saved_at_epoch = self.iepoch
                 self.save_model(self.best_model_path, blocking=False)
 
                 self.logger.info(f"! Best model saved {self.best_epoch:8d} {self.best_metrics:8.3f}")
