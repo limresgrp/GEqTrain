@@ -552,9 +552,7 @@ class Trainer:
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
-            l = len(self.dl_train)
-            b = self.batch_size
-            return l // b + int(l % b > 0)
+            return len(self.dl_train)
         raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
@@ -1178,8 +1176,8 @@ class Trainer:
     def lr_sched_step(self, batch_lvl:bool) -> None:
         if batch_lvl:
             if not self._is_warmup_period_over():
-                    with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
-                        pass
+                with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
+                    pass
             else:
                 self._batch_lvl_lrscheduler_step()
         else: # epoch lvl
@@ -1665,8 +1663,9 @@ class Trainer:
             timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
         )
-        use_ensemble = config.get("dataset_mode", "single")
-        assert use_ensemble in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {use_ensemble}"
+        dataset_mode = config.get("dataset_mode", "single")
+        assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
+        use_ensemble = dataset_mode == 'ensemble'
         if use_ensemble:
             if batch_sampler is None:
                 batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)

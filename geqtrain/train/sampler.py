@@ -28,6 +28,7 @@ class EnsembleSampler(Sampler):
         
         # Group indices by ensemble (each molecule)
         self.ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
+        self.n_obs = self.dataset.n_observations.sum()
 
     def __iter__(self):
         """
@@ -46,7 +47,8 @@ class EnsembleSampler(Sampler):
             yield batch
 
     def __len__(self):
-        return len(self.ensemble_indices)
+        # Return the number of batches
+        return (self.n_obs + self.batch_size - 1) // self.batch_size
 
 
 
