@@ -41,7 +41,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
                 embedding_dim = values['embedding_dimensionality']
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
                 # torch.nn.init.xavier_uniform_(emb_module.weight) # with option 3 below?
-                torch.nn.init.normal_(emb_module.weight, mean=0, std=1,0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
+                torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
                 categorical_attr_modules[field] = emb_module
 
             if stable_embedding:
