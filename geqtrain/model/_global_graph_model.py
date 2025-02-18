@@ -83,6 +83,7 @@ def buildGlobalGraphModelLayers(config:Config):
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+            # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
     })
 

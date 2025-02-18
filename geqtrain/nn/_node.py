@@ -21,6 +21,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         node_attributes: Dict[str, Dict] = {},
         num_types: Optional[int] = None,
         irreps_in=None,
+        stable_embedding:bool=False,
     ):
         super().__init__()
 
@@ -34,7 +35,10 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
             emb_module = torch.nn.Embedding(n_types, embedding_dim)
             torch.nn.init.normal_(emb_module.weight, mean=0, std=0.3333*math.isqrt(embedding_dim)) # std 1 or math.isqrt(embedding_dim), 1 could be better
 
-            attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # smooth embedding
+            attr_modules[field] = emb_module
+            if stable_embedding:
+                attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # as in: https://huggingface.co/docs/bitsandbytes/main/en/reference/nn/embeddings#bitsandbytes.nn.StableEmbedding
+
             output_embedding_dim += embedding_dim
 
         self.attr_modules = attr_modules
