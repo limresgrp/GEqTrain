@@ -1,9 +1,9 @@
 import inspect
 from typing import Optional
-from geqtrain.nn import GraphModuleMixin
+from torch.nn import Module
 from geqtrain.data import AtomicDataset
 from geqtrain.utils import load_callable, Config, add_tags_to_parameter
-from typing import List
+from typing import Tuple, Dict
 
 
 def parse_model_builders(config):
@@ -49,11 +49,11 @@ def flatten_list(nested_list):
 
 
 def model_from_config(
-    config:Config,
+    config: Config,
     initialize: bool = False,
     dataset: Optional[AtomicDataset] = None,
     deploy: bool = False,
-) -> GraphModuleMixin:
+) -> Tuple[Module, Dict]:
     """Build a model based on `config`.
 
     step 1: create list of ordered factory methods

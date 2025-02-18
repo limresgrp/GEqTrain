@@ -42,6 +42,7 @@ from geqtrain.utils import (
 
 from geqtrain.model import model_from_config
 from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
+from geqtrain.train.sampler import EnsembleSampler, EnsembleDistributedSampler
 from geqtrain.train import (
     sync_tensor_across_GPUs,
     sync_dict_of_tensors_across_GPUs,
@@ -551,7 +552,9 @@ class Trainer:
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
-            return len(self.dl_train)
+            l = len(self.dl_train)
+            b = self.batch_size
+            return l // b + int(l % b > 0)
         raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
@@ -963,10 +966,9 @@ class Trainer:
         model_name = str(model_name)
 
         if config_dictionary is None:
-            config_path = traindir + "/config.yaml"
-            config_dictionary = Config.from_file(config_path).as_dict()
-
-        config = Config.from_dict(config_dictionary)
+            config = Config.from_file(traindir + "/config.yaml")
+        else:
+            config = Config.from_dict(config_dictionary)
 
         model, weights_to_train_from_scratch = model_from_config(
             config=config,
@@ -1285,7 +1287,7 @@ class Trainer:
                 self.model.train()
                 self.optim.zero_grad(set_to_none=True)
 
-            if category == TRAIN and isinstance(self.dl_train.sampler, DistributedSampler):
+            if category == TRAIN and isinstance(self.dl_train.sampler, (DistributedSampler, EnsembleDistributedSampler)):
                 # https://cerfacs.fr/coop/pytorch-multi-gpu#distributed-data-parallelism-ddp:~:text=train_sampler.set_epoch(epoch)
                 self.dl_train.sampler.set_epoch(self.iepoch)
 
@@ -1550,8 +1552,7 @@ class Trainer:
             if isinstance(dataset, InMemoryConcatDataset):
                 return InMemoryConcatDataset(indexed_dataset)
             elif isinstance(dataset, LazyLoadingConcatDataset):
-                dataset.set_lazy_dataset(indexed_dataset)
-                return dataset
+                return dataset.from_indexed_dataset(indexed_dataset)
 
         self.dataset_train = index_dataset(dataset, self.train_idcs)
         self.dataset_val   = index_dataset(validation_dataset, self.val_idcs)
@@ -1640,7 +1641,14 @@ class Trainer:
 
         return train_idcs, val_idcs
 
-    def init_dataloader(self, config, sampler: Sampler | None = None, validation_sampler: Sampler | None=None):
+    def init_dataloader(
+        self,
+        config,
+        sampler                 : Sampler | None=None,
+        validation_sampler      : Sampler | None=None,
+        batch_sampler           : Sampler | None=None,
+        batch_validation_sampler: Sampler | None=None,
+        ):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
 
@@ -1657,26 +1665,42 @@ class Trainer:
             timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
         )
-
+        use_ensemble = config.get("dataset_mode", "single")
+        assert use_ensemble in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {use_ensemble}"
+        if use_ensemble:
+            if batch_sampler is None:
+                batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
+        else:
+            dl_kwargs.update(dict(
+                batch_size=self.batch_size,
+                shuffle=(sampler is None) and self.shuffle,
+            ))
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-
+        
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
             dataset=self.dataset_train,
-            shuffle=(sampler is None) and self.shuffle,
-            batch_size=self.batch_size,
             sampler=sampler,
+            batch_sampler=batch_sampler,
             **dl_kwargs,
         )
 
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
+        if use_ensemble:
+            if batch_validation_sampler is None:
+                batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
+        else:
+            dl_kwargs.update(dict(
+                batch_size=self.validation_batch_size,
+                shuffle=False,
+            ))
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,
-            batch_size=self.validation_batch_size,
             sampler=validation_sampler,
+            batch_sampler=batch_validation_sampler,
             **dl_kwargs,
         )
 
@@ -1732,22 +1756,39 @@ class DistributedTrainer(Trainer):
         torch.cuda.set_device(self.rank)
         super(DistributedTrainer, self).init(**kwargs)
 
-    def init_dataloader(self, config, sampler=None, validation_sampler=None):
-        sampler = DistributedSampler(
+    def init_dataloader(
+        self,
+        config,
+        sampler                 : Sampler | None=None,
+        validation_sampler      : Sampler | None=None,
+        batch_sampler           : Sampler | None=None,
+        batch_validation_sampler: Sampler | None=None,
+    ):
+        use_ensemble = config.get("dataset_mode", "single")
+        assert use_ensemble in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {use_ensemble}"
+        if use_ensemble:
+            sampler_class = EnsembleDistributedSampler
+            kwargs_keys = ['batch_sampler', 'batch_validation_sampler']
+        else:
+            sampler_class = DistributedSampler
+            kwargs_keys = ['sampler', 'validation_sampler']
+
+        _sampler = sampler_class(
             self.dataset_train,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
-        validation_sampler = DistributedSampler(
+        _validation_sampler = sampler_class(
             self.dataset_val,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
-        super().init_dataloader(config=config, sampler=sampler, validation_sampler=validation_sampler)
+        kwargs = {k: v for k, v in zip(kwargs_keys, [_sampler, _validation_sampler])}
+        super().init_dataloader(config=config, **kwargs)
 
     def set_model(self, model):
         super().set_model(model)

@@ -84,17 +84,23 @@ def update_config(config, _config_dataset, prefix):
     )
     return _config
 
-def get_dataset_file_names(prefix, _config_dataset):
+def get_dataset_file_names_and_ensemble_indices(prefix, _config_dataset):
     inpup_key = f"{prefix}_input"  # get input path
     assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
     f_name = _config_dataset.get(inpup_key)
+    ensemble_idx = 0
 
     if isdir(f_name):  # can be dir
+        out = []
         # Efficiently pre-filter entries using os.scandir
         with os.scandir(f_name) as entries:
             # Filter non-hidden files using entry.is_file() and entry.name
-            return [os.path.join(f_name, entry.name) for entry in entries if entry.is_file() and not entry.name.startswith('.')]
-    return [f_name]  # can be 1 file
+            for entry in entries:
+                if entry.is_file() and not entry.name.startswith('.'):
+                    out.append((ensemble_idx, os.path.join(f_name, entry.name)))
+                    ensemble_idx += 1
+            return out
+    return [(ensemble_idx, f_name)]  # can be 1 file
 
 def node_types_to_keep(config):
     # --- filter node target to train on based on node type or type name
@@ -147,9 +153,9 @@ def dataset_from_config(config,
         if config_dataset_type is None:
             raise KeyError(f"Dataset with prefix `{prefix}` isn't present in this config!")
 
-        class_name         = get_class_name(config_dataset_type)
-        config             = update_config(config, _config_dataset, prefix)
-        dataset_file_names = get_dataset_file_names(prefix, _config_dataset)
+        class_name                              = get_class_name(config_dataset_type)
+        config                                  = update_config(config, _config_dataset, prefix)
+        dataset_file_names_and_ensemble_indices = get_dataset_file_names_and_ensemble_indices(prefix, _config_dataset)
 
         # default behavior: in-memory loading
         inmemory = _config_dataset.get('inmemory', True)
@@ -158,7 +164,7 @@ def dataset_from_config(config,
         # --- multiprocessing handling of npz reading
         key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
-        n_workers = int(min(len(dataset_file_names), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
+        n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
         if n_workers>1:
             '''
             ! Known issue:
@@ -170,11 +176,11 @@ def dataset_from_config(config,
             - option 2) slower preprocessing but faster train: keep inmemory: true (which is default behavior) but use n_workers = 1
             '''
             # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-            chunksize = int(max(len(dataset_file_names) // (n_workers if inmemory else n_workers * .25), 1))
+            chunksize = int(max(len(dataset_file_names_and_ensemble_indices) // (n_workers if inmemory else n_workers * .25), 1))
             with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-                instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names, chunksize=chunksize)
+                instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names_and_ensemble_indices, chunksize=chunksize)
         else:
-            instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names]
+            instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names_and_ensemble_indices]
 
         instances = [el for el in instances if el is not None]
         if inmemory:
@@ -182,10 +188,13 @@ def dataset_from_config(config,
         return LazyLoadingConcatDataset(class_name, prefix, config, instances)
 
 
-def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_name):
+def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_names_and_ensemble_indices):
     _config = copy.deepcopy(config) # this might not be required but kept for saefty
+    ensemble_index, dataset_file_name = dataset_file_names_and_ensemble_indices
     file_name_key = f"{prefix}_file_name"
     _config[file_name_key] = dataset_file_name
+    ensemble_index_key = f"{prefix}_ensemble_index"
+    _config[ensemble_index_key] = ensemble_index
 
     # Register fields:
     # This might reregister fields, but that's OK:
@@ -212,6 +221,7 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
     # otherwise return the non-in-mem data struct that contains all info to reinstanciate instance at runtime
     out = {
         file_name_key: dataset_file_name,
+        ensemble_index_key: ensemble_index,
         'lazy_dataset': np.arange(instance.data.num_graphs),
     }
     del instance

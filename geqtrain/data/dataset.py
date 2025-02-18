@@ -127,10 +127,15 @@ class InMemoryConcatDataset(ConcatDataset):
     def __init__(self, datasets):
         super().__init__(datasets)
         self._n_observations = np.diff(self.cumulative_sizes, prepend=0)
+        self._ensemble_indices = np.array([dataset.ensemble_index for dataset in datasets])
 
     @property
     def n_observations(self):
         return self._n_observations
+    
+    @property
+    def ensemble_indices(self):
+        return self._ensemble_indices
 
     def __getdataset__(self, dataset_idx):
         return self.datasets[dataset_idx]
@@ -143,21 +148,26 @@ class LazyLoadingConcatDataset(Dataset):
 
     def __init__(self, class_name, prefix, config, datasets_list: List[dict]):
         super().__init__()
-        self._class_name    = class_name
-        self._prefix        = prefix
-        self._config        = config
-        self._lazy_dataset  = [i.pop('lazy_dataset') for i in datasets_list]
-        self._datasets_list = datasets_list
-        self._cumsum        = None
+        self._class_name       = class_name
+        self._prefix           = prefix
+        self._config           = config
+        self._lazy_datasets    = [i.pop('lazy_dataset') for i in datasets_list]
+        self._ensemble_indices = np.array([i.get(f'{prefix}_ensemble_index') for i in datasets_list])
+        self._datasets_list    = datasets_list
+        self._cumsum           = None
 
     @property
     def _n_observations(self):
         # list of num_of_obs present in each npz
-        return np.array([len(_idcs) for _idcs in self._lazy_dataset])
+        return np.array([len(_idcs) for _idcs in self._lazy_datasets])
 
     @property
     def n_observations(self):
         return self._n_observations
+    
+    @property
+    def ensemble_indices(self):
+        return self._ensemble_indices
 
     @property
     def config(self):
@@ -169,9 +179,14 @@ class LazyLoadingConcatDataset(Dataset):
             return self._cumsum
         self._cumsum = np.cumsum(self.n_observations)
         return self._cumsum
+    
+    def from_indexed_dataset(self, indexed_dataset):
+        instance = copy.deepcopy(self)
+        instance.set_lazy_datasets(indexed_dataset)
+        return instance
 
-    def set_lazy_dataset(self, dataset):
-        self._lazy_dataset = dataset
+    def set_lazy_datasets(self, dataset):
+        self._lazy_datasets = dataset
         self._cumsum = None  # Force to recompute cumsum as indices changes
 
     def __len__(self):
@@ -179,7 +194,7 @@ class LazyLoadingConcatDataset(Dataset):
 
     @property
     def datasets(self):
-        return self._lazy_dataset
+        return self._lazy_datasets
 
     def __getitem__(self, idx):
         '''
@@ -205,12 +220,14 @@ class LazyLoadingConcatDataset(Dataset):
             sample_idx = idx
         else:
             sample_idx = idx - self.cumsum[dataset_idx - 1]
-        return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+        return instance[self._lazy_datasets[dataset_idx][sample_idx]]
 
     def __getdataset__(self, dataset_idx):
         _config = copy.deepcopy(self.config)
         file_name_key = f"{self._prefix}_file_name"
         _config[file_name_key] = self._datasets_list[dataset_idx][file_name_key]
+        ensemble_index_key = f"{self._prefix}_ensemble_index"
+        _config[ensemble_index_key] = self._datasets_list[dataset_idx][ensemble_index_key]
 
         instance, _ = instantiate(
             self._class_name, # dataset type selected for instanciation eg NpzDataset
@@ -231,15 +248,16 @@ class AtomicDataset(Dataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int = 0,
         transforms: Optional[List[str]] = None,
     ):
         '''
         transforms: list of strings that point to the callable function e.g. pkgName.moduleName.transformName
         '''
+        self.ensemble_index = ensemble_index
         super().__init__(
             root=root,
-            transform=Compose([load_callable(transf)
-                              for transf in transforms]) if transforms else None
+            transform=Compose([load_callable(transf) for transf in transforms]) if transforms else None
         )
 
     def _get_parameters(self) -> Dict[str, Any]:
@@ -318,6 +336,7 @@ class AtomicInMemoryDataset(AtomicDataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int,
         pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -369,7 +388,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # eg: ['/processed_datasets/processed_dataset_51e456f.../data.pth', '/processed_datasets/processed_dataset_51e456f.../params.yaml']
         # each mol can be loaded in ram via .pth
         # for the not-in-memory version files are written once and reloaded every time the npz is sampled via dataloader
-        super().__init__(root=root, transforms=transforms)
+        super().__init__(root=root, ensemble_index=ensemble_index, transforms=transforms)
         if self.data is None:
             self.data, self.fixed_fields, include_frames = torch.load(  # load hashed (already) processed data
                 self.processed_paths[0],
@@ -543,6 +562,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
     def get(self, idx):
         out = self.data.get_example(idx)
+        out.ensemble_index = self.ensemble_index
         # Add back fixed fields
         for f, v in self.fixed_fields.items():
             out[f] = v
@@ -589,6 +609,7 @@ class NpzDataset(AtomicInMemoryDataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int,
         pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
@@ -609,6 +630,7 @@ class NpzDataset(AtomicInMemoryDataset):
         super().__init__(
             pbc=pbc,
             file_name=file_name,
+            ensemble_index=ensemble_index,
             url=url,
             root=root,
             ignore_fields=ignore_fields,

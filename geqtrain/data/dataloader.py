@@ -19,50 +19,21 @@ class Collater(object):
         exclude_keys: keys to ignore in the input, not copying to the output
     """
 
-    def __init__(
-        self,
-        fixed_fields: List[str] = [],
-        exclude_keys: List[str] = [],
-    ):
-        self.fixed_fields = fixed_fields
+    def __init__(self, exclude_keys: List[str] = []):
         self._exclude_keys = set(exclude_keys)
-
-    @classmethod
-    def for_dataset(
-        cls,
-        dataset,
-        exclude_keys: List[str] = [],
-    ):
-        """Construct a collater appropriate to ``dataset``.
-
-        All kwargs besides ``fixed_fields`` are passed through to the constructor.
-        """
-        return cls(
-            fixed_fields=list(reduce(lambda acc, d: acc | set(getattr(d, "fixed_fields", {}).keys()), dataset.datasets, set())),
-            exclude_keys=exclude_keys,
-        )
 
     def collate(self, batch: List[Data]) -> Batch:
         """Collate a list of data"""
-        # For fixed fields, we need to batch those that are per-node or
-        # per-edge, since they need to be repeated in order to have the same
-        # number of nodes/edges as the full batch graph.
-        # For fixed fields that are per-example, however — those with __cat_dim__
-        # of None — we can just put one copy over the whole batch graph.
-        # Figure out which ones those are:
-        new_dim_fixed = set()
-        for f in self.fixed_fields:
-            if batch[0].__cat_dim__(f, None) is None:
-                new_dim_fixed.add(f)
+        # Allow to merge ensemble graphs into a batch.
+        # Groups graphs by ensemble and adds a mapping tensor for tracking.
+        batch_ensemble_index = []  # Tracks which molecule each graph belongs to        
+        for graph in batch:
+            batch_ensemble_index.append(graph.ensemble_index)
 
-        # TODO: cache ^ and the batched versions of fixed fields for various batch sizes if necessary for performance
-        out = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(new_dim_fixed))
-        for f in new_dim_fixed:
-            if f in self._exclude_keys:
-                continue
-            out[f] = batch[0][f]
+        batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(["ensemble_index"]))
+        _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
 
-        return out
+        return batch_graphs
 
     def __call__(self, batch: List[Data]) -> Batch:
         """Collate a list of data"""
@@ -89,6 +60,6 @@ class DataLoader(torch.utils.data.DataLoader):
             dataset,
             batch_size,
             shuffle,
-            collate_fn=Collater.for_dataset(dataset, exclude_keys=exclude_keys),
+            collate_fn=Collater(exclude_keys=exclude_keys),
             **kwargs,
         )
