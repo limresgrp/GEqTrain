@@ -127,12 +127,12 @@ def model_from_config(
                 raise RuntimeError(f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't")
 
         model = builder(**params)
-        if 'progress' in config:
+        if 'progress' in config or deploy:
             continue
 
         current_model_param_names = set(k for k, _ in model.named_parameters())
         params_just_added = current_model_param_names - weights_already_loaded
-        if not ft_params: # if no fine-tuning params, then params of module must be dropped when loading model params
+        if not ft_params : # if no fine-tuning params, then params of module must be dropped when loading model params; in train-from-scratch scenario all params have to be dropped from state dict
             weights_to_drop_from_model_state.update(params_just_added)
         else:
             for n, p in model.named_parameters():

@@ -1,3 +1,4 @@
+import contextlib
 from typing import Optional, Union, List
 import torch
 from e3nn import o3
@@ -30,8 +31,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         2) str castable to o3.Irreps obj (eg: 1x0e)
         3) a irreps_in key (and get its o3.Irreps)
         4) same irreps of out_field (if out_field in GraphModuleMixin.irreps_in dict)
-        5) if none of the above: outs irreps of same size of field
         if out_irreps=None is passed, then option 4 is triggered is valid, else 5)
+        5) if none of the above: outs irreps of same size of field
         if out_irreps is not provided it takes out_irreps from yaml
     '''
 
@@ -51,8 +52,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         output_ls:  Optional[List[int]]             = None,
         output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
+        ignore_amp: bool = False, # wheter to adopt amp or not
     ):
         super().__init__()
+
+        self.cm = contextlib.nullcontext()
+        if ignore_amp:
+            self.cm = torch.cuda.amp.autocast(enabled=False)
 
         # --- start definition of input/output irreps --- #
 
@@ -197,41 +203,43 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
-        # get features from input and create empty tensor to store output
-        features = data[self.field]
-        out_features = torch.zeros(
-            (features.shape[0], self.out_irreps_dim),
-            dtype=torch.float32,
-            device=features.device
-        )
+        with self.cm:
 
-        if self.act_on_nodes:
-            active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
-        else:
-            active_nodes = torch.arange(len(features), device=features.device)
+            # get features from input and create empty tensor to store output
+            features = data[self.field]
+            out_features = torch.zeros(
+                (features.shape[0], self.out_irreps_dim),
+                dtype=torch.float32,
+                device=features.device
+            )
 
-        if self.has_invariant_output: # invariant output may be present or not
-            out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
-
-        # vectorial handling
-        if self.has_equivariant_output and self.reshape_in is not None:
-            eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
-            if self.eq_has_internal_weights: # eq linear layer with its own inner weights
-                eq_features = self.eq_readout(eq_features)
+            if self.act_on_nodes:
+                active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
             else:
-                # else the weights are computed via mlp using scalars
-                weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
-                eq_features = self.eq_readout(eq_features, weights)
-            out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
+                active_nodes = torch.arange(len(features), device=features.device)
 
-        if self.resnet: # eq. 2 from https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-023-36329-y/MediaObjects/41467_2023_36329_MOESM1_ESM.pdf
-            assert self._resnet_update_coeff is not None
-            old_features = data[self.out_field]
-            _coeff = self._resnet_update_coeff.sigmoid()
-            coefficient_old = torch.rsqrt(_coeff.square() + 1)
-            coefficient_new = _coeff * coefficient_old
-            # Residual update
-            out_features = coefficient_old * old_features + coefficient_new * out_features
+            if self.has_invariant_output: # invariant output may be present or not
+                out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
 
-        data[self.out_field] = out_features
-        return data
+            # vectorial handling
+            if self.has_equivariant_output and self.reshape_in is not None:
+                eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
+                if self.eq_has_internal_weights: # eq linear layer with its own inner weights
+                    eq_features = self.eq_readout(eq_features)
+                else:
+                    # else the weights are computed via mlp using scalars
+                    weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
+                    eq_features = self.eq_readout(eq_features, weights)
+                out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
+
+            if self.resnet: # eq. 2 from https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-023-36329-y/MediaObjects/41467_2023_36329_MOESM1_ESM.pdf
+                assert self._resnet_update_coeff is not None
+                old_features = data[self.out_field]
+                _coeff = self._resnet_update_coeff.sigmoid()
+                coefficient_old = torch.rsqrt(_coeff.square() + 1)
+                coefficient_new = _coeff * coefficient_old
+                # Residual update
+                out_features = coefficient_old * old_features + coefficient_new * out_features
+
+            data[self.out_field] = out_features
+            return data

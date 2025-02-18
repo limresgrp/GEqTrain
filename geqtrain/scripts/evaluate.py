@@ -137,9 +137,7 @@ def load_model(model: Union[str, Path], device="cpu"):
         pass
 
     # load a training session model
-    model, model_config = Trainer.load_model_from_training_session(
-        traindir=model.parent, model_name=model.name, device=device
-    )
+    model, model_config = Trainer.load_model_from_training_session(traindir=model.parent, model_name=model.name, device=device, for_inference=True)
     logger.info("loaded model from training session.")
     model.eval()
 
@@ -231,8 +229,7 @@ def main(args=None, running_as_script: bool = True):
         if args.model is None:
             args.model = args.train_dir / "best_model.pth"
             trainer = torch.load(str(args.train_dir / "trainer.pth"), map_location="cpu")
-            if 'best_model_saved_at_epoch' in trainer['state_dict'].keys():
-                logger.info(f"Loading model from epoch: {trainer['state_dict']['best_model_saved_at_epoch']}")
+
 
     # Validate
     if args.test_config is None:
@@ -243,14 +240,14 @@ def main(args=None, running_as_script: bool = True):
 
     # Device
     device = torch.device(args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
     if device.type == "cuda":
         logger.warning("Please note that models running on CUDA are usually nondeterministc and that this manifests in the final test errors; for a _more_ deterministic result, please use `--device cpu`",)
+    logger.info(f"Using device: {device}")
 
     # Load model
     logger.info(f"Loading model...")
     model, config = load_model(args.model, device=args.device)
-    logger.info(f"Model loaded!\n{args.model}")
+    logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
     # Load config file
     logger.info(f"Loading config file...")
@@ -293,7 +290,7 @@ def main(args=None, running_as_script: bool = True):
     if metrics is not None:
         for loss_func in metrics.funcs.values():
             _init(loss_func, dataset, model)
-    
+
     dataloader = DataLoader(
         dataset=dataset,
         shuffle=False,
@@ -402,9 +399,23 @@ def main(args=None, running_as_script: bool = True):
     chunk_callbacks = [out_callback]
     if metrics is not None:
         chunk_callbacks.append(metrics_callback)
-    
+
     output_keys, per_node_outputs_keys = get_output_keys(metrics)
+
+    # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
+    use_accuracy = False
+    if use_accuracy:
+        from geqtrain.utils.evaluate_utils import AccuracyMetric
+        classification_metrics = AccuracyMetric(output_keys[0])
+        chunk_callbacks += [classification_metrics]
+
+    config.pop("device")
     infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
+
+    if use_accuracy:
+        for cb in chunk_callbacks:
+            if isinstance(cb, AccuracyMetric):
+                cb.print_current_result()
 
     if metrics is not None:
         logger.info("\n--- Final result: ---")
