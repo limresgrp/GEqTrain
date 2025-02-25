@@ -5,11 +5,17 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     SequentialGraphNetwork,
     ReadoutModule,
+    GVPGeqTrain,
+    WeightedTP,
+    TransformerBlock,
 )
 
 from geqtrain.utils import Config
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
+
+
+
 
 
 def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
@@ -34,18 +40,52 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
         else:
             raise Exception(f"Elements of 'heads' must be tuples of the following type ([field], out_field, out_irreps).")
 
+        # # #! transformer head
         layers.update({
             f"head_{out_field}": (
-                ReadoutModule,
+                TransformerBlock,
                 dict(
                     field=field,
                     out_field=out_field,
-                    out_irreps=out_irreps,
-                    strict_irreps=False,
-                    ignore_amp=True,
                 ),
             ),
         })
+
+        # # #! WTP heads
+        # layers.update({
+        #     f"head_{out_field}": (
+        #         WeightedTP,
+        #         dict(
+        #             field=field,
+        #             out_field=out_field,
+        #         ),
+        #     ),
+        # })
+
+        # #! GVP heads
+        # layers.update({
+        #     f"head_{out_field}": (
+        #         GVPGeqTrain,
+        #         dict(
+        #             field=field,
+        #             out_field=out_field,
+        #         ),
+        #     ),
+        # })
+
+        # # ! ReadoutModule heads
+        # layers.update({
+        #     f"head_{out_field}": (
+        #         ReadoutModule,
+        #         dict(
+        #             field=field,
+        #             out_field=out_field,
+        #             out_irreps=out_irreps,
+        #             strict_irreps=False,
+        #             ignore_amp=True,
+        #         ),
+        #     ),
+        # })
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,

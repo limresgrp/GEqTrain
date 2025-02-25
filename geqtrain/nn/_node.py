@@ -26,7 +26,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
         super().__init__()
 
         numerical_attrs = []
-        categorical_attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
+        attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
         for field, values in node_attributes.items():
 
@@ -42,15 +42,15 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
                 # torch.nn.init.xavier_uniform_(emb_module.weight) # with option 3 below?
                 torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
-                categorical_attr_modules[field] = emb_module
+                attr_modules[field] = emb_module
 
             if stable_embedding:
-                categorical_attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # as in: https://huggingface.co/docs/bitsandbytes/main/en/reference/nn/embeddings#bitsandbytes.nn.StableEmbedding
+                attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # as in: https://huggingface.co/docs/bitsandbytes/main/en/reference/nn/embeddings#bitsandbytes.nn.StableEmbedding
 
             output_embedding_dim += embedding_dim
 
         self.numerical_attrs = numerical_attrs
-        self.categorical_attr_modules = categorical_attr_modules
+        self.attr_modules = attr_modules
         irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
@@ -58,7 +58,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         with torch.cuda.amp.autocast(enabled=False): # choice: embeddings are always kept to high precision, regardless of amp
             out = []
-            for attribute_name, emb_layer in self.categorical_attr_modules.items():
+            for attribute_name, emb_layer in self.attr_modules.items():
                 x = data[attribute_name].squeeze()
                 x = emb_layer(x)
                 out.append(x)

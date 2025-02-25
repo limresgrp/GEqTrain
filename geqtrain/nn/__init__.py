@@ -15,6 +15,7 @@ from .readout import ReadoutModule
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
+from ._heads import GVPGeqTrain, WeightedTP, TransformerBlock
 
 __all__ = [
     GraphModuleMixin,
@@ -39,4 +40,7 @@ __all__ = [
     SO3_Linear,
     SO3_LayerNorm,
     select_nonlinearity,
+    GVPGeqTrain,
+    WeightedTP,
+    TransformerBlock,
 ]

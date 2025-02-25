@@ -584,7 +584,6 @@ class InteractionLayer(torch.nn.Module):
                 final_non_lin='sigmoid'
             )
 
-
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
             node_invariants[edge_center],
@@ -607,7 +606,6 @@ class InteractionLayer(torch.nn.Module):
         # updated emb_latent
         return torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
 
-
     def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers) -> torch.Tensor:
         # Asserts needed for JIT
         assert self.product is not None
@@ -618,7 +616,6 @@ class InteractionLayer(torch.nn.Module):
         )
         # updated local_env_per_active_atom
         return self.reshape_in_module(expanded_features_per_active_atom)
-
 
     def apply_residual_stream(self, latents, new_latents, this_layer_update_coeff, active_edges):
         if self.layer_index > 0:
@@ -674,13 +671,13 @@ class InteractionLayer(torch.nn.Module):
         # From the latents, compute the weights for active edges:
         weights = self.env_embed_mlp(latents)
 
-        if self.film is not None:
+        if self.film is not None: # TODO RENAME THIS WRT ITS TASK!
             weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
 
         w_index: int = 0
         if self.layer_index == 0:
             # embed initial edge
-            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
+            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
             eq_features = self.eq_features_irreps_norm(eq_features) # TODO it's better if this comes before #! THIS ACTS ON LY AT FIRST LAYER!
@@ -696,7 +693,7 @@ class InteractionLayer(torch.nn.Module):
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
         if not self.use_attention:
-            local_env_per_node = local_env_per_node * self.env_sum_normalization
+            local_env_per_node = local_env_per_node * self.env_sum_normalization # TODO: maybe using self.env_norm we can drop this!
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]

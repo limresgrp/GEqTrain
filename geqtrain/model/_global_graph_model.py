@@ -4,6 +4,7 @@ from typing import Optional
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.nn.EnsembleLayer import EnsembleAggregator, WeightedEnsembleAggregator
 from geqtrain.utils import Config
 
 from geqtrain.nn import (
@@ -27,6 +28,15 @@ def HeadlessGlobalGraphModel(
 
     """
     layers = buildGlobalGraphModelLayers(config)
+
+    # # todo extract
+    # layers.update({
+    #     "ensemble_aggregator": (EnsembleAggregator, dict(
+    #         field=AtomicDataDict.GRAPH_FEATURES_KEY,
+    #         out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+    #         aggregation_method= "max",
+    #     )),
+    # })
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,

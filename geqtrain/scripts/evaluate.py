@@ -249,6 +249,10 @@ def main(args=None, running_as_script: bool = True):
     model, config = load_model(args.model, device=args.device)
     logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
+    # import weightwatcher as ww
+    # watcher = ww.WeightWatcher(model = model)
+    # details = watcher.analyze(plot=True)
+
     # Load config file
     logger.info(f"Loading config file...")
     evaluate_config = Config.from_file(str(args.test_config), defaults={})
@@ -343,7 +347,7 @@ def main(args=None, running_as_script: bool = True):
                 lines = []
                 if pbar.n == 0:
                     lines.append("batch,chunk,atom_number,node_type,pred,ref,dataset_raw_file_name")
-    
+
                 for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
                     _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
                     lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")

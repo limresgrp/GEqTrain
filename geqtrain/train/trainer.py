@@ -420,7 +420,7 @@ class Trainer:
         warmup_epochs: int | str = -1,
         head_wds: float = 0.0,
         accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
-        metric_criteria:str='decreasing', # or 'increasing'
+        metric_criteria:str='decreasing', # or 'increasing' # TODO check that this is loaded correctly for a restart
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
@@ -1676,7 +1676,7 @@ class Trainer:
             ))
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-        
+
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
             dataset=self.dataset_train,

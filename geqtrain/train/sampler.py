@@ -14,18 +14,19 @@ def _group_by_ensemble(n_observations, ensemble_indices):
             ensemble_dict[ensemble_index] = []
         ensemble_dict[ensemble_index].extend(list(range(offset, offset + n_observations)))  # Store all conformations
         offset += n_observations
-    
+
     return list(ensemble_dict.values())
 
 class EnsembleSampler(Sampler):
     """
-    Ensures that all conformations of a molecule (from the same npz file) 
+    Ensures that all conformations of a molecule (from the same npz file)
     appear in the same batch.
+    The ensembled batch is created following the order of batch['dataset_raw_file_name']
     """
     def __init__(self, dataset, batch_size):
         self.dataset = dataset
         self.batch_size = batch_size
-        
+
         # Group indices by ensemble (each molecule)
         self.ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
         self.n_obs = self.dataset.n_observations.sum()
@@ -36,13 +37,13 @@ class EnsembleSampler(Sampler):
         """
         np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
         batch = []
-        
+
         for ensemble in self.ensemble_indices:
             batch.extend(ensemble)
             if len(batch) >= self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
                 batch = batch[self.batch_size:]  # Keep remaining elements for next batch
-        
+
         if batch:  # Yield any remaining elements
             yield batch
 
@@ -54,7 +55,7 @@ class EnsembleSampler(Sampler):
 
 class EnsembleDistributedSampler(DistributedSampler):
     """
-    Distributed sampler that ensures all conformations of a molecule (ensemble) 
+    Distributed sampler that ensures all conformations of a molecule (ensemble)
     are always assigned to the same worker.
     """
     def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True, seed=0):
@@ -65,7 +66,7 @@ class EnsembleDistributedSampler(DistributedSampler):
 
         # Step 2: Adjust total size to be divisible across workers
         self.total_size = len(self.ensemble_indices) - (len(self.ensemble_indices) % self.num_replicas)
-        
+
         # Step 3: Split ensembles across distributed workers
         self.indices = self._get_distributed_indices()
 
@@ -82,7 +83,7 @@ class EnsembleDistributedSampler(DistributedSampler):
 
         # Ensure even distribution across workers (truncate if needed)
         flat_indices = flat_indices[:self.total_size]
-        
+
         # Partition into `num_replicas` parts (one for each GPU)
         indices = flat_indices[self.rank::self.num_replicas]
         return indices
