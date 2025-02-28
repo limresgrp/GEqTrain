@@ -2,7 +2,7 @@ from .kan import KAN
 from ._fc import ScalarMLPFunction, select_nonlinearity
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
-from ._node import OneHotAtomEncoding, EmbeddingNodeAttrs
+from ._node import OneHotAtomEncoding, EmbeddingAttrs
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
 from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
 from ._graph import EmbeddingGraphAttrs
@@ -21,7 +21,7 @@ __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
     OneHotAtomEncoding,
-    EmbeddingNodeAttrs,
+    EmbeddingAttrs,
     BesselBasis,
     BesselBasisVec,
     PolyBasisVec,

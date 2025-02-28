@@ -165,8 +165,7 @@ def _process_dict(kwargs, ignore_fields):
             and v.shape[0] != kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]
         ):
             raise ValueError(
-                f"{k} is a node field but has the wrong dimension {v.shape} \
-                  (first dimension should be {kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]})"
+                f"{k} is a node field but has the wrong dimension {v.shape} (first dimension should be {kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]})"
             )
         elif (
             k in _EDGE_FIELDS
@@ -174,8 +173,7 @@ def _process_dict(kwargs, ignore_fields):
             and v.shape[0] != kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
         ):
             raise ValueError(
-                f"{k} is a edge field but has the wrong dimension {v.shape}, \
-                    (first dimension should be {kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]})"
+                f"{k} is a edge field but has the wrong dimension {v.shape}, (first dimension should be {kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]})"
             )
         elif k in _GRAPH_FIELDS:
             if num_frames > 1 and v.shape[0] != num_frames:
@@ -211,7 +209,7 @@ class AtomicData(Data):
         if len(kwargs) == 0 and len(irreps) == 0:
             super().__init__()
             return
-        
+
         ignore_fields = kwargs.pop('ignore_fields', [])
         # Check the keys
         if _validate:

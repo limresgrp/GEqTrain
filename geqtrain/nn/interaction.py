@@ -284,6 +284,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.out_feat_elems = sum(out_feat_elems)
         self.out_irreps = out_irreps
         self.irreps_out.update({self.out_field: self.out_irreps})
+        self.is_local = self.name == 'local_interaction'
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center     = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -302,7 +303,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
+        if self.is_local:
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1) # TODO add conditional to check if edge embedding are provided (if so they have to be catted)
+        else:
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1) # TODO add conditional to check if edge embedding are provided (if so they have to be catted)
+
         # The nonscalar features. Initially, the edge data.
         eq_features = edge_attr
 
@@ -395,7 +400,7 @@ class InteractionLayer(torch.nn.Module):
         previous_latent_dim: Optional[int],
         graph_conditioning_field: str,
         env_weighter: MakeWeightedChannels,
-        two_body_latent: torch.nn.Module,
+        two_body_latent: torch.nn.Module, # constructor func
         latent: torch.nn.Module,
         env_embed: torch.nn.Module,
         avg_num_neighbors: float,
@@ -513,7 +518,7 @@ class InteractionLayer(torch.nn.Module):
                         # Node invariants for center and neighbor (chemistry)
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (40 if parent.name == 'local_interaction' else 0) #! TODO HERE
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,
@@ -692,8 +697,6 @@ class InteractionLayer(torch.nn.Module):
 
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
-        if not self.use_attention:
-            local_env_per_node = local_env_per_node * self.env_sum_normalization # TODO: maybe using self.env_norm we can drop this!
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]

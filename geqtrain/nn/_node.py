@@ -10,27 +10,23 @@ from ._graph_mixin import GraphModuleMixin
 from typing import Dict, Optional
 
 @compile_mode("script")
-class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
-    """Select the node embedding based on node type.
-
-    Args:
-    """
-
+class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
-        node_attributes: Dict[str, Dict] = {},
+        out_field:str,
+        attributes: Dict[str, Dict] = {}, # key to parse from yaml
         num_types: Optional[int] = None,
         irreps_in=None,
-        stable_embedding:bool=False,
+        stable_embedding:bool=True,
     ):
         super().__init__()
-
+        self.out_field = out_field
         numerical_attrs = []
         attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
-        for field, values in node_attributes.items():
+        for field, values in attributes.items():
 
-            if 'embedding_dimensionality' not in values: # this means the attr is not used as embedding
+            if 'embedding_dimensionality' not in values: # if attr is not used as embedding
                 continue
 
             embedding_dim = values['embedding_dimensionality']
@@ -40,8 +36,11 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
                 n_types = values.get('actual_num_types', num_types)
                 embedding_dim = values['embedding_dimensionality']
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
-                # torch.nn.init.xavier_uniform_(emb_module.weight) # with option 3 below?
-                torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
+
+                # torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
+                torch.nn.init.xavier_uniform_(emb_module.weight)
+                emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
+
                 attr_modules[field] = emb_module
 
             if stable_embedding:
@@ -51,7 +50,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
 
         self.numerical_attrs = numerical_attrs
         self.attr_modules = attr_modules
-        irreps_out = {AtomicDataDict.NODE_ATTRS_KEY: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
+        irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
 
@@ -67,7 +66,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
             x = data[attribute_name]
             out.append(x)
 
-        data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1).float()
+        data[self.out_field] = torch.cat(out, dim=-1).float()
         return data
 
 

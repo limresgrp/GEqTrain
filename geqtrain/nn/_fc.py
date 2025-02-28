@@ -148,8 +148,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 norm_const = nonlin_const
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
                 modules = [(f"linear_{layer_index}", lin_layer)]
-                if self.use_layer_norm:
-                    modules.append((f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)))
                 modules.append((f"activation_{layer_index}", non_lin_instance))
                 if dropout is not None:
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"

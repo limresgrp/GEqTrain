@@ -10,7 +10,7 @@ from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
     InteractionModule,
-    EmbeddingNodeAttrs,
+    EmbeddingAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
@@ -36,7 +36,7 @@ def buildHeadlessGlobalNodeModelLayers(config:Config):
 
     layers = {
         # -- Encode -- #
-        "node_attrs":         EmbeddingNodeAttrs,
+        "node_attrs":         EmbeddingAttrs,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "graph_attrs":        EmbeddingGraphAttrs,

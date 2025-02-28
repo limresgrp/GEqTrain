@@ -12,7 +12,7 @@ from geqtrain.nn import (
     EdgewiseReduce,
     NodewiseReduce,
     InteractionModule,
-    EmbeddingNodeAttrs,
+    EmbeddingAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
@@ -48,12 +48,27 @@ def buildGlobalGraphModelLayers(config:Config):
 
     update_config(config)
 
+    if 'node_attributes' in config:
+        node_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.NODE_ATTRS_KEY,
+            attributes=config.get('node_attributes'),
+        ))
+    else:
+        raise ValueError('Missing node_attributes in yaml')
+
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+
     layers = {
         # -- Encode -- #
-        "node_attrs":         EmbeddingNodeAttrs,
+        "node_attrs":         node_embedder,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "graph_attrs":        EmbeddingGraphAttrs,
+        "edge_attrs":         edge_embedder
     }
 
     layers.update({

@@ -53,6 +53,7 @@ from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
+from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
@@ -423,6 +424,7 @@ class Trainer:
         metric_criteria:str='decreasing', # or 'increasing' # TODO check that this is loaded correctly for a restart
         **kwargs,
     ):
+        self.gradnorm_queue = Queue()
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self.cumulative_wall = 0
         self.model = None
@@ -519,6 +521,7 @@ class Trainer:
         self.loss_stat = LossStat(self.loss)
         self.init_metrics()
         self.norms = []
+        self.norms_clip = []
 
         self.train_on_keys = self.loss.keys
         if (train_on_keys is not None) and (set(train_on_keys) != set(self.train_on_keys)):
@@ -1224,7 +1227,10 @@ class Trainer:
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
-                    self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorm_queue)
+                    self.norms.append(grad_norm.item())
+                    self.norms_clip.append(float(max_grad_norm))
+
                     self.optim.step()
                     self.optim.zero_grad(set_to_none=True)
                     self.lr_sched_step(batch_lvl=True)
@@ -1274,6 +1280,7 @@ class Trainer:
         self.metrics_dict = {}
         self.loss_dict = {}
         self.norms = []
+        self.norms_clip = []
 
         for category, dloader in zip(categories, dataloaders):
             self.reset_metrics()
@@ -1478,7 +1485,7 @@ class Trainer:
                 log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
 
-        self.norm_dict = dict(Grad_norm=self.norms)
+        self.norm_dict = dict(Grad_norm=self.norms, Grad_clip_val=self.norms_clip)
 
         if not self.is_master:
             return
