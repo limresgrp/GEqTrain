@@ -33,6 +33,8 @@ class EnsembleSampler(Sampler):
 
     def __iter__(self):
         """
+        np.random.shuffle is called once per epoch (once for train and once for val)
+        yields batches, called once per batch step while iteraing dloader
         Returns batches, ensuring all conformations of a molecule appear together.
         """
         np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
@@ -40,7 +42,7 @@ class EnsembleSampler(Sampler):
 
         for ensemble in self.ensemble_indices:
             batch.extend(ensemble)
-            if len(batch) >= self.batch_size:
+            while len(batch) > self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
                 batch = batch[self.batch_size:]  # Keep remaining elements for next batch
 
