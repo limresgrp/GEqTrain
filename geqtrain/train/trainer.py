@@ -555,6 +555,7 @@ class Trainer:
 
     def _get_num_of_steps_per_epoch(self):
         if hasattr(self, "dl_train"):
+            assert math.ceil(len(self.dataset_train)/self.batch_size) == len(self.dl_train)
             return len(self.dl_train)
         raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 

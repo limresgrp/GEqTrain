@@ -9,19 +9,20 @@ from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
 from geqtrain.nn import GraphModuleMixin
 from typing import List, Optional
 from geqtrain.utils import add_tags_to_module
-
+from torch.nn import GroupNorm
 
 class FFBlock(torch.nn.Module):
-    def __init__(self, inp_size, out_size:int|None, residual:bool=True):
+    def __init__(self, inp_size, out_size:int|None, residual:bool=True, group_norm:bool=True):
         super().__init__()
         self.residual = residual
         out_size = out_size or inp_size
-        self.block = torch.nn.Sequential(
-            torch.nn.LayerNorm(inp_size),
+        self.block_list = [torch.nn.LayerNorm(inp_size)] if group_norm else [GroupNorm(num_groups=8, num_channels=inp_size)]
+        self.block_list.extend([
             torch.nn.Linear(inp_size, 4*inp_size, bias=False),
             torch.nn.SiLU(),
             torch.nn.Linear(4*inp_size, out_size)
-        )
+        ])
+        self.block = torch.nn.Sequential(*self.block_list)
 
     def forward(self, x):
         out = self.block(x)
@@ -151,12 +152,6 @@ class WeightedTP(GraphModuleMixin, nn.Module):
         return data
 
 
-class EnsembleMHA(nn.Module):
-    def __init__(self, input_dims, out_dims):
-        super().__init__()
-        pass
-
-
 class TransformerBlock(GraphModuleMixin, nn.Module):
     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
         super().__init__()
@@ -184,11 +179,11 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
 
         self.final_block = FFBlock(self.l0_size,1,residual=False)
 
-        self.kqv_proj1 = FFBlock(self.l0_size, 3*self.l0_size, residual=False)
+        self.kqv_proj1 = FFBlock(self.l0_size, 3*self.l0_size, residual=False, group_norm=True)
         self.kqv_proj2 = FFBlock(self.l0_size, 3*self.l0_size, residual=False)
         self.kqv_proj3 = FFBlock(self.l0_size, 3*self.l0_size, residual=False)
 
-        self.dropout = nn.Dropout(.1)
+        self.dropout = nn.Dropout(.2)
         add_tags_to_module(self, '_wd')
 
 
@@ -202,19 +197,19 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
 
         out = []
         for f in split_tensors: # ugly but ok, could be vectorized via bmm (?)
-            k, q, v = torch.chunk( self.kqv_proj1(f), 3, dim=-1)
+            k, q, v = torch.chunk(self.kqv_proj1(f), 3, dim=-1)
             attn_output, _ = self.attention1(k, q, v)
             attn_output = self.dropout(attn_output)
             feats = self.ff_block1(attn_output)
             feats = self.dropout(feats)
 
-            k, q, v = torch.chunk( self.kqv_proj2(feats), 3, dim=-1)
+            k, q, v = torch.chunk(self.kqv_proj2(feats), 3, dim=-1)
             attn_output, _ = self.attention2(k, q, v)
             attn_output = self.dropout(attn_output)
             feats = self.ff_block2(attn_output)
             feats = self.dropout(feats)
 
-            k, q, v = torch.chunk( self.kqv_proj3(feats), 3, dim=-1)
+            k, q, v = torch.chunk(self.kqv_proj3(feats), 3, dim=-1)
             attn_output, _ = self.attention3(k, q, v)
             attn_output = self.dropout(attn_output)
             feats = self.ff_block3(attn_output)

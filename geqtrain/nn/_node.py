@@ -17,7 +17,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         attributes: Dict[str, Dict] = {}, # key to parse from yaml
         num_types: Optional[int] = None,
         irreps_in=None,
-        stable_embedding:bool=True,
+        stable_embedding:bool=False,
     ):
         super().__init__()
         self.out_field = out_field
