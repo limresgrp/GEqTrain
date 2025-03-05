@@ -115,7 +115,7 @@ def run_inference(
         input_data = {
             k: v
             for k, v in batch.items()
-            if k not in output_keys
+            # if k not in output_keys
         }
         ref_data = batch
         batch_center_nodes = batch_index[0].unique()

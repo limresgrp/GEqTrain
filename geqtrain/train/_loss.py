@@ -33,8 +33,9 @@ class SimpleLoss:
         func_name: str,
         params: dict = {},
     ):
-
         self.func_name = func_name
+        self.match_target_shape = False if func_name in ['CrossEntropyLoss'] else True
+
         for key, value in params.items():
             setattr(self, key, value)
 
@@ -56,14 +57,19 @@ class SimpleLoss:
         mean: bool = True,
         **kwargs,
     ):
-        pred_key, ref_key, not_nan_filter = self.prepare(pred, ref, key, **kwargs)
+        pred_key, ref_key = self.prepare(pred, ref, key, **kwargs)
 
-        loss = self.func(pred_key, ref_key) * not_nan_filter
-        if mean:
-            return loss.sum() / not_nan_filter.sum()
-        loss[~not_nan_filter.bool()] = torch.nan
-        return loss
-    
+        if hasattr(self, "ignore_nan") and self.ignore_nan:
+            pred_key, ref_key, not_nan_filter = self._apply_ignore_nan(pred_key, ref_key, key)
+            loss = self.func(pred_key, ref_key) * not_nan_filter
+            if mean:
+                return loss.sum() / not_nan_filter.sum()
+            loss[~not_nan_filter.bool()] = torch.nan
+            return loss
+        else:
+            loss = self.func(pred_key, ref_key)
+            return loss.mean() if mean else loss
+
     def prepare(
         self,
         pred: Dict,
@@ -71,19 +77,26 @@ class SimpleLoss:
         key:  str,
         **kwargs,
     ):
-        ref_key = ref.get(key, None)
-        assert isinstance(ref_key, torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(pred_key)}"
-        pred_key = pred.get(key, None)
-        assert isinstance(pred_key, torch.Tensor), f"Expected prediction tensor for pred key {key}, found {type(pred_key)}"
-        pred_key = pred_key.view_as(ref_key)
+        # check input / output dtype
+        ref_key = ref.get(key, None) #? why None is allowed?
+        assert isinstance(ref_key, torch.Tensor), f"Tensor predicted for ref key {key} must be of type torch.Tensor, but found {type(ref_key)}"
+        pred_key = pred.get(key, None) #? why None is allowed?
+        assert isinstance(pred_key, torch.Tensor), f"Tensor target for pred key {key} must be of type torch.Tensor, but found {type(pred_key)}"
 
+        if self.match_target_shape:
+            pred_key = pred_key.view_as(ref_key)
+        # else:
+        #   ref_key = ref_key.squeeze()
+        return pred_key, ref_key
+
+    def _apply_ignore_nan(self,pred_key, ref_key, key):
         not_nan_filter = self._get_not_nan(pred_key, key) * self._get_not_nan(ref_key, key)
         return torch.nan_to_num(pred_key, nan=0.), torch.nan_to_num(ref_key, nan=0.), not_nan_filter
-    
+
     def _get_not_nan(self, ref_key: torch.Tensor, key: str):
         self._check_nan(ref_key, key)
         return (ref_key == ref_key).int()
-    
+
     def _check_nan(self, ref_key: torch.Tensor, key: str):
         has_nan = torch.isnan(ref_key.sum())
         if has_nan and not (hasattr(self, "ignore_nan") and self.ignore_nan):
@@ -110,5 +123,4 @@ def instantiate_loss_function(name: str, params: Dict):
         return SimpleLoss(name, params)
     elif callable(name):
         return name
-    else:
-        raise NotImplementedError(f"{name} Loss is not implemented")
+    raise NotImplementedError(f"{name} Loss is not implemented")

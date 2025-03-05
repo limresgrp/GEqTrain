@@ -7,7 +7,7 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 @compile_mode("script")
 class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
@@ -18,9 +18,13 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         num_types: Optional[int] = None,
         irreps_in=None,
         stable_embedding:bool=False,
+        use_masking: bool = True,
+        fields_to_mask: List[str] = []
     ):
         super().__init__()
         self.out_field = out_field
+        self.use_masking = use_masking
+        self.fields_to_mask = fields_to_mask
         numerical_attrs = []
         attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
@@ -33,7 +37,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             if values.get('attribute_type', 'categorical') == 'numerical':
                 numerical_attrs.append(field)
             else:
-                n_types = values.get('actual_num_types', num_types)
+                n_types = values.get('actual_num_types', num_types) # ! IMPO should be + 1 for masking category but handled via cfg.yaml s.t. round emb_module.weight.shape[0] to be set to the closest power of 2 possible
                 embedding_dim = values['embedding_dimensionality']
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
 
@@ -55,12 +59,21 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
 
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        with torch.cuda.amp.autocast(enabled=False): # choice: embeddings are always kept to high precision, regardless of amp
+        with torch.cuda.amp.autocast(enabled=False): # embeddings always kept to high precision, regardless of AMP
             out = []
             for attribute_name, emb_layer in self.attr_modules.items():
-                x = data[attribute_name].squeeze()
-                x = emb_layer(x)
-                out.append(x)
+                x = data[attribute_name] #.squeeze()
+
+                # Masking categorical attributes
+                if self.use_masking and attribute_name in self.fields_to_mask:
+                    mask_token_index = emb_layer.weight.shape[0] - 1 # last index is reserved for masking, make sure to match this in yaml
+                    random_mask = torch.rand(x.shape, device=x.device)
+                    mask = (random_mask > 0.8) # 20% masking
+                    x = x.clone()  # Avoid modifying the original tensor
+                    x[mask] = mask_token_index  # Replace with mask token
+
+                x_emb = emb_layer(x)
+                out.append(x_emb)
 
         for attribute_name in self.numerical_attrs:
             x = data[attribute_name]

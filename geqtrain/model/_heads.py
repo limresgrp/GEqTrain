@@ -40,16 +40,16 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
         else:
             raise Exception(f"Elements of 'heads' must be tuples of the following type ([field], out_field, out_irreps).")
 
-        # # #! transformer head
-        layers.update({
-            f"head_{out_field}": (
-                TransformerBlock,
-                dict(
-                    field=field,
-                    out_field=out_field,
-                ),
-            ),
-        })
+        # # # #! transformer head
+        # layers.update({
+        #     f"head_{out_field}": (
+        #         TransformerBlock,
+        #         dict(
+        #             field=field,
+        #             out_field=out_field,
+        #         ),
+        #     ),
+        # })
 
         # # #! WTP heads
         # layers.update({
@@ -73,19 +73,19 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
         #     ),
         # })
 
-        # # ! ReadoutModule heads
-        # layers.update({
-        #     f"head_{out_field}": (
-        #         ReadoutModule,
-        #         dict(
-        #             field=field,
-        #             out_field=out_field,
-        #             out_irreps=out_irreps,
-        #             strict_irreps=False,
-        #             ignore_amp=True,
-        #         ),
-        #     ),
-        # })
+        # ! ReadoutModule heads
+        layers.update({
+            f"head_{out_field}": (
+                ReadoutModule,
+                dict(
+                    field=field,
+                    out_field=out_field,
+                    out_irreps=out_irreps,
+                    strict_irreps=False,
+                    ignore_amp=True,
+                ),
+            ),
+        })
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
