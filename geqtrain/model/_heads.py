@@ -40,7 +40,7 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
         else:
             raise Exception(f"Elements of 'heads' must be tuples of the following type ([field], out_field, out_irreps).")
 
-        # # # #! transformer head
+        # # #! transformer head
         # layers.update({
         #     f"head_{out_field}": (
         #         TransformerBlock,
@@ -83,6 +83,7 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
                     out_irreps=out_irreps,
                     strict_irreps=False,
                     ignore_amp=True,
+                    ensemble_attention=True,
                 ),
             ),
         })

@@ -9,6 +9,8 @@ from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.utils import add_tags_to_module
 
+from geqtrain.nn._heads import EnsembleBasedAttention
+
 import re
 
 def is_valid_irreps_string(irrep_string):
@@ -53,6 +55,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
+        ensemble_attention: bool = False,
     ):
         super().__init__()
 
@@ -201,12 +204,28 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if dampen:
             add_tags_to_module(self, 'dampen')
 
+        if self.field != AtomicDataDict.GRAPH_FEATURES_KEY: # if input is at not at graph lvl cant attention-ensemble
+            ensemble_attention = False
+
+        self.ensemble_attention = ensemble_attention
+        if self.ensemble_attention:
+            self.ensemble_attnt1 = EnsembleBasedAttention(irreps_in=irreps_in, field=field, out_field=field)
+            self.ensemble_attnt2 = EnsembleBasedAttention(irreps_in=irreps_in, field=field, out_field=field)
+
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
         with self.cm:
 
             # get features from input and create empty tensor to store output
             features = data[self.field]
+
+            if self.ensemble_attention and 'ensemble_index' in data:
+                split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
+                scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
+                scalars = self.ensemble_attnt1(scalars, data['ensemble_index'])
+                scalars = self.ensemble_attnt2(scalars, data['ensemble_index'])
+                features = torch.cat((scalars, equiv), dim=-1)
+
             out_features = torch.zeros(
                 (features.shape[0], self.out_irreps_dim),
                 dtype=torch.float32,
