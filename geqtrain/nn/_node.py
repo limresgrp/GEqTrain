@@ -8,6 +8,49 @@ from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 
 from typing import Dict, Optional, List
+def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
+    """
+    Applies masking to categorical attributes within an input tensor.
+
+    This function randomly masks elements of the input tensor `x` and replaces them
+    either with a mask token or a random token, based on a certain probability.
+    This is often used as a data augmentation technique in training models dealing
+    with categorical data, such as training language models.
+
+    Args:
+        x (torch.Tensor): The input tensor containing categorical attributes.
+            It is assumed that the tensor contains integer indices representing
+            different categories.
+        mask_token_index (int): The index of the mask token. This is used to replace
+            some of the input tokens with a mask token. It is also assumed that the
+            number of categories is `mask_token_index - 1`.
+
+    Returns:
+        torch.Tensor: A new tensor with the same shape as `x`, where some elements
+                      have been replaced with either a mask token or a random token.
+
+    """
+    # step 1: define which elements of input are going to be masked
+    random_mask = torch.rand(x.shape, device=x.device)
+    mask = (random_mask > 0.8) # 20% masking
+    x = x.clone()  # Avoid modifying the original tensor
+
+    # step 2: determine whether to use mask token or random token
+    random_choice = torch.rand(x.shape, device=x.device)
+    mask_or_random = random_choice > 0.5  # 50% chance of random token
+
+    # step 3a: apply mask token
+    mask_indices = mask & ~mask_or_random # Apply mask where mask is True AND mask_or_random is False
+    x[mask_indices] = mask_token_index
+
+    # step3b: apply random token
+    random_indices = mask & mask_or_random # Apply random where mask is True AND mask_or_random is True
+    num_categories = mask_token_index - 1 # Exclude mask token from random sampling
+    random_tokens = torch.randint(0, num_categories, (random_indices.sum(),), device=x.device)
+    x[random_indices] = random_tokens
+
+    return x
+
 
 @compile_mode("script")
 class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
@@ -57,23 +100,17 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
-
+    @torch.cuda.amp.autocast(enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        with torch.cuda.amp.autocast(enabled=False): # embeddings always kept to high precision, regardless of AMP
-            out = []
-            for attribute_name, emb_layer in self.attr_modules.items():
-                x = data[attribute_name] #.squeeze()
+        out = []
+        for attribute_name, emb_layer in self.attr_modules.items():
+            x = data[attribute_name]
 
-                # Masking categorical attributes
-                if self.use_masking and attribute_name in self.fields_to_mask:
-                    mask_token_index = emb_layer.weight.shape[0] - 1 # last index is reserved for masking, make sure to match this in yaml
-                    random_mask = torch.rand(x.shape, device=x.device)
-                    mask = (random_mask > 0.8) # 20% masking
-                    x = x.clone()  # Avoid modifying the original tensor
-                    x[mask] = mask_token_index  # Replace with mask token
+            if self.use_masking and attribute_name in self.fields_to_mask:
+                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] - 1) # last index is reserved for masking, make sure to match this in yaml
 
-                x_emb = emb_layer(x)
-                out.append(x_emb)
+            x_emb = emb_layer(x)
+            out.append(x_emb)
 
         for attribute_name in self.numerical_attrs:
             x = data[attribute_name]
