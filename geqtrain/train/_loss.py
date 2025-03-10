@@ -70,7 +70,7 @@ class SimpleLoss:
             try:
                 loss = self.func(pred_key, ref_key)
             except:
-                loss = self.func(pred_key, ref_key.squeeze()) # this was for h donor/accept weird since it means that categorical 4 nn emb and categorical for target is handled differently?
+                loss = self.func(pred_key, ref_key.squeeze()) # if ref_key.dim() > 1 in CrossEntropyLoss
             return loss.mean() if mean else loss
 
     def prepare(
