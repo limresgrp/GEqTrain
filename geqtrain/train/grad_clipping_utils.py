@@ -25,7 +25,7 @@ class Queue():
     def std(self):
         return np.std(self.items)
 
-
+@torch.no_grad()
 def gradient_clipping(model, gradnorm_queue):
 
     if gradnorm_queue.is_empty():
@@ -34,7 +34,8 @@ def gradient_clipping(model, gradnorm_queue):
         return grad_norm, 1.0
 
     # Allow gradient norm to be 150% + 2 * stdev of the recent history.
-    max_grad_norm = 1.5 * gradnorm_queue.mean() + 2 * gradnorm_queue.std()
+    # max_grad_norm = 1.5 * gradnorm_queue.mean() + 2 * gradnorm_queue.std()
+    max_grad_norm = gradnorm_queue.mean() + gradnorm_queue.std()
 
     # Clips gradient and returns the norm
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm, norm_type=2.0)
