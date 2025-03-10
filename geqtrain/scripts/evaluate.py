@@ -173,7 +173,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=1,
+        default=2,
     )
     parser.add_argument(
         "-d",
@@ -250,6 +250,7 @@ def main(args=None, running_as_script: bool = True):
     logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
     # Check model convergence with WeightWatcher
+    # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
     ww = True
     if ww:
         import weightwatcher as ww
@@ -426,12 +427,12 @@ def main(args=None, running_as_script: bool = True):
     output_keys, per_node_outputs_keys = get_output_keys(metrics)
 
     # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
-    use_accuracy = False
+    use_accuracy = True
     if use_accuracy:
         from geqtrain.utils.evaluate_utils import AccuracyMetric
-
-        classification_metrics = AccuracyMetric(output_keys[0]) #!
-        chunk_callbacks += [classification_metrics]
+        for k in set(output_keys):
+            if k in ['bace_head']:
+                chunk_callbacks += [AccuracyMetric(k)]
 
     config.pop("device")
     infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
