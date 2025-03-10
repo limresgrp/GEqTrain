@@ -1,5 +1,7 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
+from collections import defaultdict
+
 import inspect
 import logging
 import wandb
@@ -516,7 +518,7 @@ class Trainer:
             # looks for "loss_coeffs" key in yaml, u can have many
             positional_args=dict(components=self.loss_coeffs),
             # and from these it creates loss funcs
-            all_args=self.kwargs, # self.kwargs are all the things in yaml...
+            all_args=self.kwargs, # self.kwargs are all the things in yaml... #! self.kwargs.get("dataset_mode", "single")
         )
         self.loss_stat = LossStat(self.loss)
         self.init_metrics()
@@ -1210,6 +1212,12 @@ class Trainer:
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
 
+            if self.ibatch % 5 == 0 and not validation:
+                norms = torch.norm(out[AtomicDataDict.NODE_FEATURES_KEY], p=1, dim=-1)
+                self.node_features_norms['node_repr_l1_norm_mean'].append(norms.mean())
+                self.node_features_norms['node_repr_l1_norm_std'].append(norms.std())
+                self.node_features_norms['node_repr_l1_norm_median'].append(norms.median())
+
             # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
             # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
             # thus division is required since self.loss.__call__ has mean=T by default
@@ -1282,6 +1290,7 @@ class Trainer:
         self.loss_dict = {}
         self.norms = []
         self.norms_clip = []
+        self.node_features_norms = defaultdict(list)
 
         for category, dloader in zip(categories, dataloaders):
             self.reset_metrics()
@@ -1486,7 +1495,7 @@ class Trainer:
                 log_header[category] += f" {key:>12.12}"
                 self.mae_dict[f"{category}_{key}"] = value
 
-        self.norm_dict = dict(Grad_norm=self.norms, Grad_clip_val=self.norms_clip)
+        self.norm_dict = dict(Grad_norm=self.norms, Grad_clip_val=self.norms_clip, **self.node_features_norms)
 
         if not self.is_master:
             return
@@ -1671,19 +1680,21 @@ class Trainer:
             timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
         )
+
+        if using_multiple_workers:
+            dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
+
         dataset_mode = config.get("dataset_mode", "single")
         assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
         use_ensemble = dataset_mode == 'ensemble'
-        if use_ensemble:
-            if batch_sampler is None:
-                batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
+
+        if use_ensemble and batch_sampler is None:
+            batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
         else:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
             ))
-        if using_multiple_workers:
-            dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
@@ -1695,14 +1706,14 @@ class Trainer:
 
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
-        if use_ensemble:
-            if batch_validation_sampler is None:
-                batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
+        if use_ensemble and batch_validation_sampler is None:
+            batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
         else:
             dl_kwargs.update(dict(
                 batch_size=self.validation_batch_size,
                 shuffle=False,
             ))
+
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,
@@ -1823,7 +1834,6 @@ class DistributedTrainer(Trainer):
         syncd_loss = sync_tensor_across_GPUs(loss, self.world_size)
         if self.is_master:
             self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)
-
 
 
 class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):

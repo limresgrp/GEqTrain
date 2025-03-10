@@ -17,7 +17,7 @@ from geqtrain.train.trainer import get_output_keys, run_inference, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
-
+from geqtrain.train.sampler import EnsembleSampler
 
 def init_logger(log: str = None):
     from geqtrain.utils import Output
@@ -249,9 +249,19 @@ def main(args=None, running_as_script: bool = True):
     model, config = load_model(args.model, device=args.device)
     logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
-    # import weightwatcher as ww
-    # watcher = ww.WeightWatcher(model = model)
-    # details = watcher.analyze(plot=True)
+    # Check model convergence with WeightWatcher
+    ww = True
+    if ww:
+        import weightwatcher as ww
+        watcher = ww.WeightWatcher(model = model)
+        details = watcher.analyze(plot=True)
+        print(details)
+
+        # Write dataframe into a file in args.train_dir
+        if args.train_dir:
+            details_file = args.train_dir / "weightwatcher_details.csv"
+            details.to_csv(details_file, index=False)
+            logger.info(f"WeightWatcher details saved to {details_file}")
 
     # Load config file
     logger.info(f"Loading config file...")
@@ -295,11 +305,20 @@ def main(args=None, running_as_script: bool = True):
         for loss_func in metrics.funcs.values():
             _init(loss_func, dataset, model)
 
-    dataloader = DataLoader(
-        dataset=dataset,
-        shuffle=False,
-        batch_size=args.batch_size,
-    )
+    # set up dataloader
+    dl_kwargs = {'dataset':dataset,'shuffle':False}
+    # evaluate wheter to use EnsembleSampler or not
+    dataset_mode = config.get("dataset_mode", "single")
+    assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
+    use_ensemble = dataset_mode == 'ensemble'
+
+    if use_ensemble:
+        sampler = EnsembleSampler(dataset, args.batch_size)
+        dl_kwargs.update(dict(sampler=sampler))
+    else:
+        dl_kwargs.update(dict(batch_size=args.batch_size))
+
+    dataloader = DataLoader(**dl_kwargs)
 
     # run inference
     logger.info("Starting...")
@@ -410,7 +429,8 @@ def main(args=None, running_as_script: bool = True):
     use_accuracy = False
     if use_accuracy:
         from geqtrain.utils.evaluate_utils import AccuracyMetric
-        classification_metrics = AccuracyMetric(output_keys[0])
+
+        classification_metrics = AccuracyMetric(output_keys[0]) #!
         chunk_callbacks += [classification_metrics]
 
     config.pop("device")

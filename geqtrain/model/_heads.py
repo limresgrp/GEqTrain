@@ -83,7 +83,7 @@ def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDatas
                     out_irreps=out_irreps,
                     strict_irreps=False,
                     ignore_amp=True,
-                    ensemble_attention=True,
+                    # ensemble_attention=True,
                 ),
             ),
         })

@@ -8,6 +8,8 @@ from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 
 from typing import Dict, Optional, List
+
+
 def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     """
     Applies masking to categorical attributes within an input tensor.
@@ -46,7 +48,7 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     # step3b: apply random token
     random_indices = mask & mask_or_random # Apply random where mask is True AND mask_or_random is True
     num_categories = mask_token_index - 1 # Exclude mask token from random sampling
-    random_tokens = torch.randint(0, num_categories, (random_indices.sum(),), device=x.device)
+    random_tokens = torch.randint(0, num_categories, (random_indices.sum(),), device=x.device, dtype=x.dtype)
     x[random_indices] = random_tokens
 
     return x
@@ -60,7 +62,6 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         attributes: Dict[str, Dict] = {}, # key to parse from yaml
         num_types: Optional[int] = None,
         irreps_in=None,
-        stable_embedding:bool=False,
         use_masking: bool = True,
         fields_to_mask: List[str] = []
     ):
@@ -77,23 +78,19 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
                 continue
 
             embedding_dim = values['embedding_dimensionality']
+            output_embedding_dim += embedding_dim
             if values.get('attribute_type', 'categorical') == 'numerical':
                 numerical_attrs.append(field)
             else:
                 n_types = values.get('actual_num_types', num_types) # ! IMPO should be + 1 for masking category but handled via cfg.yaml s.t. round emb_module.weight.shape[0] to be set to the closest power of 2 possible
-                embedding_dim = values['embedding_dimensionality']
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
 
+                # TODO explore these different options
                 # torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
                 torch.nn.init.xavier_uniform_(emb_module.weight)
                 emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
 
                 attr_modules[field] = emb_module
-
-            if stable_embedding:
-                attr_modules[field] = torch.nn.Sequential(emb_module, torch.nn.LayerNorm(embedding_dim)) # as in: https://huggingface.co/docs/bitsandbytes/main/en/reference/nn/embeddings#bitsandbytes.nn.StableEmbedding
-
-            output_embedding_dim += embedding_dim
 
         self.numerical_attrs = numerical_attrs
         self.attr_modules = attr_modules
@@ -107,7 +104,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             x = data[attribute_name]
 
             if self.use_masking and attribute_name in self.fields_to_mask:
-                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] - 1) # last index is reserved for masking, make sure to match this in yaml
+                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] -1) # last index is reserved for masking, make sure to match this in yaml
 
             x_emb = emb_layer(x)
             out.append(x_emb)

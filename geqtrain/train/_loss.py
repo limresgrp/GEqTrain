@@ -67,7 +67,10 @@ class SimpleLoss:
             loss[~not_nan_filter.bool()] = torch.nan
             return loss
         else:
-            loss = self.func(pred_key, ref_key)
+            try:
+                loss = self.func(pred_key, ref_key)
+            except:
+                loss = self.func(pred_key, ref_key.squeeze()) # this was for h donor/accept weird since it means that categorical 4 nn emb and categorical for target is handled differently?
             return loss.mean() if mean else loss
 
     def prepare(
@@ -85,8 +88,7 @@ class SimpleLoss:
 
         if self.match_target_shape:
             pred_key = pred_key.view_as(ref_key)
-        # else:
-        #   ref_key = ref_key.squeeze()
+
         return pred_key, ref_key
 
     def _apply_ignore_nan(self,pred_key, ref_key, key):

@@ -312,6 +312,7 @@ class EnsembleBasedAttention(GraphModuleMixin, nn.Module):
         self.attention = nn.MultiheadAttention(embed_dim=self.n_inpt_scalars, num_heads=num_heads, dropout=dropout)
         self.ff_block = FFBlock(self.n_inpt_scalars)
 
+    @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, feats, ensemble_idxs):
         unique_indices = torch.unique(ensemble_idxs)
         split_tensors = [feats[ensemble_idxs == idx] for idx in unique_indices]

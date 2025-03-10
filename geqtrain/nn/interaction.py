@@ -269,7 +269,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if self.learn_cutoff_bias:
                 self.rbf_embedder = FiLMFunction(
                     mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
-                    mlp_latent_dimensions=[2*self.irreps_in[self.edge_invariant_field].num_irreps],
+                    mlp_latent_dimensions=[4*self.irreps_in[self.edge_invariant_field].num_irreps],
                     mlp_output_dimension=self.final_latent_mlp.out_features,
                     mlp_nonlinearity='swiglu',
                     zero_init_last_layer_weights=False,
@@ -572,16 +572,16 @@ class InteractionLayer(torch.nn.Module):
         self._env_weighter = env_weighter
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
 
-        if not self.use_attention:
-            if avg_num_neighbors_is_learnable:
-                self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
-            else:
-                self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
+        # if not self.use_attention:
+        #     if avg_num_neighbors_is_learnable:
+        #         self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
+        #     else:
+        #         self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
         if self.learn_cutoff_bias:
             self.rbf_embedder = FiLMFunction(
                 mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
-                mlp_latent_dimensions=[2*parent.irreps_in[parent.edge_invariant_field].num_irreps],
+                mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
                 mlp_output_dimension=self.latent_mlp.out_features,
                 mlp_nonlinearity='swiglu',
                 zero_init_last_layer_weights=False,
@@ -728,14 +728,14 @@ class InteractionLayer(torch.nn.Module):
         inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
 
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
-          return latents, inv_latent, None
+            return latents, inv_latent, None
 
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
         return latents, inv_latent, eq_features
