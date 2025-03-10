@@ -132,7 +132,7 @@ class InMemoryConcatDataset(ConcatDataset):
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     @property
     def ensemble_indices(self):
         return self._ensemble_indices
@@ -164,7 +164,7 @@ class LazyLoadingConcatDataset(Dataset):
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     @property
     def ensemble_indices(self):
         return self._ensemble_indices
@@ -179,7 +179,7 @@ class LazyLoadingConcatDataset(Dataset):
             return self._cumsum
         self._cumsum = np.cumsum(self.n_observations)
         return self._cumsum
-    
+
     def from_indexed_dataset(self, indexed_dataset):
         instance = copy.deepcopy(self)
         instance.set_lazy_datasets(indexed_dataset)
@@ -707,7 +707,7 @@ class NpzDataset(AtomicInMemoryDataset):
         for key in mapped.keys():
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
-                    fields[key] = fields[key].astype(np.int32)
+                    fields[key] = fields[key].astype(np.int64) # keep int64 since cross entropy based pytorch loss functions require this dtype
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
