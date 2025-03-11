@@ -66,22 +66,25 @@ class Metrics(Loss):
         self.params = {}
         self.kwargs = {}
         for key in self.keys:
-            func_params: Dict = self.func_params.get(key, {})
+            func_params: Dict         = self.func_params.get(key, {})
             func_params["PerSpecies"] = func_params.get("PerSpecies", False)
-            func_params["PerTarget"]   = func_params.get("PerTarget", False)
+            func_params["PerTarget"]  = func_params.get("PerTarget", False)
             func_params["functional"] = func_params.get("functional", "L1Loss")
-            func_params["reduction"]    = func_params.get("reduction", "mean")
+            func_params["reduction"]  = func_params.get("reduction", None)
 
             # default is to flatten the array
             if key not in self.running_stats:
                 self.kwargs[key] = {}
                 self.params[key] = {}
 
+            if func_params["reduction"] is None:
+                if hasattr(self.funcs[key], "reduction"): func_params["reduction"] = self.funcs[key].reduction
+            
             reductions = {
                 'mean': Reduction.MEAN,
                 'rms' : Reduction.RMS,
             }
-            reduction = reductions[func_params.get('reduction')]
+            reduction = reductions.get(func_params.get('reduction'), func_params.get('reduction'))
             self.kwargs[key] = dict(reduction=reduction)
 
             # store for initialization

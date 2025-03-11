@@ -9,7 +9,6 @@ from typing import (
     Dict
 )
 import bisect
-import warnings
 import numpy as np
 import logging
 import inspect
@@ -627,23 +626,27 @@ class NpzDataset(AtomicInMemoryDataset):
     ):
         self.key_mapping = key_mapping
 
-        super().__init__(
-            pbc=pbc,
-            file_name=file_name,
-            ensemble_index=ensemble_index,
-            url=url,
-            root=root,
-            ignore_fields=ignore_fields,
-            extra_fixed_fields=extra_fixed_fields,
-            include_frames=include_frames,
-            target_indices=target_indices,
-            target_key=target_key,
-            node_attributes=node_attributes,
-            edge_attributes=edge_attributes,
-            graph_attributes=graph_attributes,
-            extra_attributes=extra_attributes,
-            transforms=transforms,
-        )
+        try:
+            super().__init__(
+                pbc=pbc,
+                file_name=file_name,
+                ensemble_index=ensemble_index,
+                url=url,
+                root=root,
+                ignore_fields=ignore_fields,
+                extra_fixed_fields=extra_fixed_fields,
+                include_frames=include_frames,
+                target_indices=target_indices,
+                target_key=target_key,
+                node_attributes=node_attributes,
+                edge_attributes=edge_attributes,
+                graph_attributes=graph_attributes,
+                extra_attributes=extra_attributes,
+                transforms=transforms,
+            )
+        except Exception as e:
+            logging.error(f"Error in file {self.raw_file_names}")
+            raise e
 
     @property
     def raw_file_names(self):
