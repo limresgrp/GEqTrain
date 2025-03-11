@@ -99,6 +99,7 @@ def run_inference(
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
+    dropout_edges: float = 0.,
     **kwargs,
 ):
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
@@ -139,6 +140,28 @@ def run_inference(
     if noise is not None:
         ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
         input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
+    
+    if dropout_edges > 0:
+        edge_index = input_data[AtomicDataDict.EDGE_INDEX_KEY]
+        num_edges = edge_index.size(1)
+        num_dropout_edges = int(dropout_edges * num_edges)
+
+        # Randomly select edges to drop
+        drop_edges = torch.randperm(num_edges, device=edge_index.device)[:num_dropout_edges]
+        keep_edges = torch.ones(num_edges, dtype=torch.bool, device=edge_index.device)
+        keep_edges[drop_edges] = False
+
+        # Ensure at least some edges per node center
+        node_centers = edge_index[0].unique()
+        remaining_node_centers = edge_index[0, keep_edges].unique()
+        combined = torch.cat((node_centers, remaining_node_centers))
+        uniques, counts = combined.unique(return_counts=True)
+        dropped_out_node_centers = uniques[counts == 1]
+        for node in dropped_out_node_centers:
+            node_edges = (edge_index[0] == node).nonzero(as_tuple=True)[0]
+            keep_edges[node_edges[torch.randint(len(node_edges), (max(1, int((1-dropout_edges)*len(node_edges))),))]] = True
+
+        input_data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
 
     with cm, precision:
         out = model(input_data)
@@ -421,12 +444,17 @@ class Trainer:
         head_wds: float = 0.0,
         accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
         metric_criteria:str='decreasing', # or 'increasing'
+        dropout_edges: Union[bool, float] = False,
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
         self.cumulative_wall = 0
         self.model = None
         logging.debug("* Initialize Trainer")
+
+        # --- dropout_edges
+        dropout_edges = dropout_edges if isinstance(dropout_edges, float) else 0.2 if dropout_edges is True else 0.
+
 
         # --- write all self.init_keys in self AND in _local_kwargs, init_keys are all kwargs of ctor
         _local_kwargs = {}
@@ -1202,6 +1230,7 @@ class Trainer:
                 noise=self.noise,
                 batch_max_atoms=self.batch_max_atoms,
                 ignore_chunk_keys=self.ignore_chunk_keys,
+                dropout_edges=self.dropout_edges if not validation else 0.,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
