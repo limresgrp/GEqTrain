@@ -1,6 +1,5 @@
 import torch
 import torch.nn
-import math
 from e3nn.o3 import Irreps
 from e3nn.util.jit import compile_mode
 
@@ -25,6 +24,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
 
+        irreps_in = {} if irreps_in is None else irreps_in
         numerical_attrs = []
         categorical_attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
@@ -33,6 +33,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
             if 'embedding_dimensionality' not in values: # this means the attr is not used as embedding
                 continue
 
+            irreps_in[field] = None
             embedding_dim = values['embedding_dimensionality']
             if values.get('attribute_type', 'categorical') == 'numerical':
                 numerical_attrs.append(field)
