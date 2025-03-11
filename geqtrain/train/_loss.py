@@ -70,7 +70,11 @@ class SimpleLoss:
             try:
                 loss = self.func(pred_key, ref_key)
             except:
-                loss = self.func(pred_key, ref_key.squeeze()) # if ref_key.dim() > 1 in CrossEntropyLoss
+                if pred_key.shape[0] == 1: # in case bs == 1
+                    loss = self.func(pred_key.squeeze(), ref_key.squeeze())
+                else:
+                    loss = self.func(pred_key, ref_key.squeeze()) # if ref_key.dim() > 1 in CrossEntropyLoss
+
             return loss.mean() if mean else loss
 
     def prepare(
