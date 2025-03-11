@@ -247,7 +247,8 @@ def main(args=None, running_as_script: bool = True):
     # Load model
     logger.info(f"Loading model...")
     model, config = load_model(args.model, device=args.device)
-    logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
+    if args.model is None:
+        logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
     # Check model convergence with WeightWatcher
     # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
@@ -313,6 +314,8 @@ def main(args=None, running_as_script: bool = True):
     assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
     use_ensemble = dataset_mode == 'ensemble'
 
+    # use_ensemble not yet working
+    use_ensemble = False
     if use_ensemble:
         sampler = EnsembleSampler(dataset, args.batch_size)
         dl_kwargs.update(dict(sampler=sampler))

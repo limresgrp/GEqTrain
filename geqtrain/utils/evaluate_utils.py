@@ -10,10 +10,10 @@ from sklearn.metrics import ( # TODO can I bring imports inside AccuracyMetric._
 
 def print_eval(gt, preds, logits):
 
-  if len(logits)<5:
-      # single smile eval mode
-      for i in range(len(logits)): print(f"gt: {gt[i]}, preds: {preds[i]}, logits: {logits[i]}")
-      return
+#   if len(logits)<5:
+#       # single smile eval mode
+#       for i in range(len(logits)): print(f"gt: {gt[i]}, preds: {preds[i]}, logits: {logits[i]}")
+#       return
 
   cm = confusion_matrix(gt, preds, labels=[False, True])
   tn, fp, fn, tp = cm.ravel()
