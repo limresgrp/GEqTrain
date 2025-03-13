@@ -671,6 +671,7 @@ class Trainer:
                 if self.warmup_epochs > 0:
                     total_number_of_steps -= self.warmup_steps
                 self.kwargs['lr_scheduler_T_max'] = total_number_of_steps
+                self.kwargs['eta_min'] = 1.e-7
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
