@@ -34,6 +34,7 @@ class SimpleLoss:
         params: dict = {},
     ):
         self.func_name = func_name
+
         self.match_target_shape = False if func_name in ['CrossEntropyLoss'] else True
 
         for key, value in params.items():
@@ -70,10 +71,11 @@ class SimpleLoss:
             try:
                 loss = self.func(pred_key, ref_key)
             except:
+                ref_key = ref_key.squeeze().long()
                 if pred_key.shape[0] == 1: # in case bs == 1
-                    loss = self.func(pred_key.squeeze(), ref_key.squeeze())
+                    loss = self.func(pred_key.squeeze(), ref_key)
                 else:
-                    loss = self.func(pred_key, ref_key.squeeze()) # if ref_key.dim() > 1 in CrossEntropyLoss
+                    loss = self.func(pred_key, ref_key)  # if ref_key.dim() > 1 in CrossEntropyLoss
 
             return loss.mean() if mean else loss
 
