@@ -83,6 +83,7 @@ class Metrics(Loss):
             reductions = {
                 'mean': Reduction.MEAN,
                 'rms' : Reduction.RMS,
+                None  : Reduction.MEAN,
             }
             reduction = reductions.get(func_params.get('reduction'), func_params.get('reduction'))
             self.kwargs[key] = dict(reduction=reduction)
