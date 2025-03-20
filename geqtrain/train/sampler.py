@@ -1,6 +1,7 @@
 from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
 import numpy as np
+import math
 
 
 def _group_by_ensemble(n_observations, ensemble_indices):
@@ -39,7 +40,7 @@ class EnsembleSampler(Sampler):
         
         for ensemble in self.ensemble_indices:
             batch.extend(ensemble)
-            if len(batch) >= self.batch_size:
+            while len(batch) >= self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
                 batch = batch[self.batch_size:]  # Keep remaining elements for next batch
         
@@ -56,39 +57,65 @@ class EnsembleDistributedSampler(DistributedSampler):
     """
     Distributed sampler that ensures all conformations of a molecule (ensemble) 
     are always assigned to the same worker.
+    !!! TODO STILL NOT WORKING PROPERLY !!!
     """
     def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True, seed=0):
         super().__init__(dataset, num_replicas, rank, shuffle, seed)
 
         # Step 1: Group dataset indices by ensemble
-        self.ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
+        self.all_ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
+        self.n_obs = self.dataset.n_observations.sum()
 
         # Step 2: Adjust total size to be divisible across workers
-        self.total_size = len(self.ensemble_indices) - (len(self.ensemble_indices) % self.num_replicas)
-        
-        # Step 3: Split ensembles across distributed workers
-        self.indices = self._get_distributed_indices()
+        self.num_samples = math.ceil((self.n_obs - self.num_replicas) / self.num_replicas)
+        self.total_size = self.num_samples * self.num_replicas
 
-    def _get_distributed_indices(self):
-        """
-        Splits ensemble indices across GPUs, ensuring each GPU gets whole molecules.
-        """
-        # Shuffle ensembles at the beginning of each epoch
-        if self.shuffle:
-            np.random.shuffle(self.ensemble_indices)
+        # Step 3: Heuristically assign ensembles to distributed workers
+        self.ensemble_indices = self._assign_ensembles_to_workers()
 
-        # Flatten into a single list of indices
-        flat_indices = [idx for ensemble in self.ensemble_indices for idx in ensemble]
+    def _assign_ensembles_to_workers(self):
+            """
+            Heuristically assigns ensembles to workers to minimize the number of dropped observations.
+            """
+            # Shuffle ensembles at the beginning of each epoch
+            if self.shuffle:
+                np.random.shuffle(self.all_ensemble_indices)
 
-        # Ensure even distribution across workers (truncate if needed)
-        flat_indices = flat_indices[:self.total_size]
-        
-        # Partition into `num_replicas` parts (one for each GPU)
-        indices = flat_indices[self.rank::self.num_replicas]
-        return indices
+            # Initialize worker assignments
+            worker_assignments = [[] for _ in range(self.num_replicas)]
+            worker_sizes = [0] * self.num_replicas
+
+            # Assign ensembles to workers
+            for ensemble in self.all_ensemble_indices:
+                # Find the worker with the least number of samples
+                min_worker = np.argmin(worker_sizes)
+                worker_assignments[min_worker].append(ensemble)
+                worker_sizes[min_worker] += len(ensemble)
+
+            # Ensure each worker has exactly self.num_samples samples
+            for i in range(self.num_replicas):
+                while worker_sizes[i] > self.num_samples:
+                    diff = worker_sizes[i] - self.num_samples
+                    worker_assignment = worker_assignments[i]
+                    for ensemble_id in range(min(len(worker_assignment), diff)):
+                        worker_assignment[ensemble_id] = worker_assignment[ensemble_id][:-1]
+                        worker_sizes[i] -= 1
+
+            return worker_assignments[self.rank]
 
     def __iter__(self):
+        """
+        Returns batches, ensuring all conformations of a molecule appear together.
+        """
+        np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
+        batch = []
+        
+        for ensemble in self.ensemble_indices:
+            batch.extend(ensemble)
+            if len(batch) >= self.batch_size:
+                yield batch[:self.batch_size]  # Yield a full batch
+                batch = batch[self.batch_size:]  # Keep remaining elements for next batch
+        
+        if batch:  # Yield any remaining elements
+            yield batch
         yield self.indices  # Yield distributed indices for current GPU
-
-    def __len__(self):
-        return len(self.indices)
