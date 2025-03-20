@@ -171,6 +171,8 @@ def aply_dropout_edges(dropout_edges, input_data):
         keep_edges[node_edges[torch.randint(len(node_edges), (max(1, int((1-dropout_edges)*len(node_edges))),))]] = True
 
     input_data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
+    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in input_data:
+        input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
 
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
@@ -508,7 +510,7 @@ class Trainer:
         # --- loss/logger printing info
         self.metrics_metadata = {
             'type_names': self.type_names,
-            'target_names': self.target_names,
+            'target_names': self.target_names or ['target'],
         }
 
         # --- filter node target to train on based on node type or type name
