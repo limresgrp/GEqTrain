@@ -274,7 +274,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
     # - Remove edges of atoms whose result is NaN - #
     node_center_edge_idcs = data[AtomicDataDict.EDGE_INDEX_KEY][0]
     keep_edges_filter = torch.zeros(len(node_center_edge_idcs), dtype=torch.bool) # initialize edge filter tensor of dim (n_edges,)
-    keep_nodes_filter = torch.zeros(len(node_types),            dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
+    keep_nodes_filter = torch.zeros(len(node_types) * data.num_graphs, dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
     for key_clean in key_clean_list:
         if key_clean not in data: continue
         if key_clean in _GRAPH_FIELDS:
