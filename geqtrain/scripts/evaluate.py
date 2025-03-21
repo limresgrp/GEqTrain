@@ -173,7 +173,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=2,
+        default=1,
     )
     parser.add_argument(
         "-d",
@@ -252,7 +252,7 @@ def main(args=None, running_as_script: bool = True):
 
     # Check model convergence with WeightWatcher
     # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
-    ww = True
+    ww = False #True
     if ww:
         import weightwatcher as ww
         watcher = ww.WeightWatcher(model = model)
