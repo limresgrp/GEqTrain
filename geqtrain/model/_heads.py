@@ -7,11 +7,15 @@ from geqtrain.nn import (
     ReadoutModule,
 )
 
+from geqtrain.utils import Config
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 
 
-def Heads(model, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+    '''
+    instanciates a layer with multiple ReadoutModules
+    '''
 
     logging.info("--- Building Heads Module ---")
 
@@ -38,6 +42,7 @@ def Heads(model, config, initialize: bool, dataset: Optional[ConcatDataset] = No
                     out_field=out_field,
                     out_irreps=out_irreps,
                     strict_irreps=False,
+                    ignore_amp=True,
                 ),
             ),
         })

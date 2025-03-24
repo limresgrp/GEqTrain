@@ -9,7 +9,6 @@ from typing import (
     Dict
 )
 import bisect
-import warnings
 import numpy as np
 import logging
 import inspect
@@ -21,6 +20,8 @@ from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
+from geqtrain.utils.torch_geometric.data import Data
+from geqtrain.utils.torch_geometric.dataset import IndexType
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 
@@ -81,37 +82,44 @@ def parse_attrs(
             elif key in _fixed_fields:
                 val: Optional[np.ndarray] = _fixed_fields[key]
 
-            if "embedding_dimensionality" not in options:  # this is not an attribute to parse
-                continue
-            if val is None:
-                val = np.array([np.nan])
-            num_types = int(options['num_types'])
-            can_be_undefined = options.get('can_be_undefined', False)
-            if 'min_value' in options or 'max_value' in options:
-                mask = np.isnan(val)
-                if np.any(mask) and not can_be_undefined:
-                    raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
-                val[mask] = float(options['max_value'])
-                # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
-                # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
-                # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
-                # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
-                bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
-                _input_type = np.digitize(val, bins)
-                _input_type[_input_type == num_types] -= 1
-                _input_type[_input_type > 0] -= 1
-                _input_type[mask] = num_types
-            else:
-                mask = np.isnan(val)
-                if np.any(mask) and not can_be_undefined:
-                    raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+            if options.get('attribute_type', 'categorical') == 'numerical':
                 _input_type = val
-                _input_type[mask] = num_types
-            # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
+                if options.get('standardize', True):
+                    mean = np.mean(_input_type, axis=-2, keepdims=True)
+                    std = np.std(_input_type, axis=-2, keepdims=True)
+                    _input_type = (_input_type - mean) / (std + 1e-8)
+            else:
+                if "embedding_dimensionality" not in options:  # this is not an attribute to parse
+                    continue
+                if val is None:
+                    val = np.array([np.nan])
+                num_types = int(options['num_types'])
+                can_be_undefined = options.get('can_be_undefined', False)
+                if 'min_value' in options or 'max_value' in options:
+                    mask = np.isnan(val)
+                    if np.any(mask) and not can_be_undefined:
+                        raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+                    val[mask] = float(options['max_value'])
+                    # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
+                    # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
+                    # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
+                    # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
+                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
+                    _input_type = np.digitize(val, bins)
+                    _input_type[_input_type == num_types] -= 1
+                    _input_type[_input_type > 0] -= 1
+                    _input_type[mask] = num_types
+                else:
+                    mask = np.isnan(val)
+                    if np.any(mask) and not can_be_undefined:
+                        raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
+                    _input_type = val
+                    _input_type[mask] = num_types
+                    # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
             if key in _fields:
-                _fields[key] = torch.from_numpy(_input_type).long()
+                _fields[key] = torch.from_numpy(_input_type)
             elif key in _fixed_fields:
-                _fixed_fields[key] = torch.from_numpy(_input_type).long()
+                _fixed_fields[key] = torch.from_numpy(_input_type)
 
     return _fields, _fixed_fields
 
@@ -120,11 +128,16 @@ class InMemoryConcatDataset(ConcatDataset):
     def __init__(self, datasets):
         super().__init__(datasets)
         self._n_observations = np.diff(self.cumulative_sizes, prepend=0)
+        self._ensemble_indices = np.array([dataset.ensemble_index for dataset in datasets])
 
     @property
     def n_observations(self):
         return self._n_observations
     
+    @property
+    def ensemble_indices(self):
+        return self._ensemble_indices
+
     def __getdataset__(self, dataset_idx):
         return self.datasets[dataset_idx]
 
@@ -136,21 +149,26 @@ class LazyLoadingConcatDataset(Dataset):
 
     def __init__(self, class_name, prefix, config, datasets_list: List[dict]):
         super().__init__()
-        self._class_name    = class_name
-        self._prefix        = prefix
-        self._config        = config
-        self._lazy_dataset  = [i.pop('lazy_dataset') for i in datasets_list]
-        self._datasets_list = datasets_list
-        self._cumsum        = None
+        self._class_name       = class_name
+        self._prefix           = prefix
+        self._config           = config
+        self._lazy_datasets    = [i.pop('lazy_dataset') for i in datasets_list]
+        self._ensemble_indices = np.array([i.get(f'{prefix}_ensemble_index') for i in datasets_list])
+        self._datasets_list    = datasets_list
+        self._cumsum           = None
 
     @property
     def _n_observations(self):
         # list of num_of_obs present in each npz
-        return np.array([len(_idcs) for _idcs in self._lazy_dataset])
+        return np.array([len(_idcs) for _idcs in self._lazy_datasets])
 
     @property
     def n_observations(self):
         return self._n_observations
+    
+    @property
+    def ensemble_indices(self):
+        return self._ensemble_indices
 
     @property
     def config(self):
@@ -162,9 +180,14 @@ class LazyLoadingConcatDataset(Dataset):
             return self._cumsum
         self._cumsum = np.cumsum(self.n_observations)
         return self._cumsum
+    
+    def from_indexed_dataset(self, indexed_dataset):
+        instance = copy.deepcopy(self)
+        instance.set_lazy_datasets(indexed_dataset)
+        return instance
 
-    def set_lazy_dataset(self, dataset):
-        self._lazy_dataset = dataset
+    def set_lazy_datasets(self, dataset):
+        self._lazy_datasets = dataset
         self._cumsum = None  # Force to recompute cumsum as indices changes
 
     def __len__(self):
@@ -172,7 +195,7 @@ class LazyLoadingConcatDataset(Dataset):
 
     @property
     def datasets(self):
-        return self._lazy_dataset
+        return self._lazy_datasets
 
     def __getitem__(self, idx):
         '''
@@ -198,12 +221,14 @@ class LazyLoadingConcatDataset(Dataset):
             sample_idx = idx
         else:
             sample_idx = idx - self.cumsum[dataset_idx - 1]
-        return instance[self._lazy_dataset[dataset_idx][sample_idx]]
+        return instance[self._lazy_datasets[dataset_idx][sample_idx]]
 
     def __getdataset__(self, dataset_idx):
         _config = copy.deepcopy(self.config)
         file_name_key = f"{self._prefix}_file_name"
         _config[file_name_key] = self._datasets_list[dataset_idx][file_name_key]
+        ensemble_index_key = f"{self._prefix}_ensemble_index"
+        _config[ensemble_index_key] = self._datasets_list[dataset_idx][ensemble_index_key]
 
         instance, _ = instantiate(
             self._class_name, # dataset type selected for instanciation eg NpzDataset
@@ -224,16 +249,41 @@ class AtomicDataset(Dataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int = 0,
         transforms: Optional[List[str]] = None,
     ):
         '''
         transforms: list of strings that point to the callable function e.g. pkgName.moduleName.transformName
         '''
+        self.ensemble_index = ensemble_index
         super().__init__(
             root=root,
-            transform=Compose([load_callable(transf)
-                              for transf in transforms]) if transforms else None
+            transform=Compose([load_callable(transf) for transf in transforms]) if transforms else None
         )
+    
+    def __getitem__(
+        self,
+        idx: Union[int, np.integer, IndexType],
+    ) -> Union["Dataset", Data]:
+        r"""In case :obj:`idx` is of type integer, will return the data object
+        at index :obj:`idx` (and transforms it in case :obj:`transform` is
+        present).
+        In case :obj:`idx` is a slicing object, *e.g.*, :obj:`[2:5]`, a list, a
+        tuple, a PyTorch :obj:`LongTensor` or a :obj:`BoolTensor`, or a numpy
+        :obj:`np.array`, will return a subset of the dataset at the specified
+        indices."""
+        if (
+            isinstance(idx, (int, np.integer))
+            or (isinstance(idx, torch.Tensor) and idx.dim() == 0)
+            or (isinstance(idx, np.ndarray) and np.isscalar(idx))
+        ):
+
+            data = self.get(self.indices()[idx])
+            data = data if self.transform is None else self.transform(copy.deepcopy(data)) # Call deepcopy to avoid stacking transforms over epochs
+            return data
+
+        else:
+            return self.index_select(idx)
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -311,6 +361,7 @@ class AtomicInMemoryDataset(AtomicDataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int,
         pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -362,7 +413,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         # eg: ['/processed_datasets/processed_dataset_51e456f.../data.pth', '/processed_datasets/processed_dataset_51e456f.../params.yaml']
         # each mol can be loaded in ram via .pth
         # for the not-in-memory version files are written once and reloaded every time the npz is sampled via dataloader
-        super().__init__(root=root, transforms=transforms)
+        super().__init__(root=root, ensemble_index=ensemble_index, transforms=transforms)
         if self.data is None:
             self.data, self.fixed_fields, include_frames = torch.load(  # load hashed (already) processed data
                 self.processed_paths[0],
@@ -536,6 +587,7 @@ class AtomicInMemoryDataset(AtomicDataset):
 
     def get(self, idx):
         out = self.data.get_example(idx)
+        out.ensemble_index = self.ensemble_index
         # Add back fixed fields
         for f, v in self.fixed_fields.items():
             out[f] = v
@@ -582,6 +634,7 @@ class NpzDataset(AtomicInMemoryDataset):
     def __init__(
         self,
         root: str,
+        ensemble_index: int,
         pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
@@ -599,22 +652,27 @@ class NpzDataset(AtomicInMemoryDataset):
     ):
         self.key_mapping = key_mapping
 
-        super().__init__(
-            pbc=pbc,
-            file_name=file_name,
-            url=url,
-            root=root,
-            ignore_fields=ignore_fields,
-            extra_fixed_fields=extra_fixed_fields,
-            include_frames=include_frames,
-            target_indices=target_indices,
-            target_key=target_key,
-            node_attributes=node_attributes,
-            edge_attributes=edge_attributes,
-            graph_attributes=graph_attributes,
-            extra_attributes=extra_attributes,
-            transforms=transforms,
-        )
+        try:
+            super().__init__(
+                pbc=pbc,
+                file_name=file_name,
+                ensemble_index=ensemble_index,
+                url=url,
+                root=root,
+                ignore_fields=ignore_fields,
+                extra_fixed_fields=extra_fixed_fields,
+                include_frames=include_frames,
+                target_indices=target_indices,
+                target_key=target_key,
+                node_attributes=node_attributes,
+                edge_attributes=edge_attributes,
+                graph_attributes=graph_attributes,
+                extra_attributes=extra_attributes,
+                transforms=transforms,
+            )
+        except Exception as e:
+            logging.error(f"Error in file {self.raw_file_names}")
+            raise e
 
     @property
     def raw_file_names(self):

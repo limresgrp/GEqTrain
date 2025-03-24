@@ -50,6 +50,8 @@ def configure_dist_training(args):
 
 def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) -> list[torch.Tensor]:
     """Gather tensors with the same number of dimensions but different lengths across multiple GPUs.
+
+    This function must be called by all processes.
     This function gathers tensors from multiple GPUs, ensuring that tensors with different lengths but the same number of dimensions are correctly aggregated. The function is modified from: https://stackoverflow.com/a/78934638.
     Args:
         tensor (torch.Tensor): The tensor to be gathered from each GPU.
@@ -78,7 +80,7 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
             for _ in shapes
         ]
     # if not scalar then we are handling a batched multi-dim-tensor (e.g. node lvl predictions or graph lvl predictions)
-    elif tensor.dim()>=2:
+    else:
         outputs = [
             torch.empty(*_shape, dtype=tensor.dtype, device=tensor.device)
             for _shape in shapes
@@ -87,7 +89,7 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
     dist.all_to_all(outputs, inputs, group=group)
 
     # to gather metrics: create a single tensor with the cat the atoms from the batches of the different processes
-    if outputs[0].dim()>=2:
+    if not tensor.dim() == 0:
         outputs = torch.cat(outputs, dim=0)
         assert sum(s[0] for s in shapes).item() == outputs.shape[0]
         return outputs
@@ -98,9 +100,8 @@ def sync_tensor_across_GPUs(tensor: torch.Tensor, world_size:int, group=None) ->
     return outputs
 
 
-def sync_dic_of_tensors_across_GPUs(tensor_dict: Dict[str, torch.Tensor], world_size:int, keys_to_sync:Iterable[str]=None) -> None:
+def sync_dict_of_tensors_across_GPUs(tensor_dict: Dict[str, torch.Tensor], world_size:int, keys_to_sync:Iterable[str]=None) -> None:
     """Synchronize a dictionary of tensors across multiple GPUs.
-
     This function must be called by all processes.
     It synchronizes the tensors in the provided dictionary across all GPUs involved in the distributed training.
     The synchronization is done in place, modifying the original dictionary.
@@ -116,5 +117,7 @@ def sync_dic_of_tensors_across_GPUs(tensor_dict: Dict[str, torch.Tensor], world_
     # todo: enforce inability to access to content in dict after this step since all content will be rank dependant? option pop everything but keys_to_sync
     if keys_to_sync is None:
         keys_to_sync = tensor_dict.keys()
-    for k in keys_to_sync:
+
+    sorted_keys = sorted(keys_to_sync) # needs sorting to ensure that all gpus will try to sync for the same k
+    for k in sorted_keys:
         tensor_dict[k] = sync_tensor_across_GPUs(tensor_dict[k], world_size)

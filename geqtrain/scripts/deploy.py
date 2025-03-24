@@ -114,7 +114,7 @@ def load_deployed_model(
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description="Deploy and view information about previously deployed NequIP models."
+        description="Deploy and view information about previously deployed GEqTrain models."
     )
     # backward compat for 3.6
     if sys.version_info[1] > 6:

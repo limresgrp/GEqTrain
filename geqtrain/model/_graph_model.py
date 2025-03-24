@@ -4,6 +4,8 @@ import logging
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
@@ -16,30 +18,8 @@ from geqtrain.nn import (
     ReadoutModule,
 )
 
-
-def GraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
-) -> SequentialGraphNetwork:
-    """Base model architecture.
-
-    """
-    layers = buildHeadlessGraphModelLayers(config)
-
-    layers.update({
-        "head": (ReadoutModule, dict(
-            field=AtomicDataDict.GRAPH_FEATURES_KEY,
-            out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
-        )),
-    })
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )
-
-
 def HeadlessGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -51,7 +31,16 @@ def HeadlessGraphModel(
         layers=layers,
     )
 
-def buildHeadlessGraphModelLayers(config):
+def buildHeadlessGraphModelLayers(config:Config):
+    '''
+    returns dict:
+        - keys: layer names
+        - values:
+            either:
+            - obj that inherits from (GraphModuleMixin, torch.nn.Module)
+            - tuple of (obj that inherits from (GraphModuleMixin, torch.nn.Module), dict)
+                where dict is kwargs for the associated obj constructor
+    '''
     logging.info("--- Building Graph Model ---")
 
     update_config(config)
@@ -81,5 +70,5 @@ def buildHeadlessGraphModelLayers(config):
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
         )),
     })
-    
+
     return layers

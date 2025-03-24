@@ -7,7 +7,7 @@ from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
 from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule, SwiGLU
-from geqtrain.utils import add_tags_to_parameters
+from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
 
 
@@ -91,6 +91,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         zero_init_last_layer_weights: bool = False,
         dropout: Optional[float] = None,
         dampen: bool = False,
+        wd: bool = False,
         gain:Optional[float] = None,
     ):
         super().__init__()
@@ -147,9 +148,10 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 norm_const = nonlin_const
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
                 modules = [(f"linear_{layer_index}", lin_layer)]
-                if self.use_layer_norm:
-                    modules.append((f"norm_pre_activations_{layer_index}", torch.nn.LayerNorm(h_out)))
                 modules.append((f"activation_{layer_index}", non_lin_instance))
+                if dropout is not None:
+                    assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
+                    modules.append((f"dropout_{layer_index}", torch.nn.Dropout(dropout)))
 
             if self.use_layer_norm: modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
             if zero_init_last_layer_weights: norm_const = norm_const * 1.e-1
@@ -171,14 +173,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 module_name, mod = module
                 sequential_dict[module_name] = mod
 
-        if dropout is not None:
-            assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
-            sequential_dict["dropout"] = torch.nn.Dropout(dropout)
-
         self.sequential = torch.nn.Sequential(sequential_dict)
 
         if dampen:
-            add_tags_to_parameters(self, 'dampen')
+            add_tags_to_module(self, 'dampen')
+        if wd:
+            add_tags_to_module(self, '_wd')
 
     def forward(self, x):
         return self.sequential(x)

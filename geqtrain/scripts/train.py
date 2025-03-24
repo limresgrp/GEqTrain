@@ -98,7 +98,12 @@ def main(args=None):
             "either set append to True or use a different root or runname"
         )
 
-    if not found_restart_file:
+    fine_tune = config.get("fine_tune", False)
+    if not found_restart_file or fine_tune:
+        if fine_tune:
+            logging.info("--- Fine-tuning model ---")
+        elif not found_restart_file:
+            logging.info("--- Starting fresh training ---")
         func = fresh_start
     else:
         func = restart
@@ -140,21 +145,22 @@ def fresh_start(rank, world_size, config, train_dataset, validation_dataset):
         # = Build model =
         if model is None:
             logging.info("Building the network...")
-            model = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
+            model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
             logging.info("Successfully built the network!")
+
+        trainer.init(model=model)
+        trainer.update_kwargs(config)
 
         # Equivar test
         if config.equivariance_test:
             logging.info("Running equivariance test...")
             model.eval()
-            errstr = assert_AtomicData_equivariant(model, trainer.dataset_train[0])
+            first_batch = next(iter(trainer.dl_train)).to(trainer.device)
+            errstr = assert_AtomicData_equivariant(model, first_batch)
             model.train()
             logging.info(
                 f"Equivariance test passed; equivariance errors:\n{errstr}")
             del errstr
-
-        trainer.init(model=model)
-        trainer.update_kwargs(config)
 
         # Run training
         trainer.save()
@@ -178,7 +184,10 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         # compare old_config to config and update stop condition related arguments
 
         modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
-                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size"]
+                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
+                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
+                         "report_init_validation", "metrics_key", "max_gradient_norm",
+                        ]
 
         for k,v in config.items():
             if v != old_config.get(k, ""):
@@ -191,6 +200,18 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
                 elif k == 'filepath':
                     assert Path(config[k]).resolve() == Path(old_config[k]).resolve()
                     old_config[k] = v
+                elif k in ['dataset_list', 'validation_dataset_list']:
+                    assert isinstance(v, list), "dataset_list/validation_dataset_list must be of type list"
+                    assert isinstance(old_config[k], list), "dataset_list/validation_dataset_list must be of type list"
+                    assert len(v) == 1, "for now only 1 dataset under dataset_list/validation_dataset_list is allowed"
+                    assert len(old_config[k]), "for now only 1 dataset under dataset_list/validation_dataset_list is allowed"
+                    new_dset_and_kwargs = v[0]
+                    old_dset_and_kwargs = old_config[k][0]
+                    for dlist_k in new_dset_and_kwargs.keys():
+                        if dlist_k in modifiable_params:
+                            continue
+                        if new_dset_and_kwargs[dlist_k] != old_dset_and_kwargs[dlist_k]:
+                            raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
                 elif isinstance(v, type(old_config.get(k, ""))):
                     raise ValueError(f'Key "{k}" is different in config and the result trainer.pth file. Please double check')
 
@@ -202,6 +223,8 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
             filename=restart_file,
             enforced_format="torch",
         )
+        if old_config.get("fine_tune", False):
+            raise ValueError("Cannot restart training of a fine-tuning run")
 
         check_for_config_updates()
 
@@ -214,6 +237,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
         trainer, model = load_trainer_and_model(rank, world_size, config, old_config=old_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
         trainer.init(model=model)
+        trainer.load_state_dicts_for_restart(old_config)
         trainer.update_kwargs(config)
 
         # Run training

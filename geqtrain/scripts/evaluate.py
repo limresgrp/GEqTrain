@@ -137,9 +137,7 @@ def load_model(model: Union[str, Path], device="cpu"):
         pass
 
     # load a training session model
-    model, model_config = Trainer.load_model_from_training_session(
-        traindir=model.parent, model_name=model.name, device=device
-    )
+    model, model_config = Trainer.load_model_from_training_session(traindir=model.parent, model_name=model.name, device=device, for_inference=True)
     logger.info("loaded model from training session.")
     model.eval()
 
@@ -231,8 +229,7 @@ def main(args=None, running_as_script: bool = True):
         if args.model is None:
             args.model = args.train_dir / "best_model.pth"
             trainer = torch.load(str(args.train_dir / "trainer.pth"), map_location="cpu")
-            if 'best_model_saved_at_epoch' in trainer['state_dict'].keys():
-                logger.info(f"Loading model from epoch: {trainer['state_dict']['best_model_saved_at_epoch']}")
+
 
     # Validate
     if args.test_config is None:
@@ -243,14 +240,14 @@ def main(args=None, running_as_script: bool = True):
 
     # Device
     device = torch.device(args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
     if device.type == "cuda":
         logger.warning("Please note that models running on CUDA are usually nondeterministc and that this manifests in the final test errors; for a _more_ deterministic result, please use `--device cpu`",)
+    logger.info(f"Using device: {device}")
 
     # Load model
     logger.info(f"Loading model...")
     model, config = load_model(args.model, device=args.device)
-    logger.info(f"Model loaded!\n{args.model}")
+    logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
     # Load config file
     logger.info(f"Loading config file...")
@@ -293,7 +290,7 @@ def main(args=None, running_as_script: bool = True):
     if metrics is not None:
         for loss_func in metrics.funcs.values():
             _init(loss_func, dataset, model)
-    
+
     dataloader = DataLoader(
         dataset=dataset,
         shuffle=False,
@@ -329,22 +326,27 @@ def main(args=None, running_as_script: bool = True):
         def format_csv(data, ref_data, batch_index, chunk_index, dataset_raw_file_name):
             try:
                 # Extract fields from data
+                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
+                if node_output is None:
+                    return ''
+                if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
-                node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+                num_node_centers = len(node_centers)
+                if len(atom_number) > num_node_centers: atom_number = atom_number[node_centers]
+                if len(node_output) > num_node_centers: node_output = node_output[node_centers]
+                if ref_node_output is not None and len(ref_node_output) > num_node_centers: ref_node_output = ref_node_output[node_centers]
 
                 # Initialize lines list for CSV format
                 lines = []
                 if pbar.n == 0:
                     lines.append("batch,chunk,atom_number,node_type,pred,ref,dataset_raw_file_name")
-
-                if node_output is not None:
-                    if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
-                    for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
-                        _ref_node_output = ref_node_output[node_centers[idx]].item() if ref_node_output is not None else 0
-                        lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")
+    
+                for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
+                    _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
+                    lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")
             except:
                 return ''
             # Join all lines into a single string for XYZ format
@@ -397,9 +399,23 @@ def main(args=None, running_as_script: bool = True):
     chunk_callbacks = [out_callback]
     if metrics is not None:
         chunk_callbacks.append(metrics_callback)
-    
+
     output_keys, per_node_outputs_keys = get_output_keys(metrics)
+
+    # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
+    use_accuracy = False
+    if use_accuracy:
+        from geqtrain.utils.evaluate_utils import AccuracyMetric
+        classification_metrics = AccuracyMetric(output_keys[0])
+        chunk_callbacks += [classification_metrics]
+
+    config.pop("device")
     infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
+
+    if use_accuracy:
+        for cb in chunk_callbacks:
+            if isinstance(cb, AccuracyMetric):
+                cb.print_current_result()
 
     if metrics is not None:
         logger.info("\n--- Final result: ---")

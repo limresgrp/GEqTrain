@@ -82,7 +82,7 @@ def test_equivariance(config, logger):
     logger.info(f"Successfully loaded the data set of type {dataset}...")
 
     # = Build model =
-    final_model = model_from_config(
+    final_model, _ = model_from_config(
         config=config, initialize=True, dataset=dataset
     )
     logger.info("Successfully built the network...")
@@ -91,7 +91,7 @@ def test_equivariance(config, logger):
     _check_old_keys(config)
 
     # Equivar test
-    
+
     n_train: int = len(dataset)
     final_model.eval()
     final_model.to(config.get('device', 'cpu'))

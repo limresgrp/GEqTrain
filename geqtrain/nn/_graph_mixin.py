@@ -17,7 +17,11 @@ def is_instance_of_class(obj):
 class GraphModuleMixin:
     r"""Mixin parent class for ``torch.nn.Module``s that act on and return ``AtomicDataDict.Type`` graph data.
 
-    All such classes should call ``_init_irreps`` in their ``__init__`` functions with information on the data fields they expect, require, and produce, as well as their corresponding irreps.
+    Derived classes must call ``_init_irreps`` in their ``__init__`` with
+    information on the data fields they expect, require, and produce, as well as their corresponding irreps.
+
+    Note:
+        Explanation of Mixin classes: https://medium.com/@yanxingyang/usage-of-mixin-class-in-python-932b940db80
     """
 
     def _init_irreps(
@@ -29,7 +33,8 @@ class GraphModuleMixin:
     ):
         """Setup the expected data fields and their irreps for this graph module.
 
-        ``None`` is a valid irreps in the context for anything that is invariant but not well described by an ``e3nn.o3.Irreps``. An example are edge indexes in a graph, which are invariant but are integers, not ``0e`` scalars.
+        ``None`` is a valid irreps in the context for anything that is invariant but not well described by an ``e3nn.o3.Irreps``.
+        An example are edge indexes in a graph, which are invariant but are integers, not ``0e`` scalars.
 
         Args:
             irreps_in (dict): maps names of all input fields from previous modules or
@@ -130,31 +135,34 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         modules (list or dict of ``GraphModuleMixin``s): the sequence of graph modules. If a list, the modules will be named ``"module0", "module1", ...``.
     """
 
-    def __init__(
-        self,
-        modules: Union[Sequence[GraphModuleMixin], Dict[str, GraphModuleMixin]],
-    ):
+    def __init__(self, modules: Union[Sequence[GraphModuleMixin], Dict[str, GraphModuleMixin]]):
+
+        # convert to (ordered) list GraphModuleMixin s
         if isinstance(modules, dict):
             module_list = list(modules.values())
         else:
             module_list = list(modules)
-        # check in/out irreps compatible
+
+        # check in/out irreps compatibility
         for m1, m2 in zip(module_list, module_list[1:]):
             assert AtomicDataDict._irreps_compatible(
                 m1.irreps_out, m2.irreps_in
             ), f"Incompatible irreps_out from {type(m1).__name__} for input to {type(m2).__name__}: {m1.irreps_out} -> {m2.irreps_in}"
+
+        # as per GraphModuleMixin requirement
         self._init_irreps(
             irreps_in=module_list[0].irreps_in,
             my_irreps_in=module_list[0].irreps_in,
             irreps_out=module_list[-1].irreps_out,
         )
+
         # torch.nn.Sequential will name children correctly if passed an OrderedDict
         if isinstance(modules, dict):
             modules = OrderedDict(modules)
         else:
             modules = OrderedDict((f"module{i}", m) for i, m in enumerate(module_list))
-        
-        super().__init__(modules)
+
+        super().__init__(modules) # call init of torch.nn.Sequential s.t. use named_children for flattening
 
         flat_modules = OrderedDict()
 
@@ -178,7 +186,9 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                 recursive_flatten(self)
             else:
                 flat_modules[name] = module
-        super().__init__(flat_modules)
+
+        super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version
+
 
     @classmethod
     def from_parameters(
@@ -188,6 +198,8 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         irreps_in: Optional[dict] = None,
     ):
         r"""Construct a ``SequentialGraphModule`` of modules built from a shared set of parameters.
+
+        calls ctor of each layer in layers that has been passed as input, returns the SequentialGraphNetwork indexable as OrderedDict
 
         For some layer, a parameter with name ``param`` will be taken, in order of priority, from:
           1. The specific value in the parameter dictionary for that layer, if provided
@@ -208,20 +220,23 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         # note that dictionary ordered gueranteed in >=3.7, so its fine to do an ordered sequential as a dict.
         built_modules = []
         for name, builder in layers.items():
+
+            # validate name
             if not isinstance(name, str):
                 raise ValueError(f"`'name'` must be a str; got `{name}`")
+
+            # get params (if any)
+            params = {}
             if isinstance(builder, tuple):
                 builder, params = builder
-            else:
-                params = {}
+
+            # validate builder
             if not callable(builder):
-                raise TypeError(
-                    f"The builder has to be a class or a function. got {type(builder)}"
-                )
-            
-            if is_instance_of_class(builder):
+                raise TypeError(f"The builder has to be a class or a function. got {type(builder)}")
+
+            if is_instance_of_class(builder): # if builder is already an instance of a class
                 instance = builder
-            else:
+            else: # otherwise, instantiate
                 instance, _ = instantiate(
                     builder=builder,
                     prefix=name,
@@ -238,16 +253,14 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                     all_args=shared_params,
                 )
 
+            # post validation
             if not isinstance(instance, GraphModuleMixin):
-                raise TypeError(
-                    f"Builder `{builder}` for layer with name `{name}` did not return a GraphModuleMixin, instead got a {type(instance).__name__}"
-                )
+                raise TypeError(f"Builder `{builder}` for layer with name `{name}` did not return a GraphModuleMixin, instead got a {type(instance).__name__}")
 
-            built_modules.append(instance) # calls ctor of each layer in layers that has been passed as input, returns the SequentialGraphNetwork indexable as OrderedDict
+            built_modules.append(instance)
 
-        return cls(
-            OrderedDict(zip(layers.keys(), built_modules)),
-        )
+        return cls(OrderedDict(zip(layers.keys(), built_modules)))
+
 
     def append(self, name: str, module: GraphModuleMixin) -> None:
         r"""Append a module to the SequentialGraphNetwork.
@@ -391,7 +404,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                 return getattr(module, name)
         # Raise an error if the parameter is not found
         raise AttributeError(f"No submodule contains the parameter '{name}'")
-    
+
     def get_module(self, name):
         """
         Retrieves a module by its name from the OrderedDict of this Sequential container.
@@ -407,9 +420,8 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
     @_copy_to_script_wrapper
     def __iter__(self) -> Iterator[torch.nn.Module]:
         return iter(self._modules.items())
-    
+
     # Copied from https://pytorch.org/docs/stable/_modules/torch/nn/modules/container.html#Sequential
-    # with type annotations added
     def forward(self, input: AtomicDataDict.Type) -> AtomicDataDict.Type:
         for name, module in self.named_children():
             input = module(input)

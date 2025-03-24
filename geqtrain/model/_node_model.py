@@ -3,6 +3,8 @@ import logging
 
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
+from geqtrain.utils import Config
+
 from geqtrain.model import update_config
 from geqtrain.nn import (
     SequentialGraphNetwork,
@@ -16,28 +18,9 @@ from geqtrain.nn import (
 )
 
 
-def NodeModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
-) -> SequentialGraphNetwork:
-    """Base model architecture.
-
-    """
-    layers = buildNodeModelLayers(config)
-
-    layers.update({
-        "head": (ReadoutModule, dict(
-            field=AtomicDataDict.NODE_FEATURES_KEY,
-            out_field=AtomicDataDict.NODE_OUTPUT_KEY,
-        )),
-    })
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )
 
 def HeadlessNodeModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -49,7 +32,7 @@ def HeadlessNodeModel(
         layers=layers,
     )
 
-def buildNodeModelLayers(config):
+def buildNodeModelLayers(config:Config):
     logging.info("--- Building Node Model ---")
 
     update_config(config)
@@ -75,5 +58,5 @@ def buildNodeModelLayers(config):
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
     })
-    
+
     return layers

@@ -16,7 +16,8 @@ from .output import Output
 from ._cuda_utils import clean_cuda
 from ._hooks import ForwardHookHandler, print_stats
 from .grokfast import gradfilter_ma, gradfilter_ema
-from ._model_utils import add_tags_to_parameters
+from ._model_utils import add_tags_to_module, add_tags_to_parameter
+from .evaluate_utils import AccuracyMetric
 
 __all__ = [
     instantiate_from_cls_name,
@@ -37,5 +38,7 @@ __all__ = [
     print_stats,
     gradfilter_ma,
     gradfilter_ema,
-    add_tags_to_parameters,
+    add_tags_to_module,
+    add_tags_to_parameter,
+    AccuracyMetric,
 ]

@@ -2,6 +2,8 @@ import logging
 from typing import Optional
 from torch.utils.data import ConcatDataset
 from geqtrain.data import AtomicDataDict
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     PerNodeAttrsScaleModule,
@@ -9,7 +11,7 @@ from geqtrain.nn import (
 )
 
 
-def PerNodeAttrsScale(model, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
+def PerNodeAttrsScale(model, config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
     logging.info("--- Building PerTypeScale Module ---")
 
     layers = {
@@ -25,7 +27,7 @@ def PerNodeAttrsScale(model, config, initialize: bool, dataset: Optional[ConcatD
         layers=layers,
     )
 
-def PerTypeScale(model, config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
+def PerTypeScale(model, config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
     logging.info("--- Building PerTypeScale Module ---")
 
     layers = {

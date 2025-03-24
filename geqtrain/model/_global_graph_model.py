@@ -4,6 +4,8 @@ from typing import Optional
 from geqtrain.data import AtomicDataDict
 from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
+from geqtrain.utils import Config
+
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
@@ -17,28 +19,9 @@ from geqtrain.nn import (
 )
 
 
-def GlobalGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None,
-) -> SequentialGraphNetwork:
-    """Base model architecture.
-
-    """
-    layers = buildGlobalGraphModelLayers(config)
-
-    layers.update({
-        "head": (ReadoutModule, dict(
-            field=AtomicDataDict.GRAPH_FEATURES_KEY,
-            out_field=AtomicDataDict.GRAPH_OUTPUT_KEY,
-        )),
-    })
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )
 
 def HeadlessGlobalGraphModel(
-    config, initialize: bool, dataset: Optional[ConcatDataset] = None,
+    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None,
 ) -> SequentialGraphNetwork:
     """Base model architecture.
 
@@ -50,7 +33,7 @@ def HeadlessGlobalGraphModel(
         layers=layers,
     )
 
-def buildGlobalGraphModelLayers(config):
+def buildGlobalGraphModelLayers(config:Config):
     logging.info("--- Building Global Graph Model")
 
     update_config(config)
@@ -100,6 +83,7 @@ def buildGlobalGraphModelLayers(config):
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+            # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
     })
 

@@ -32,7 +32,7 @@ def upload_zipped_code_on_wandb(source, upload_name):
         wandb.save(dest, policy = "now")
         # os.remove(dest) # can't remove since wandb.save call is async
 
-def init_n_update(config):
+def init_n_update_wandb(config):
     conf_dict = dict(config)
     # wandb mangles keys (in terms of type) as well, but we can't easily correct that because there are many ambiguous edge cases. (E.g. string "-1" vs int -1 as keys, are they different config keys?)
     if any(not isinstance(k, str) for k in conf_dict.keys()):
@@ -86,7 +86,7 @@ def init_n_update(config):
     return config
 
 
-def resume(config):
+def resume_wandb_run(config):
     # resume to the old wandb run
     wandb.init(
         project=config.wandb_project,

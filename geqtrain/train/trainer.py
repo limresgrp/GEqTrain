@@ -9,12 +9,12 @@ from os.path import isfile
 from time import perf_counter
 from typing import Callable, Optional, Union, Tuple, List, Dict
 from pathlib import Path
-
+import torch.distributed as dist
 import numpy as np
 import torch
-
+import re
 from torch.utils.data import DistributedSampler, Sampler
-
+import math
 from geqtrain.data import (
     DataLoader,
     AtomicData,
@@ -42,9 +42,10 @@ from geqtrain.utils import (
 
 from geqtrain.model import model_from_config
 from geqtrain.train.utils import find_matching_indices, evaluate_end_chunking_condition
+from geqtrain.train.sampler import EnsembleSampler, EnsembleDistributedSampler
 from geqtrain.train import (
     sync_tensor_across_GPUs,
-    sync_dic_of_tensors_across_GPUs,
+    sync_dict_of_tensors_across_GPUs,
 )
 
 from .loss import Loss, LossStat
@@ -72,6 +73,7 @@ def set_seed(seed):
 def get_output_keys(loss_func: Loss):
     '''
     returns fields/keys that have to be predicted (i.e. for which we need to compute a loss)
+    can take as input a metrics object (for an example see evaluate.py)
     '''
     output_keys, per_node_outputs_keys = [], []
     if loss_func is not None:
@@ -97,8 +99,10 @@ def run_inference(
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
+    dropout_edges: float = 0.,
     **kwargs,
 ):
+    #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available(
     ) else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
     # AtomicDataDict is the dstruct that is taken as input from each forward
@@ -136,12 +140,39 @@ def run_inference(
     if noise is not None:
         ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
         input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
+    
+    if dropout_edges > 0:
+        aply_dropout_edges(dropout_edges, input_data)
 
     with cm, precision:
         out = model(input_data)
         del input_data
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
+
+def aply_dropout_edges(dropout_edges, input_data):
+    edge_index = input_data[AtomicDataDict.EDGE_INDEX_KEY]
+    num_edges = edge_index.size(1)
+    num_dropout_edges = int(dropout_edges * num_edges)
+
+        # Randomly select edges to drop
+    drop_edges = torch.randperm(num_edges, device=edge_index.device)[:num_dropout_edges]
+    keep_edges = torch.ones(num_edges, dtype=torch.bool, device=edge_index.device)
+    keep_edges[drop_edges] = False
+
+        # Ensure at least some edges per node center
+    node_centers = edge_index[0].unique()
+    remaining_node_centers = edge_index[0, keep_edges].unique()
+    combined = torch.cat((node_centers, remaining_node_centers))
+    uniques, counts = combined.unique(return_counts=True)
+    dropped_out_node_centers = uniques[counts == 1]
+    for node in dropped_out_node_centers:
+        node_edges = (edge_index[0] == node).nonzero(as_tuple=True)[0]
+        keep_edges[node_edges[torch.randint(len(node_edges), (max(1, int((1-dropout_edges)*len(node_edges))),))]] = True
+
+    input_data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
+    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in input_data:
+        input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
 
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
@@ -291,7 +322,7 @@ class Trainer:
         lr_scheduler_kwargs (dict): parameters to initialize the scheduler
 
         optimizer_name (str): name for optimizer
-        optim_kwargs (dict): parameters to initialize the optimizer
+        optimizer_kwargs (dict): parameters to initialize the optimizer
 
         batch_size (int): size of each batch
         validation_batch_size (int): batch size for evaluating the model for validation
@@ -353,8 +384,7 @@ class Trainer:
     """
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
-    object_keys = ["lr_sched", "optim",
-                   "early_stopping_conds", "warmup_scheduler"]
+    object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
     lr_scheduler_module = torch.optim.lr_scheduler
     optim_module = torch.optim
 
@@ -415,21 +445,35 @@ class Trainer:
         hooks: Dict = {},
         use_grokfast: bool = False,
         debug: bool = False,
-        use_warmup: bool = False,
+        warmup_epochs: int | str = -1,
+        head_wds: float = 0.0,
+        accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
+        metric_criteria:str='decreasing', # or 'increasing'
+        dropout_edges: Union[bool, float] = False,
         **kwargs,
     ):
         # --- setup init flag to false, it will be set to true when both model and dset will be !None
-        self._initialized = False
         self.cumulative_wall = 0
-        self.best_model_saved_at_epoch = -1
         self.model = None
         logging.debug("* Initialize Trainer")
 
-        # --- write all self.init_keys in self AND in _local_kwargs
+        # --- dropout_edges
+        dropout_edges = dropout_edges if isinstance(dropout_edges, float) else 0.2 if dropout_edges is True else 0.
+
+
+        # --- write all self.init_keys in self AND in _local_kwargs, init_keys are all kwargs of ctor
         _local_kwargs = {}
         for key in self.init_keys:
             setattr(self, key, locals()[key])
             _local_kwargs[key] = locals()[key]
+
+        # --- parse warmup period from yaml
+        if not isinstance(self.warmup_epochs, int):
+            match = re.match(r'^(\d+(?:\.\d+)?)%$', self.warmup_epochs.strip())
+            if match:
+                self.warmup_epochs = int((self.max_epochs/100)*float(match.group(1)))
+            else:
+                raise ValueError(f"Invalid {match.string} format provided, it must be eg: '7.1%' in yaml, with ''")
 
         # --- get I/O handler
         output = Output.get_output(dict(**_local_kwargs, **kwargs))
@@ -466,7 +510,7 @@ class Trainer:
         # --- loss/logger printing info
         self.metrics_metadata = {
             'type_names': self.type_names,
-            'target_names': self.target_names,
+            'target_names': self.target_names or ['target'],
         }
 
         # --- filter node target to train on based on node type or type name
@@ -492,7 +536,7 @@ class Trainer:
         # --- initialize training states
         self.output_keys = None
         self.per_node_outputs_keys = None
-        self.best_metrics = float("inf")
+        self.best_metrics = float("inf") if metric_criteria == 'decreasing' else float('-inf')
         self.best_epoch = 0
         self.iepoch = -1 if self.report_init_validation else 0
 
@@ -532,9 +576,20 @@ class Trainer:
         if hasattr(self, 'rank'):
             assert self.device == self.rank
 
-    def _get_num_of_steps_per_epoch(self):
+        '''Gradient Accumulation: simulate larger BS when hardware memory is insufficient to process large batches.
+        Instead of updating the model parameters after every batch, gradients are accumulated over multiple batches, and the model parameters are updated only after a specified number of steps.
+        accumulation_steps: number of steps over which to accumulate gradients.
+        Accumulation: In the batch_step method, gradients are accumulated over multiple batches. The optimizer's zero_grad method is called only at the start of the accumulation cycle.
+        Optimization Step: After the specified number of accumulation steps, the gradients are used to update the model parameters, and the accumulation counter is reset.'''
+        self.accumulation_counter = 0  # Counter for gradient accumulation
+
+    def _num_of_optim_steps_per_epoch(self) -> int:
+        '''returns number of batches in 1 epoch'''
         if hasattr(self, "dl_train"):
-            return len(self.dl_train)
+            assert math.ceil(len(self.dataset_train)/self.batch_size) == len(self.dl_train)
+            n = math.ceil(len(self.dl_train) / self.accumulation_steps)
+            self.logger.info(f"Number of optim steps per epoch {n}")
+            return n
         raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
@@ -548,15 +603,18 @@ class Trainer:
         # initialize optimizer
 
         # get all params that require grad
-        param_dict = {name: param for name,
-                      param in self.model.named_parameters() if param.requires_grad}
+        param_dict = {name: param for name, param in self.model.named_parameters() if param.requires_grad}
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
             'dampen':       {'lr': self.learning_rate * 1.e-1},
-            'strengthen':   {'lr': self.learning_rate * 1.e1},
-            'nowd':         {'weight_decay': 0.},
+            'nowd':         {'weight_decay': 0.0},
+            "_wd":          {'weight_decay': self.head_wds},
         }
+        if 'fine_tune_lr' in self.kwargs:
+            param_groups_dict.update(
+                {'tune':{'lr': self.kwargs['fine_tune_lr']}}
+            )
 
         def merge_groups(param, param_groups):
             # overrides default dict for optim
@@ -584,21 +642,25 @@ class Trainer:
             # If no group with the same keys is found, add the new group
             optim_groups.append(group)
 
-        # parsing params to build optim groups
-        # atm only ['nowd', 'dampen', 'strengthen'] are handled
+        # gathering/parsing params to build optim groups
         optim_groups = []
         for p in param_dict.values():
             param_groups = []
             if getattr(p, 'tags', None) is not None:
                 for tag in getattr(p, 'tags'):
-                    if tag == 'strengthen':
-                        pass
                     param_groups.append(tag)
             if p.dim() < 2:
                 param_groups.append('nowd')
+            # here if tag=freeze then req grad to F
 
             group = merge_groups(p, param_groups)
             merge_or_create_group(optim_groups, group)
+
+        # tag setted at model_from_config execution
+        # parse all params with tag freeze and set thier req grad to F
+        # check that head has req grad to T
+        # in  - HeadlessGlobalNodeModel: load # {lr, freeze} <- apply tags here, needed to be set
+        # another tag for trunk 1e-6
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
             module=torch.optim,
@@ -623,23 +685,21 @@ class Trainer:
         self.lr_sched = None
         self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
+            # note: lr_scheduler_T_max is used for schedulers that require max num of steps
+            # e.g. T_max in https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#cosineannealinglr
+            steps_per_epoch = self._num_of_optim_steps_per_epoch()
+
+            if self.warmup_epochs > 0:
+                import pytorch_warmup as warmup
+                self.warmup_steps = steps_per_epoch * self.warmup_epochs
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated inplace at this call: lr*=1/warmup_period
 
             if self.lr_scheduler_name == "CosineAnnealingLR":
-                steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * \
-                    self.max_epochs
-
-            if self.use_warmup:
-                #! for now it has been tested only with CosineAnnealingLR
-                import pytorch_warmup as warmup
-                steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.warmup_steps = steps_per_epoch * \
-                    self.kwargs.get("warmup_epochs", int(
-                        (self.max_epochs/100)*5))  # Default: 5% of max epochs
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * \
-                    self.max_epochs - self.warmup_steps
-                self.warmup_scheduler = warmup.LinearWarmup(
-                    self.optim, self.warmup_steps)
+                total_number_of_steps = steps_per_epoch * self.max_epochs
+                if self.warmup_epochs > 0:
+                    total_number_of_steps -= self.warmup_steps
+                self.kwargs['lr_scheduler_T_max'] = total_number_of_steps
+                self.kwargs['eta_min'] = 1.e-7
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
@@ -674,8 +734,7 @@ class Trainer:
                         new_dict[f"{VALIDATION}_{k}"] = item[k]
                 kwargs[key] = new_dict
                 n_args += len(new_dict)
-        self.early_stopping_conds = EarlyStopping(
-            **kwargs) if n_args > 0 else None
+        self.early_stopping_conds = EarlyStopping(**kwargs) if n_args > 0 else None
 
         if hasattr(self.model, "irreps_out"):
             for key in self.train_on_keys:
@@ -763,21 +822,15 @@ class Trainer:
             dictionary["state_dict"]["rng_state"] = torch.get_rng_state()
             dictionary["state_dict"]["dataset_rng_state"] = self.dataset_rng.get_state()
             if torch.cuda.is_available():
-                dictionary["state_dict"]["cuda_rng_state"] = torch.cuda.get_rng_state(
-                    device=self.torch_device
-                )
+                dictionary["state_dict"]["cuda_rng_state"] = torch.cuda.get_rng_state(device=self.torch_device)
             dictionary["state_dict"]["cumulative_wall"] = self.cumulative_wall
-            dictionary["state_dict"]["best_model_saved_at_epoch"] = self.best_model_saved_at_epoch
 
         if training_progress:
             dictionary["progress"] = {}
             for key in ["iepoch", "best_epoch"]:
                 dictionary["progress"][key] = self.__dict__.get(key, -1)
-            dictionary["progress"]["best_metrics"] = self.__dict__.get(
-                "best_metrics", float("inf")
-            )
-            dictionary["progress"]["stop_arg"] = self.__dict__.get(
-                "stop_arg", None)
+            dictionary["progress"]["best_metrics"] = self.__dict__.get("best_metrics", float("inf"))
+            dictionary["progress"]["stop_arg"] = self.__dict__.get("stop_arg", None)
 
             # TODO: these might not both be available, str defined, but no weights
             dictionary["progress"]["best_model_path"] = self.best_model_path
@@ -841,12 +894,55 @@ class Trainer:
         """
 
         dictionary = load_file(
-            supported_formats=dict(torch=["pth", "pt"], yaml=[
-                                   "yaml"], json=["json"]),
+            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
             filename=filename,
             enforced_format=format,
         )
         return cls.from_dict(dictionary, append)
+
+
+    def load_state_dicts_for_restart(self, dictionary):
+        # ! progress implies that we are resuming training from last_model_path
+        assert "progress" in dictionary, "key: 'progress' not present in dictionary, are you running a restart?"
+        assert "state_dict" in dictionary, "key: 'state_dict' not present in dictionary, are you running a restart?"
+        assert self.optim, "trying to reload state for restart; optimizer must be already instanciated"
+
+        if 'lr_scheduler_name' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+        if 'early_stopping_lower_bounds' in dictionary or 'early_stopping_patiences' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+        if 'warmup_epochs' in dictionary:
+            assert self.lr_sched, "trying to reload state for restart; optimizer must be already instanciated"
+
+        dictionary = deepcopy(dictionary)
+        progress = dictionary["progress"]
+
+        state_dict = dictionary.pop("state_dict") # encapsulates all the states of the optimizer, scheduler, etc. - i.e. the training state
+        dictionary.pop("progress")
+
+        logging.info("Reload optimizer and scheduler states")
+        for key in self.__class__.object_keys:
+            item = getattr(self, key, None)
+            if item is not None:
+                item.load_state_dict(state_dict[key])
+                logging.info(f"{key} state reloaded!")
+            else:
+                logging.info(f"{key} state NOT found cannot reload it")
+
+        self.cumulative_wall = state_dict["cumulative_wall"]
+
+        torch.set_rng_state(state_dict["rng_state"])
+        self.dataset_rng.set_state(state_dict["dataset_rng_state"])
+        if torch.cuda.is_available():
+            torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
+
+        self.iepoch = progress["iepoch"]
+        self.best_metrics = progress["best_metrics"]
+        self.best_epoch = progress["best_epoch"]
+        stop_arg = progress.pop("stop_arg", None)
+
+        if self.stop_cond:
+            raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
     @classmethod
     def from_dict(cls, dictionary, append: Optional[bool] = None):
@@ -857,10 +953,9 @@ class Trainer:
         dictionary (dict):
         append (bool): if True, append the old model files and append the same logfile
         """
-
         dictionary = deepcopy(dictionary)
 
-        # update the restart and append option
+        # update the append option
         if append is not None:
             dictionary["append"] = append
 
@@ -868,69 +963,34 @@ class Trainer:
         iepoch = -1
         if "model" in dictionary:
             model = dictionary.pop("model")
+        elif "fine_tune" in dictionary:
+            model_pth_path = Path(dictionary["fine_tune"])
+            assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
         elif "progress" in dictionary:
-            progress = dictionary["progress"]
+            model_pth_path = Path(dictionary["progress"]["last_model_path"])
+            assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
 
-            # load the model from file
-            if dictionary.get("fine_tune"):
-                if isfile(progress["best_model_path"]):
-                    load_path = Path(progress["best_model_path"])
-                else:
-                    raise AttributeError("model weights & bias are not saved")
-            else:
-                iepoch = progress["iepoch"]
-                if isfile(progress["last_model_path"]):
-                    load_path = Path(progress["last_model_path"])
-                else:
-                    raise AttributeError("model weights & bias are not saved")
-
+        if "progress" in dictionary or "fine_tune" in dictionary:
             model, _ = cls.load_model_from_training_session(
-                traindir=load_path.parent,
-                model_name=load_path.name,
+                traindir=model_pth_path.parent,
+                model_name=model_pth_path.name,
                 config_dictionary=dictionary,
             )
-            logging.debug(f"Reload the model from {load_path}")
+            logging.debug(f"Reload the model from {model_pth_path}")
 
-            dictionary.pop("progress")
-
-        state_dict = dictionary.pop("state_dict", None)
-
+        # set up the trainer with the default "fresh_start" configuration
         logging.info("Loading Trainer...")
         trainer = cls(**dictionary)
         logging.info("Trainer successfully loaded!")
 
-        if state_dict is not None and model is not None:
-            logging.debug("Reload optimizer and scheduler states")
-            for key in cls.object_keys:
-                item = getattr(trainer, key, None)
-                if item is not None:
-                    item.load_state_dict(state_dict[key])
-            trainer._initialized = True
-            trainer.cumulative_wall = state_dict["cumulative_wall"]
-
-            torch.set_rng_state(state_dict["rng_state"])
-            trainer.dataset_rng.set_state(state_dict["dataset_rng_state"])
-            if torch.cuda.is_available():
-                torch.cuda.set_rng_state(state_dict["cuda_rng_state"])
-
-        if "progress" in dictionary:
-            trainer.best_metrics = progress["best_metrics"]
-            trainer.best_epoch = progress["best_epoch"]
-            stop_arg = progress.pop("stop_arg", None)
-        else:
-            trainer.best_metrics = float("inf")
-            trainer.best_epoch = 0
-            stop_arg = None
+        trainer.best_epoch = 0
         trainer.iepoch = iepoch
+        stop_arg = None
 
-        # final sanity check
         if trainer.stop_cond:
-            raise RuntimeError(
-                f"The previous run has properly stopped with {stop_arg}."
-                "Please either increase the max_epoch or change early stop criteria"
-            )
+            raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
-        return trainer, model
+        return trainer, model # care, here model CAN be None if no fine-tuning nor progress
 
     @staticmethod
     def load_model_from_training_session(
@@ -938,29 +998,28 @@ class Trainer:
         model_name="best_model.pth",
         device="cpu",
         config_dictionary: Optional[dict] = None,
+        for_inference: bool = False,
     ) -> Tuple[torch.nn.Module, Config]:
         traindir = str(traindir)
         model_name = str(model_name)
 
-        if config_dictionary is not None:
-            config = Config.from_dict(config_dictionary)
-        else:
+        if config_dictionary is None:
             config = Config.from_file(traindir + "/config.yaml")
+        else:
+            config = Config.from_dict(config_dictionary)
 
-        model: torch.nn.Module = model_from_config(
+        model, weights_to_train_from_scratch = model_from_config(
             config=config,
             initialize=False,
-        )
-        if model is not None:  # TODO: why would it be?
-            # TODO: this is not exactly equivalent to building with
-            # this set as default dtype... does it matter?
-            model.to(
-                device=torch.device(device),
-                dtype=torch.float32,
-            )
-            model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
-            model.load_state_dict(model_state_dict)
+            deploy=for_inference,
+        ) # raises if returned model is None
 
+        model.to(device=torch.device(device), dtype=torch.float32)
+        model_state_dict = torch.load(traindir + "/" + model_name, map_location=device, weights_only=False)
+        # drop weights that must be initialized from scratch (if any)
+        model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
+        out = model.load_state_dict(model_state_dict, strict = not ('fine_tune' in config))
+        print(f"Model loading message: {out}")
         return model, config
 
     def init_dataset(self, config, train_dset, val_dset):
@@ -978,7 +1037,6 @@ class Trainer:
         self.init_objects()
         self.init_losses()
         self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
-        self._initialized = True
         self.cumulative_wall = 0
 
     def init_metrics(self):
@@ -1036,7 +1094,10 @@ class Trainer:
 
         # actual train loop
         while not self.stop_cond:
+            self.accumulation_counter = 0  # Reset accumulation counter at the start of each epoch
             self.epoch_step()
+            if hasattr(self, 'world_size'):
+                dist.barrier()
             self.end_of_epoch_save()
 
         for callback in self._final_callbacks:
@@ -1136,7 +1197,7 @@ class Trainer:
     def _is_warmup_period_over(self):
         # this call must be done from all processes in case of distributed training
         # when this returns true -> start normal lr_scheduler.step() call
-        if not self.use_warmup:
+        if self.warmup_epochs == -1:
             return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
@@ -1146,7 +1207,7 @@ class Trainer:
         self.batch_metrics = self.metrics(pred=out, ref=ref_data)
 
     @torch.no_grad()
-    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
+    def _accumulate_losses(self, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
         '''
         during trainining it must be called after backward+optim
         '''
@@ -1155,25 +1216,17 @@ class Trainer:
     def lr_sched_step(self, batch_lvl:bool) -> None:
         if batch_lvl:
             if not self._is_warmup_period_over():
-                    with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
-                        pass
+                with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
+                    pass
             else:
                 self._batch_lvl_lrscheduler_step()
         else: # epoch lvl
-            if not self.use_warmup:
+            if self.warmup_epochs == -1:
                 self._epoch_lvl_lrscheduler_step()
             elif self._is_warmup_period_over():  # warmup present, just need to check if _is_warmup_period_over
                 self._epoch_lvl_lrscheduler_step()
 
-    def batch_step(self, data, validation:bool=False) -> bool:
-        optim_step_executed = False
-        if validation:
-            self.model.eval() # this could be done at lvl above
-        else:
-            self.optim.zero_grad(set_to_none=True)
-            self.model.train() # this could be done at lvl above
-
-        cm = contextlib.nullcontext() if (self.model_requires_grads or not validation) else torch.no_grad()
+    def batch_step(self, data, ctx_mngr, validation:bool=False) -> bool:
         already_computed_nodes = None
         while True:
             out, ref_data, batch_chunk_center_nodes, num_batch_center_nodes = run_inference(
@@ -1183,32 +1236,42 @@ class Trainer:
                 already_computed_nodes=already_computed_nodes,
                 output_keys=self.output_keys,
                 per_node_outputs_keys=self.per_node_outputs_keys,
-                cm=cm,
+                cm=ctx_mngr,
                 mixed_precision=self.mixed_precision,
                 skip_chunking=self.skip_chunking,
                 noise=self.noise,
                 batch_max_atoms=self.batch_max_atoms,
                 ignore_chunk_keys=self.ignore_chunk_keys,
+                dropout_edges=self.dropout_edges if not validation else 0.,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
+
+            # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
+            # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
+            # thus division is required since self.loss.__call__ has mean=T by default
+            loss = loss / self.accumulation_steps # average of averages
+
             self._update_metrics(out, ref_data)
             del ref_data
 
             if not validation:
                 loss.backward()
-                if self.use_grokfast:
-                    self.grads = gradfilter_ema(self.model, grads=self.grads)
-                # grad clipping: avoid "shocks" to the model (params) during optimization;
-                # returns norms; their expected trend is from high to low and stabilize
-                self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
-                if self.debug:
-                    self._log_updates()
-                self.optim.step()
-                optim_step_executed = True
-                self.lr_sched_step(batch_lvl=True)
+                self.accumulation_counter += 1
 
-            self._accumulate_losses(validation, optim_step_executed, loss, loss_contrib)
+                # if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
+                # if self.debug: self._log_updates()
+
+                if self.accumulation_counter == self.accumulation_steps:
+                    # grad clipping: avoid "shocks" to the model (params) during optimization;
+                    # returns norms; their expected trend is from high to low and stabilize
+                    self.norms.append(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_gradient_norm).item())
+                    self.optim.step()
+                    self.optim.zero_grad(set_to_none=True)
+                    self.lr_sched_step(batch_lvl=True)
+                    self.accumulation_counter = 0
+
+            self._accumulate_losses(loss, loss_contrib)
 
             # evaluate ending condition
             if self.skip_chunking:
@@ -1248,7 +1311,6 @@ class Trainer:
     def epoch_step(self):
         dataloaders = {TRAIN: self.dl_train, VALIDATION: self.dl_val}
         categories = [TRAIN, VALIDATION] if self.iepoch >= 0 else [VALIDATION]
-        # get the right dataloaders for the catagories we actually run
         dataloaders = [dataloaders[c] for c in categories]
         self.metrics_dict = {}
         self.loss_dict = {}
@@ -1258,12 +1320,19 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dloader)
 
-            if category == TRAIN and isinstance(self.dl_train.sampler, DistributedSampler):
+            if category == VALIDATION:
+                self.model.eval()
+            else:
+                self.model.train()
+                self.optim.zero_grad(set_to_none=True)
+
+            if category == TRAIN and isinstance(self.dl_train.sampler, (DistributedSampler, EnsembleDistributedSampler)):
                 # https://cerfacs.fr/coop/pytorch-multi-gpu#distributed-data-parallelism-ddp:~:text=train_sampler.set_epoch(epoch)
                 self.dl_train.sampler.set_epoch(self.iepoch)
 
+            cm = contextlib.nullcontext() if (self.model_requires_grads or not category == VALIDATION) else torch.no_grad()
             for self.ibatch, batch in enumerate(dloader):
-                success = self.batch_step(data=batch, validation=(category == VALIDATION))
+                success = self.batch_step(data=batch, ctx_mngr=cm, validation=(category == VALIDATION))
 
                 if success:
                     self.end_of_batch_log(batch_type=category)
@@ -1278,7 +1347,6 @@ class Trainer:
                     callback(self)
 
         self.iepoch += 1
-
         self.end_of_epoch_log()
 
         # if the iepoch for the past epoch was -1, it will now be 0
@@ -1353,14 +1421,15 @@ class Trainer:
             if not current_metrics:
                 return
 
-            if current_metrics < self.best_metrics:
+            # evaluation criteria of what is 'best'
+            is_improved = current_metrics < self.best_metrics if self.metric_criteria == 'decreasing' else current_metrics > self.best_metrics
+            if is_improved:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
 
-                self.best_model_saved_at_epoch = self.iepoch
                 self.save_model(self.best_model_path, blocking=False)
 
-                self.logger.info(f"! Best model {self.best_epoch:8d} {self.best_metrics:8.3f}")
+                self.logger.info(f"! Best model saved {self.best_epoch:8d} {self.best_metrics:8.3f}")
 
             if (self.iepoch + 1) % self.log_epoch_freq == 0:
                 self.save(blocking=False)
@@ -1478,7 +1547,7 @@ class Trainer:
 
     def __del__(self):
 
-        if not self._initialized:
+        if not hasattr(self, 'logger'):
             return
 
         logger = self.logger
@@ -1522,8 +1591,7 @@ class Trainer:
             if isinstance(dataset, InMemoryConcatDataset):
                 return InMemoryConcatDataset(indexed_dataset)
             elif isinstance(dataset, LazyLoadingConcatDataset):
-                dataset.set_lazy_dataset(indexed_dataset)
-                return dataset
+                return dataset.from_indexed_dataset(indexed_dataset)
 
         self.dataset_train = index_dataset(dataset, self.train_idcs)
         self.dataset_val   = index_dataset(validation_dataset, self.val_idcs)
@@ -1612,7 +1680,14 @@ class Trainer:
 
         return train_idcs, val_idcs
 
-    def init_dataloader(self, config, sampler: Sampler | None = None, validation_sampler: Sampler | None=None):
+    def init_dataloader(
+        self,
+        config,
+        sampler                 : Sampler | None=None,
+        validation_sampler      : Sampler | None=None,
+        batch_sampler           : Sampler | None=None,
+        batch_validation_sampler: Sampler | None=None,
+        ):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
 
@@ -1629,26 +1704,43 @@ class Trainer:
             timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
         )
-
+        dataset_mode = config.get("dataset_mode", "single")
+        assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
+        use_ensemble = dataset_mode == 'ensemble'
+        if use_ensemble:
+            if batch_sampler is None:
+                batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
+        else:
+            dl_kwargs.update(dict(
+                batch_size=self.batch_size,
+                shuffle=(sampler is None) and self.shuffle,
+            ))
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-
+        
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
             dataset=self.dataset_train,
-            shuffle=(sampler is None) and self.shuffle,
-            batch_size=self.batch_size,
             sampler=sampler,
+            batch_sampler=batch_sampler,
             **dl_kwargs,
         )
 
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
+        if use_ensemble:
+            if batch_validation_sampler is None:
+                batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
+        else:
+            dl_kwargs.update(dict(
+                batch_size=self.validation_batch_size,
+                shuffle=False,
+            ))
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,
-            batch_size=self.validation_batch_size,
             sampler=validation_sampler,
+            batch_sampler=batch_validation_sampler,
             **dl_kwargs,
         )
 
@@ -1665,9 +1757,6 @@ class TrainerWandB(Trainer):
     def init(self, **kwargs):
         super(TrainerWandB, self).init(**kwargs)
 
-        if not self._initialized:
-            return
-
         if not self.is_master:
             return
 
@@ -1682,6 +1771,10 @@ class TrainerWandB(Trainer):
 
     def end_of_epoch_log(self):
         Trainer.end_of_epoch_log(self)
+        if 'validation_loss' in self.mae_dict:
+            self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+        if 'training_loss' in self.mae_dict:
+            self.mae_dict.update({'training_log_loss': math.log(self.mae_dict['training_loss'])})
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
             for norm in v:
@@ -1703,22 +1796,39 @@ class DistributedTrainer(Trainer):
         torch.cuda.set_device(self.rank)
         super(DistributedTrainer, self).init(**kwargs)
 
-    def init_dataloader(self, config, sampler=None, validation_sampler=None):
-        sampler = DistributedSampler(
+    def init_dataloader(
+        self,
+        config,
+        sampler                 : Sampler | None=None,
+        validation_sampler      : Sampler | None=None,
+        batch_sampler           : Sampler | None=None,
+        batch_validation_sampler: Sampler | None=None,
+    ):
+        use_ensemble = config.get("dataset_mode", "single")
+        assert use_ensemble in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {use_ensemble}"
+        if use_ensemble:
+            sampler_class = EnsembleDistributedSampler
+            kwargs_keys = ['batch_sampler', 'batch_validation_sampler']
+        else:
+            sampler_class = DistributedSampler
+            kwargs_keys = ['sampler', 'validation_sampler']
+
+        _sampler = sampler_class(
             self.dataset_train,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
-        validation_sampler = DistributedSampler(
+        _validation_sampler = sampler_class(
             self.dataset_val,
             num_replicas=self.world_size,
             rank=self.rank,
             shuffle=True, # default already T in pyt impl; care: all resources say that *DataLoader* must have shuffle=F since DistributedSampler is used
         )
 
-        super().init_dataloader(config=config, sampler=sampler, validation_sampler=validation_sampler)
+        kwargs = {k: v for k, v in zip(kwargs_keys, [_sampler, _validation_sampler])}
+        super().init_dataloader(config=config, **kwargs)
 
     def set_model(self, model):
         super().set_model(model)
@@ -1732,8 +1842,8 @@ class DistributedTrainer(Trainer):
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
         # collect targets/predictions from different processes for current batch/key, preds/targets can be of different shapes across processes (e.g. if atom-wise, whereas in mol-wise they SHOULD be the same as batch size)
         _keys = set(self.metrics.clean_keys)
-        sync_dic_of_tensors_across_GPUs(out, self.world_size, _keys)
-        sync_dic_of_tensors_across_GPUs(ref_data, self.world_size, _keys)
+        sync_dict_of_tensors_across_GPUs(out, self.world_size, _keys)
+        sync_dict_of_tensors_across_GPUs(ref_data, self.world_size, _keys)
 
         if not self.is_master:
             return
@@ -1741,14 +1851,8 @@ class DistributedTrainer(Trainer):
         super()._update_metrics(out, ref_data)
 
     @torch.no_grad()
-    def _accumulate_losses(self, validation:bool, optim_step_executed:bool, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
-        '''
-        during trainining it must be called after backward+optim
-        '''
-        if not validation:
-            assert optim_step_executed
-
-        sync_dic_of_tensors_across_GPUs(loss_contrib, self.world_size)
+    def _accumulate_losses(self, loss:torch.Tensor, loss_contrib:Dict[str, torch.Tensor]) -> None:
+        sync_dict_of_tensors_across_GPUs(loss_contrib, self.world_size)
         syncd_loss = sync_tensor_across_GPUs(loss, self.world_size)
         if self.is_master:
             self.batch_losses = self.loss_stat(syncd_loss, loss_contrib)

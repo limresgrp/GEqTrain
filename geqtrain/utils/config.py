@@ -74,7 +74,6 @@ DEFAULT_CONFIG = dict(
     model_debug_mode=False,
     equivariance_test=False,
     grad_anomaly_mode=False,
-    fine_tune=False,
     append=False,
     _jit_fusion_strategy=[("DYNAMIC", 3)],
 )
@@ -399,7 +398,7 @@ class Config(object):
         elif "num_types" in self:
             num_types = self["num_types"]
             self["type_names"] = [f"type_{str(i)}" for i in range(num_types)]
-    
+
     def parse_attributes(self):
         if "node_attributes" in self and "node_types" in self["node_attributes"]:
             if "num_types" in self["node_attributes"]["node_types"]:
