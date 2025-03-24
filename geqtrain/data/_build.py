@@ -18,6 +18,7 @@ from geqtrain.data import (
     _NODE_FIELDS,
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
+    _EXTRA_FIELDS,
     register_fields,
 )
 from geqtrain.utils import (
@@ -278,9 +279,9 @@ def remove_node_centers_for_NaN_targets_and_edges(
     for key_clean in key_clean_list:
         if key_clean not in data: continue
         if key_clean in _GRAPH_FIELDS:
-            keep_edges_filter += 1
+            keep_edges_filter += True
         if key_clean in _EDGE_FIELDS: # TODO remove edges for which we have nan targets
-            keep_edges_filter += 1
+            keep_edges_filter += True
         elif key_clean in _NODE_FIELDS:
             if keep_node_types is not None: # Set target values to nan for nodes not present in 'keep_node_types'
                 remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
@@ -290,6 +291,8 @@ def remove_node_centers_for_NaN_targets_and_edges(
 
             # Here we are performing the UNION of edge_idcs we want to keep, across different target keys
             keep_edges_filter += torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
+        elif key_clean in _EXTRA_FIELDS:
+            keep_edges_filter += True
     
     # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
     if exclude_node_types_from_edges is not None:
