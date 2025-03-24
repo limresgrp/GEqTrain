@@ -1,14 +1,14 @@
-from sklearn.metrics import ( # TODO can I bring imports inside AccuracyMetric.__init__
-  precision_recall_fscore_support,
-  confusion_matrix,
-  roc_auc_score,
-  balanced_accuracy_score,
-  f1_score,
-  precision_recall_curve,
-  auc
-)
-
 def print_eval(gt, preds, logits):
+  
+  from sklearn.metrics import ( # TODO can I bring imports inside AccuracyMetric.__init__
+        precision_recall_fscore_support,
+        confusion_matrix,
+        roc_auc_score,
+        balanced_accuracy_score,
+        f1_score,
+        precision_recall_curve,
+        auc
+    )
 
   if len(logits)<5:
       # single smile eval mode
