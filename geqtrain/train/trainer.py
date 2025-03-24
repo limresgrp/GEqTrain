@@ -583,9 +583,13 @@ class Trainer:
         Optimization Step: After the specified number of accumulation steps, the gradients are used to update the model parameters, and the accumulation counter is reset.'''
         self.accumulation_counter = 0  # Counter for gradient accumulation
 
-    def _get_num_of_steps_per_epoch(self):
+    def _num_of_optim_steps_per_epoch(self) -> int:
+        '''returns number of batches in 1 epoch'''
         if hasattr(self, "dl_train"):
-            return len(self.dl_train)
+            assert math.ceil(len(self.dataset_train)/self.batch_size) == len(self.dl_train)
+            n = math.ceil(len(self.dl_train) / self.accumulation_steps)
+            self.logger.info(f"Number of optim steps per epoch {n}")
+            return n
         raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
 
     def init_objects(self):
@@ -683,16 +687,19 @@ class Trainer:
         if self.lr_scheduler_name != "none":
             # note: lr_scheduler_T_max is used for schedulers that require max num of steps
             # e.g. T_max in https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#cosineannealinglr
-            if self.lr_scheduler_name == "CosineAnnealingLR":
-                steps_per_epoch = self._get_num_of_steps_per_epoch()
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs
+            steps_per_epoch = self._num_of_optim_steps_per_epoch()
 
             if self.warmup_epochs > 0:
                 import pytorch_warmup as warmup
-                steps_per_epoch = self._get_num_of_steps_per_epoch()
                 self.warmup_steps = steps_per_epoch * self.warmup_epochs
-                self.kwargs['lr_scheduler_T_max'] = steps_per_epoch * self.max_epochs - self.warmup_steps
-                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated inplace now: lr*=1/warmup_period
+                self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated inplace at this call: lr*=1/warmup_period
+
+            if self.lr_scheduler_name == "CosineAnnealingLR":
+                total_number_of_steps = steps_per_epoch * self.max_epochs
+                if self.warmup_epochs > 0:
+                    total_number_of_steps -= self.warmup_steps
+                self.kwargs['lr_scheduler_T_max'] = total_number_of_steps
+                self.kwargs['eta_min'] = 1.e-7
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
