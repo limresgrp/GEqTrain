@@ -20,6 +20,8 @@ from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
+from geqtrain.utils.torch_geometric.data import Data
+from geqtrain.utils.torch_geometric.dataset import IndexType
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 
@@ -258,6 +260,30 @@ class AtomicDataset(Dataset):
             root=root,
             transform=Compose([load_callable(transf) for transf in transforms]) if transforms else None
         )
+    
+    def __getitem__(
+        self,
+        idx: Union[int, np.integer, IndexType],
+    ) -> Union["Dataset", Data]:
+        r"""In case :obj:`idx` is of type integer, will return the data object
+        at index :obj:`idx` (and transforms it in case :obj:`transform` is
+        present).
+        In case :obj:`idx` is a slicing object, *e.g.*, :obj:`[2:5]`, a list, a
+        tuple, a PyTorch :obj:`LongTensor` or a :obj:`BoolTensor`, or a numpy
+        :obj:`np.array`, will return a subset of the dataset at the specified
+        indices."""
+        if (
+            isinstance(idx, (int, np.integer))
+            or (isinstance(idx, torch.Tensor) and idx.dim() == 0)
+            or (isinstance(idx, np.ndarray) and np.isscalar(idx))
+        ):
+
+            data = self.get(self.indices()[idx])
+            data = data if self.transform is None else self.transform(copy.deepcopy(data)) # Call deepcopy to avoid stacking transforms over epochs
+            return data
+
+        else:
+            return self.index_select(idx)
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -710,7 +736,7 @@ class NpzDataset(AtomicInMemoryDataset):
         for key in mapped.keys():
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
-                    fields[key] = fields[key].astype(np.int32)
+                    fields[key] = fields[key].astype(np.int64)
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
