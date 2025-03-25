@@ -1,7 +1,11 @@
 import torch
 from geqtrain.data import AtomicDataDict
+from copy import deepcopy
 
 def edges_dropout(data, dropout_edges: float = 0.1):
+
+    data = deepcopy(data)
+
     edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
     num_edges = edge_index.size(1)
     num_dropout_edges = int(dropout_edges * num_edges)
