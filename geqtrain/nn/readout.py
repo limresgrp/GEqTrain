@@ -81,13 +81,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if input_mul is None:
             input_mul = in_irreps[0].mul # take l=0 mul; ok since all ls have same mul
 
-        in_irreps = o3.Irreps(
-            [
-                (input_mul, ir)
-                for _, ir in in_irreps
-                if ir.l in input_ls
-            ]
-        )
+        in_irreps = o3.Irreps([(input_mul, ir) for _, ir in in_irreps if ir.l in input_ls])
 
         # update dict
         irreps_in[field] = in_irreps
@@ -140,6 +134,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         # --- end definition of input/output irreps --- #
 
+        self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
+        if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # self.field == AtomicDataDict.GRAPH_FEATURES_KEY or
+            self.use_l1_scalarizer = False
 
         # --- start layer construction --- #
 
@@ -154,7 +151,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
-                mlp_input_dimension=self.n_scalars_in,
+                mlp_input_dimension=self.n_scalars_in,#+ (in_irreps.ls.count(1) if self.use_l1_scalarizer else 0),
                 mlp_output_dimension=self.n_scalars_out,
                 **readout_latent_kwargs,
             )
@@ -204,9 +201,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if dampen:
             add_tags_to_module(self, 'dampen')
 
-        # self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
-        # if self.field == AtomicDataDict.GRAPH_FEATURES_KEY or self.field == AtomicDataDict.EDGE_FEATURES_KEY:
-        #     self.use_l1_scalarizer = False
         # if self.use_l1_scalarizer:
         #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
@@ -222,7 +216,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         with self.cm:
 
-            # scalarize norms and cos_similarity between l1s
+            # # scalarize norms and cos_similarity between l1s
             # if self.use_l1_scalarizer:
             #     data = self.l1_scalarizer(data)
 
