@@ -7,6 +7,7 @@ if sys.version_info[1] >= 8:
 else:
     from typing_extensions import Final
 from typing import Tuple, Dict, Union
+from pathlib import Path
 
 import argparse
 import pathlib
@@ -47,6 +48,14 @@ _ALL_METADATA_KEYS = [
     JIT_FUSION_STRATEGY,
     TF32_KEY,
 ]
+
+
+def _sanity_checks(config):
+    if config.get("use_weight_norm", False):
+        raise Exception("""Trying to compile with 'use_weight_norm' set to True.
+                        This is not supported by PyTorch, as if you use PyTorch < 2, the scripting fails for a missing __name__ attribute in WeightNorm class.
+                        If you use PyTorch version >= 2, the new implementation uses torch.nn.utils.parametrize.register_parametrization() which is not supported by scripting.
+                        This is a lose-lose situation.""")
 
 
 def _compile_for_deploy(model):
@@ -126,21 +135,27 @@ def main(args=None):
 
     build_parser = subparsers.add_parser("build", help="Build a deployment model")
     build_parser.add_argument(
+        "-td",
         "--train-dir",
         help="Path to a working directory from a training session to deploy.",
-        type=pathlib.Path,
+        type=Path,
+        default=None,
     )
     build_parser.add_argument(
-        "--model-name",
-        help="Name of the .pth file inside the train directory. Default is 'best_model.pth'",
-        default="best_model.pth"
+        "-m",
+        "--model",
+        help="A deployed or pickled GEqTrain model to load. If omitted, defaults to `best_model.pth` in `train_dir`.",
+        type=Path,
+        default=None,
     )
     build_parser.add_argument(
+        "-o",
         "--out-file",
         help="Output file for deployed model.",
         type=pathlib.Path,
     )
     parser.add_argument(
+        "-e",
         "--extra-metadata",
         help="Additional key-value pairs to add to the metadata dictionary. Format: key=value. Use quotation marks for values with spaces, e.g., key=\"value with spaces\".",
         nargs='*',
@@ -150,17 +165,27 @@ def main(args=None):
     args = parser.parse_args(args=args)
 
     logging.basicConfig(level=getattr(logging, args.verbose.upper()))
+
+    # Do the defaults:
+    if args.train_dir:
+        if args.model is None:
+            args.model = args.train_dir / "best_model.pth"
+    if isinstance(args.model, str):
+        model_path = Path(args.model)
+    else:
+        model_path = args.model
     
-    
-    logging.info(f"Loading {args.model_name} from training session...")
-    config = Config.from_file(str(args.train_dir / "config.yaml"))
+    logging.info(f"Loading {model_path} from training session...")
+    config = Config.from_file(str(model_path.parent / "config.yaml"))
 
     _set_global_options(config)
 
     # -- load model --
-    model, _ = Trainer.load_model_from_training_session(
-        args.train_dir, model_name=args.model_name, device="cpu"
+    model, model_config = Trainer.load_model_from_training_session(
+        model_path.parent, model_name=model_path.name, device="cpu", for_inference=True
     )
+
+    _sanity_checks(model_config)
 
     # -- compile --
     model = _compile_for_deploy(model)
