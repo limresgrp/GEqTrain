@@ -27,7 +27,7 @@ def HeadlessGlobalGraphModel(
     """Base model architecture.
 
     """
-    layers = buildGlobalGraphModelLayers(config)
+    layers = buildGlobalGraphModelLayers(config) # moreGNNLayers(config)
 
     # # todo extract
     # layers.update({
@@ -111,5 +111,88 @@ def buildGlobalGraphModelLayers(config:Config):
             # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
     })
+
+    return layers
+
+
+##################################################################################################
+
+# THE BELOW CAN BE INJECTED in buildGlobalGraphModelLayers when tested
+
+def appendNGNNLayers(config):
+
+    N:int = config.get('gnn_layers', 2)
+    modules = {}
+
+    for layer_idx in range(N-1):
+        layer_name:str = f"interaction_{layer_idx}"
+        modules.update({
+            layer_name : (InteractionModule, dict(
+                name = layer_name,
+                node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
+                edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
+                edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+                out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+                out_irreps=None,
+                output_ls=[0],
+            )),
+            "local_pooling": (EdgewiseReduce, dict(
+                field=AtomicDataDict.EDGE_FEATURES_KEY,
+                out_field=AtomicDataDict.NODE_FEATURES_KEY,
+                reduce=config.get("edge_reduce", "sum"),
+            )),
+            "update": (ReadoutModule, dict(
+                field=AtomicDataDict.NODE_FEATURES_KEY,
+                out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+                out_irreps=None, # outs tensor of same o3.irreps of out_field
+                resnet=True,
+            )),
+        })
+
+    modules.update({
+        "last_interaction_layer": (InteractionModule, dict(
+            name = "last_interaction_layer",
+            node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            output_mul="hidden",
+        )),
+        "global_edge_pooling": (EdgewiseReduce, dict(
+            field=AtomicDataDict.EDGE_FEATURES_KEY,
+            out_field=AtomicDataDict.NODE_FEATURES_KEY,
+        )),
+    })
+    return modules
+
+def moreGNNLayers(config:Config):
+    logging.info("--- Building Global Graph Model")
+
+    update_config(config)
+
+    if 'node_attributes' in config:
+        node_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.NODE_ATTRS_KEY,
+            attributes=config.get('node_attributes'),
+        ))
+    else:
+        raise ValueError('Missing node_attributes in yaml')
+
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+
+    layers = {
+        # -- Encode -- #
+        "node_attrs":         node_embedder,
+        "edge_radial_attrs":  BasisEdgeRadialAttrs,
+        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
+        "graph_attrs":        EmbeddingGraphAttrs,
+        "edge_attrs":         edge_embedder
+    }
+
+    layers.update(appendNGNNLayers(config))
 
     return layers
