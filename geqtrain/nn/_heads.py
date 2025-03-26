@@ -8,12 +8,12 @@ import torch
 from einops import rearrange
 from torch import nn
 from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
-from geqtrain.nn import GraphModuleMixin
+from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from typing import List, Optional
 from geqtrain.utils import add_tags_to_module
 from torch.nn import GroupNorm
 from torch.nn import functional as F
-
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
 class FFBlock(torch.nn.Module):
     def __init__(self, inp_size, out_size:int|None=None, residual:bool=True, group_norm:bool=False):
@@ -171,24 +171,7 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
 
         self.l0_size = self.irreps_in[self.field][0].dim
         self.l1_size = self.irreps_in[self.field][1].dim
-
-        # self.attention1 = nn.MultiheadAttention(embed_dim=self.l0_size, num_heads=8, dropout=0.1)
-        # self.ff_block1 = FFBlock(self.l0_size, self.l0_size)
-
-        # self.attention2 = nn.MultiheadAttention(embed_dim=self.l0_size, num_heads=8, dropout=0.1)
-        # self.ff_block2 = FFBlock(self.l0_size, self.l0_size)
-
-        # self.attention3 = nn.MultiheadAttention(embed_dim=self.l0_size, num_heads=8, dropout=0.1)
-        # self.ff_block3 = FFBlock(self.l0_size, self.l0_size,residual=True)
-
         self.final_block = FFBlock(self.l0_size, 1, residual=False)
-
-        # self.kqv_proj1 = FFBlock(self.l0_size, 3*self.l0_size, residual=False, group_norm=True)
-        # self.kqv_proj2 = FFBlock(self.l0_size, 3*self.l0_size, residual=False)
-        # self.kqv_proj3 = FFBlock(self.l0_size, 3*self.l0_size, residual=False)
-
-        # self.dropout = nn.Dropout(.2)
-
         self.l1 = L0IndexedAttention(irreps_in,field,out_field)
         self.l2 = L0IndexedAttention(irreps_in,field,out_field)
         add_tags_to_module(self, '_wd')
@@ -200,90 +183,6 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
         feats = self.l2(feats, data['ensemble_index'])
         data[self.out_field] = self.final_block(feats)
         return data
-
-    # def forward(self, data):
-    #     features = data[self.field]
-    #     feats, _ = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-    #     ensemble_idxs = data['ensemble_index']
-
-    #     # Get unique indices and counts
-    #     unique_indices, inverse_indices, counts = torch.unique(ensemble_idxs, return_inverse=True, return_counts=True)
-    #     max_count = counts.max()
-
-    #     # Create padded tensor with shape (num_ensembles, max_count, feat_dim)
-    #     padded_feats = torch.zeros(len(unique_indices), max_count, self.l0_size,
-    #                              device=feats.device, dtype=feats.dtype)
-
-    #     # Create mask for valid positions
-    #     mask = torch.arange(max_count, device=feats.device)[None, :] < counts[:, None]
-
-    #     # Fill the padded tensor
-    #     padded_feats[mask] = feats
-
-    #     # Process all ensembles in parallel
-    #     k, q, v = torch.chunk(self.kqv_proj1(padded_feats), 3, dim=-1)
-    #     attn_output, _ = self.attention1(k.transpose(0, 1), q.transpose(0, 1), v.transpose(0, 1))
-    #     attn_output = self.dropout(attn_output.transpose(0, 1))
-    #     feats = self.ff_block1(attn_output)
-    #     feats = self.dropout(feats)
-
-    #     k, q, v = torch.chunk(self.kqv_proj2(feats), 3, dim=-1)
-    #     attn_output, _ = self.attention2(k.transpose(0, 1), q.transpose(0, 1), v.transpose(0, 1))
-    #     attn_output = self.dropout(attn_output.transpose(0, 1))
-    #     feats = self.ff_block2(attn_output)
-    #     feats = self.dropout(feats)
-
-    #     k, q, v = torch.chunk(self.kqv_proj3(feats), 3, dim=-1)
-    #     attn_output, _ = self.attention3(k.transpose(0, 1), q.transpose(0, 1), v.transpose(0, 1))
-    #     attn_output = self.dropout(attn_output.transpose(0, 1))
-    #     feats = self.ff_block3(attn_output)
-    #     feats = self.dropout(feats)
-
-    #     ff_output = self.final_block(feats)
-
-    #     # Gather results back to original shape
-    #     data[self.out_field] = ff_output[mask][inverse_indices]
-    #     return data
-
-
-# def forward(self, data):
-#     features = data[self.field]
-#     feats, _ = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-
-#     ensemble_idxs = data['ensemble_index']
-#     unique_indices = torch.unique(ensemble_idxs)
-#     split_tensors = [feats[ensemble_idxs == idx] for idx in unique_indices]
-
-#     out = []
-#     for f in split_tensors: # ugly but ok, could be vectorized via bmm (?)
-#         k, q, v = torch.chunk(self.kqv_proj1(f), 3, dim=-1)
-#         attn_output, _ = self.attention1(k, q, v)
-#         attn_output = self.dropout(attn_output)
-#         feats = self.ff_block1(attn_output)
-#         feats = self.dropout(feats)
-
-#         k, q, v = torch.chunk(self.kqv_proj2(feats), 3, dim=-1)
-#         attn_output, _ = self.attention2(k, q, v)
-#         attn_output = self.dropout(attn_output)
-#         feats = self.ff_block2(attn_output)
-#         feats = self.dropout(feats)
-
-#         k, q, v = torch.chunk(self.kqv_proj3(feats), 3, dim=-1)
-#         attn_output, _ = self.attention3(k, q, v)
-#         attn_output = self.dropout(attn_output)
-#         feats = self.ff_block3(attn_output)
-#         feats = self.dropout(feats)
-
-#         ff_output = self.final_block(feats)
-#         out.append(ff_output)
-
-#     # Reconstruct x
-#     reconstructed_x = torch.zeros(data[self.field].shape[0], 1, dtype=out[0].dtype, device=out[0].device)
-#     for i, idx in enumerate(unique_indices):
-#         reconstructed_x[ensemble_idxs == idx] = out[i]
-
-#     data[self.out_field] = reconstructed_x # expected out shape: torch.Size([bs, 1])
-#     return data
 
 
 # TODO: IDEA MAKE IT as a possible replacement for ScalarMLPFunction
@@ -312,7 +211,8 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         idx_key:str,
         out_field: Optional[str] = None,
         num_heads: int = 8,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        update_mlp:bool=False,
     ):
         super().__init__()
         self.field = field
@@ -321,6 +221,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.idx_key = idx_key # 'batch' or 'ensemble_index'
         self.n_heads = num_heads
         self.dropout = dropout
+        self.update_mlp=update_mlp
 
         self._init_irreps(
             irreps_in=irreps_in,
@@ -344,6 +245,12 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             nn.Linear(64, num_heads, bias=False)
         )# nn.Linear(16, num_heads, bias=False)
 
+        if self.update_mlp:
+            self.mlp = ScalarMLPFunction(
+                mlp_input_dimension=self.n_inpt_scalars,
+                mlp_latent_dimensions=[4*self.n_inpt_scalars],
+                mlp_output_dimension=self.n_inpt_scalars,
+            )
 
     def _add_edge_based_bias(self, data):
         edge_radial_attrs = data["edge_radial_attrs"]
@@ -456,6 +363,9 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         out = self.out_proj(tmp_out)
         out+=residual
 
+        if self.update_mlp:
+            out = out+self.mlp(out)
+
         return out
 
 
@@ -469,28 +379,35 @@ class L1Scalarizer(GraphModuleMixin, nn.Module): # todo allow 4 options: 1) norm
 
         in_irreps = irreps_in[field]
 
-        self.l0_size = in_irreps.ls.count(0)
-        self.l1_size = 3*in_irreps.ls.count(1)
-        out_irreps = o3.Irreps(str(irreps_in[self.field])+f'+{self.l1_size}x0e').regroup()
+        self.l0_mul = in_irreps.ls.count(0)
+        self.l1_mul = in_irreps.ls.count(1)
 
+        # out_irreps = o3.Irreps(str(irreps_in[self.field])+f'+{self.l1_mul}x0e').regroup()
+        self.reshaper = reshape_irreps(o3.Irreps(str(in_irreps[1]))) # casts to torch.Size([n, mul, 3])
+
+        self.proj = nn.Linear(self.l0_mul+self.l1_mul, self.l0_mul, bias=False)
 
         self._init_irreps(
             irreps_in=irreps_in,
-            irreps_out={self.out_field: out_irreps},
+            irreps_out={self.out_field: irreps_in[field]},
         )
 
     def forward(self, data):
         # todo check if this works also for if lmax=2
         features = data[self.field]
 
-        feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-        _vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
+        feats, vectors = torch.split(features, [self.l0_mul, 3*self.l1_mul], dim=-1)
+        reshaped_vectors = self.reshaper(vectors) # torch.Size([n, mul, 3])
+        rolled_vectors = torch.roll(reshaped_vectors, 1, 1)
 
-        sh = torch.norm(_vectors, p = self.norm_order, dim = -1)
+        # sh = torch.norm(reshaped_vectors, p = self.norm_order, dim = -1)
+        dot_product = torch.einsum('bij,bij->bi', reshaped_vectors, rolled_vectors) # Perform dot product over the 3D vectors in dim=1
 
-        out = torch.cat((feats, sh), dim = 1) # scalars with norms
+        out = torch.cat((feats, dot_product), dim = 1) # scalars with dot prods
+        out = self.proj(out) # send back to og size
+
         if self.output_l1:
-            out = torch.cat((out, vectors), dim = 1) # scalars with norms and l1s
+            out = torch.cat((out, vectors), dim = 1) # scalars with prods and l1s
 
         data[self.out_field] = out
         return data

@@ -54,7 +54,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
-        ensemble_attention: bool = True,
+        scalar_attnt: bool = True,
     ):
         super().__init__()
 
@@ -150,7 +150,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
-                mlp_input_dimension=self.n_scalars_in,# + (in_irreps.ls.count(1) if self.use_l1_scalarizer else 0),
+                mlp_input_dimension=self.n_scalars_in,
                 mlp_output_dimension=self.n_scalars_out,
                 **readout_latent_kwargs,
             )
@@ -200,15 +200,18 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if dampen:
             add_tags_to_module(self, 'dampen')
 
-        # if self.use_l1_scalarizer:
-        #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
+        if self.use_l1_scalarizer:
+            self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
+        # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
+        # todo: if self.field == AtomicDataDict.edge then use edge_centers
+        # todo: if self.field == AtomicDataDict.node features then use 'batch'
         if self.field == AtomicDataDict.GRAPH_FEATURES_KEY or self.field == AtomicDataDict.EDGE_FEATURES_KEY: #  graph/edge cant attention; node/ensemble can
-            ensemble_attention = False
+            scalar_attnt = False
 
-        self.ensemble_attention = ensemble_attention
-        if self.ensemble_attention:
-            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key='batch')
+        self.scalar_attnt = scalar_attnt
+        if self.scalar_attnt:
+            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key='batch', update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key='batch')
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -216,17 +219,17 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         with self.cm:
 
             # # scalarize norms and cos_similarity between l1s
-            # if self.use_l1_scalarizer:
-            #     data = self.l1_scalarizer(data)
+            if self.use_l1_scalarizer:
+                data = self.l1_scalarizer(data)
 
             # get features from input and create empty tensor to store output
             features = data[self.field]
 
-            if self.ensemble_attention: # and 'ensemble_index' in data:
+            if self.scalar_attnt:
                 split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
                 scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
-                scalars = self.ensemble_attnt1(scalars, data) #, data['ensemble_index'])
-                scalars = self.ensemble_attnt2(scalars, data) #, data['ensemble_index'])
+                scalars = self.ensemble_attnt1(scalars, data)
+                scalars = self.ensemble_attnt2(scalars, data)
                 features = torch.cat((scalars, equiv), dim=-1)
 
             out_features = torch.zeros(
