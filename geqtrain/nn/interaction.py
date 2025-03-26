@@ -463,9 +463,7 @@ class InteractionLayer(torch.nn.Module):
 
         # Build tensor product between env-aware node feats and edge attrs
         self.eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in l_arg_irreps])
-
-        if self.layer_index == 0:
-            self.eq_features_irreps_norm = SO3_LayerNorm(self.eq_features_irreps)
+        self.eq_features_irreps_norm = SO3_LayerNorm(self.eq_features_irreps)
 
         self.tp = Contracter(
             irreps_in1=self.eq_features_irreps,
@@ -685,7 +683,8 @@ class InteractionLayer(torch.nn.Module):
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
-            eq_features = self.eq_features_irreps_norm(eq_features) # TODO it's better if this comes before #! THIS ACTS ON LY AT FIRST LAYER!
+
+        eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs
         env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
