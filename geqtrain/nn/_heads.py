@@ -286,6 +286,22 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
 #     return data
 
 
+# TODO: IDEA MAKE IT as a possible replacement for ScalarMLPFunction
+'''mlp_input_dimension: Optional[int],
+mlp_latent_dimensions: List[int],
+mlp_output_dimension: Optional[int],
+mlp_nonlinearity: Optional[str] = "silu",
+use_layer_norm: bool = True,
+use_weight_norm: bool = False,
+dim_weight_norm: int = 0,
+has_bias: bool = False,
+bias: Optional[List] = None,
+zero_init_last_layer_weights: bool = False,
+dropout: Optional[float] = None,
+dampen: bool = False,
+wd: bool = False,
+gain:Optional[float] = None'''
+
 class L0IndexedAttention(GraphModuleMixin, nn.Module):
     # for now let's suppose that the input is a scalar field
     # and that the output is a scalar field
@@ -302,7 +318,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.field = field
         self.out_field = out_field
         in_irreps = irreps_out = irreps_in[field]
-        self.idx_key = idx_key #'batch' or 'ensemble_index'
+        self.idx_key = idx_key # 'batch' or 'ensemble_index'
         self.n_heads = num_heads
         self.dropout = dropout
 
@@ -323,7 +339,6 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
     @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
-
         N, emb_dim = features.shape # N = num nodes or num edge or num ensemble confs
 
         attention_idxs = data[self.idx_key]
@@ -377,31 +392,38 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         return out
 
 
-class L1Scalarizer(GraphModuleMixin, nn.Module): # should do 4 ptions: 1) norms only 2) cosine similarity 3) both 4) dot prod
-    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
+class L1Scalarizer(GraphModuleMixin, nn.Module): # todo allow 4 options: 1) norms only 2) cosine similarity 3) both 4) dot prod
+    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None, norm_order:int=2, output_l1:bool=True):
         super().__init__()
         self.field = field
         self.out_field = out_field or field
+        self.norm_order = norm_order
+        self.output_l1 = output_l1
+
         in_irreps = irreps_in[field]
+
+        self.l0_size = in_irreps.ls.count(0)
+        self.l1_size = 3*in_irreps.ls.count(1)
+        out_irreps = o3.Irreps(str(irreps_in[self.field])+f'+{self.l1_size}x0e').regroup()
+
+
         self._init_irreps(
             irreps_in=irreps_in,
-            irreps_out={self.out_field: in_irreps}, # TODO FIX not real
+            irreps_out={self.out_field: out_irreps},
         )
 
-        self.l0_size = self.irreps_in[self.field][0].dim
-        self.l1_size = self.irreps_in[self.field][1].dim
-
     def forward(self, data):
+        # todo check if this works also for if lmax=2
         features = data[self.field]
-        _dtype = features.dtype
-        _device = features.device
 
         feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-        vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
+        _vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
 
-        sh = torch.norm(vectors, p = 2, dim = -1) # take norms of intermediate repr of the dim_h 3d vectors
-        # cos = F.cosine_similarity(vectors, vectors, dim=-1) #! wring this outs onoy ones
+        sh = torch.norm(_vectors, p = self.norm_order, dim = -1)
 
-        # data[self.out_field] = torch.cat((feats, sh, cos), dim = 1) # cat scalars to norms
-        data[self.out_field] = torch.cat((feats, sh), dim = 1) # cat scalars to norms
+        out = torch.cat((feats, sh), dim = 1) # scalars with norms
+        if self.output_l1:
+            out = torch.cat((out, vectors), dim = 1) # scalars with norms and l1s
+
+        data[self.out_field] = out
         return data
