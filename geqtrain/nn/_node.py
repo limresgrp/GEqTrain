@@ -78,7 +78,7 @@ class EmbeddingNodeAttrs(GraphModuleMixin, torch.nn.Module):
                 x = data[attribute_name]
                 out.append(x)
 
-            data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1).float()
+        data[AtomicDataDict.NODE_ATTRS_KEY] = torch.cat(out, dim=-1).float()
         return data
 
 
