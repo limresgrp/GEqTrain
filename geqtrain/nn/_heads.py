@@ -337,6 +337,70 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim =  self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
+        self.bias_norm = nn.LayerNorm(16)
+        self.bias_proj = torch.nn.Sequential(
+            nn.Linear(16, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_heads, bias=False)
+        )# nn.Linear(16, num_heads, bias=False)
+
+
+    def _add_edge_based_bias(self, data):
+        edge_radial_attrs = data["edge_radial_attrs"]
+        edge_index = data["edge_index"]
+        batch_map = data['batch'] # Renamed from 'batch' to avoid conflict with loop var
+        unique_idx, counts = torch.unique(batch_map, return_counts=True)
+        max_count = counts.max()
+        num_uniques = unique_idx.shape[0]
+
+        num_total_edges, num_edge_features = edge_radial_attrs.shape
+        device = edge_radial_attrs.device
+
+        # --- Precompute cumulative node counts ---
+        # This helps find the starting global index for each graph
+        # Ensure counts is on the correct device
+        counts = counts.to(device)
+        # cum_counts will store the starting index offset for each graph
+        # Example: if counts is [10, 5, 8], cum_counts will be [0, 10, 15]
+        zero_pad = torch.zeros(1, dtype=counts.dtype, device=device)
+        cum_counts = torch.cat([zero_pad, counts.cumsum(dim=0)[:-1]], dim=0)
+
+        # --- Determine batch index for each edge ---
+        # Since edges are within graphs, the batch index of the source node
+        # determines the edge's batch index.
+        src_nodes_global = edge_index[0]
+        edge_batch_indices = batch_map[src_nodes_global] # Shape: [E_total]
+
+        # --- Calculate local node indices for each edge ---
+        # Subtract the cumulative count (start offset) of the corresponding batch
+        # from the global node indices.
+        batch_start_offsets = cum_counts[edge_batch_indices] # Shape: [E_total]
+
+        local_src_indices = edge_index[0] - batch_start_offsets # Shape: [E_total]
+        local_tgt_indices = edge_index[1] - batch_start_offsets # Shape: [E_total]
+
+        # --- Initialize the padded output tensor ---
+        padding_value = 0.0
+        padded_edge_attrs = torch.full(
+            (num_uniques, max_count, max_count, self.n_heads),
+            padding_value,
+            dtype=edge_radial_attrs.dtype,
+            device=device
+        )
+
+        updated_edge_radial_attrs = self.bias_norm(edge_radial_attrs)
+        updated_edge_radial_attrs = self.bias_proj(updated_edge_radial_attrs)
+        updated_edge_radial_attrs = torch.nn.functional.sigmoid(updated_edge_radial_attrs)
+
+        # --- Use advanced indexing to assign attributes ---
+        # We use the calculated batch indices and local node indices to directly
+        # place the edge attributes into the correct locations in the padded tensor.
+        padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
+
+        return padded_edge_attrs
+
+
+
     @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
         N, emb_dim = features.shape # N = num nodes or num edge or num ensemble confs
@@ -371,13 +435,16 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         q = q.view(num_uniques, max_count, self.n_heads, self.head_dim)
         v = v.view(num_uniques, max_count, self.n_heads, self.head_dim)
 
-        k = k.transpose(1,2)
+        k = k.transpose(1,2) # num_uniques, self.n_heads, max_count, self.head_dim
         q = q.transpose(1,2)
         v = v.transpose(1,2)
 
+        bias_ = self._add_edge_based_bias(data)
+
         qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
         qvt /= self.scale
-
+        bias_ = rearrange(bias_, 'batch target source heads -> batch heads target source')
+        qvt *= bias_
         attnt_coeffs = F.softmax(qvt, dim=-1)
 
         temp_out_to_be_cat = attnt_coeffs @ v # so new we get back to shape: (bs, h, t, hdim)
