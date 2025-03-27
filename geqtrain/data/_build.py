@@ -30,13 +30,12 @@ from geqtrain.utils import (
 from functools import partial
 from multiprocessing import Pool
 
-def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
+def get_key_clean(config: Config, loss_key:str):
     from geqtrain.train.utils import parse_loss_metrics_dict
     loss_keys = set()
     for loss_dict in config.get(loss_key, []):
         key, _, _, func_params = list(parse_loss_metrics_dict(loss_dict))[0]
-        if func_params.get('ignore_nan', False):
-            loss_keys.add(key)
+        loss_keys.add(key)
     return list(loss_keys)
 
 def get_class_name(config_dataset_type):
@@ -165,7 +164,7 @@ def dataset_from_config(config,
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
-        key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
+        key_clean_list = get_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
         n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
         if n_workers>1:
@@ -274,14 +273,14 @@ def remove_node_centers_for_NaN_targets_and_edges(
 
     # - Remove edges of atoms whose result is NaN - #
     node_center_edge_idcs = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-    keep_edges_filter = torch.zeros(len(node_center_edge_idcs), dtype=torch.bool) # initialize edge filter tensor of dim (n_edges,)
-    keep_nodes_filter = torch.zeros(len(node_types) * data.num_graphs, dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
+    keep_edges_filter = []
     for key_clean in key_clean_list:
         if key_clean not in data: continue
         if key_clean in _GRAPH_FIELDS:
-            keep_edges_filter += True
+            # if any loss requires the full graph, we cannot drop any edge
+            keep_edges_filter.append(torch.ones(len(node_center_edge_idcs), dtype=torch.bool))
         if key_clean in _EDGE_FIELDS: # TODO remove edges for which we have nan targets
-            keep_edges_filter += True
+            pass
         elif key_clean in _NODE_FIELDS:
             if keep_node_types is not None: # Set target values to nan for nodes not present in 'keep_node_types'
                 remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
@@ -290,9 +289,14 @@ def remove_node_centers_for_NaN_targets_and_edges(
             if val.dim() == 1: val = val.reshape(len(val), -1)
 
             # Here we are performing the UNION of edge_idcs we want to keep, across different target keys
-            keep_edges_filter += torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
+            keep_edges_filter.append(torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten()))
         elif key_clean in _EXTRA_FIELDS:
-            keep_edges_filter += True
+            pass
+    
+    if len(keep_edges_filter) > 0:
+        keep_edges_filter = torch.any(torch.stack(keep_edges_filter), dim=0)
+    else:
+        keep_edges_filter = torch.ones(len(node_center_edge_idcs), dtype=torch.bool)
     
     # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
     if exclude_node_types_from_edges is not None:
@@ -300,6 +304,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
         # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
         keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
 
+    keep_nodes_filter = torch.zeros(len(node_types) * data.num_graphs, dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
     keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
     update_edge_index(data, keep_edges_filter)
     for key_clean in key_clean_list:
