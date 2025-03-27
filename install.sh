@@ -1,72 +1,53 @@
 #!/bin/bash
 
+# Check if Python version is >= 3.8
+PYTHON_VERSION=$(python3 -c "import sys; print('.'.join(map(str, sys.version_info[:2])))")
+if [[ $(echo "$PYTHON_VERSION < 3.10" | bc -l) -eq 1 ]]; then
+    echo "Python 3.10 or higher is required. Current version: $PYTHON_VERSION"
+    exit 1
+fi
+
 # Function to display the menu and get user input
 choose_cuda_version() {
-    echo "Select your CUDA version:"
-    echo "1) CPU only (no CUDA)"
-    echo "2) CUDA 11.7 (cu117)"
-    echo "3) CUDA 11.8 (cu118)"
-    echo "4) CUDA 12.1 (cu121)"
-    echo "5) CUDA 12.4 (cu124)"
-    echo "6) pytorch 2.5 CUDA 11.8 (cu118)"
-
-    echo
-    read -p "Enter the number corresponding to your CUDA version: " choice
+    echo "Please choose the CUDA version to install:"
+    echo "1) cpu"
+    echo "2) cu118"
+    echo "3) cu124"
+    echo "4) cu126"
+    read -p "Enter your choice (1-4): " choice
 
     case $choice in
-        1)
-            CUDA_VERSION="cpu"
-            TORCH_VERSION="2.4.0"
-            TORCH_URL="https://download.pytorch.org/whl/cpu"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.4.0+cpu.html"
-            ;;
-        2)
-            CUDA_VERSION="cu117"
-            TORCH_VERSION="2.0.1"
-            TORCH_URL="https://download.pytorch.org/whl/cu117"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.0.1+cu117.html"
-            ;;
-        3)
-            CUDA_VERSION="cu118"
-            TORCH_VERSION="2.4.0"
-            TORCH_URL="https://download.pytorch.org/whl/cu118"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.4.0+cu118.html"
-            ;;
-        4)
-            CUDA_VERSION="cu121"
-            TORCH_VERSION="2.4.0"
-            TORCH_URL="https://download.pytorch.org/whl/cu121"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.4.0+cu121.html"
-            ;;
-        5)
-            CUDA_VERSION="cu124"
-            TORCH_VERSION="2.4.0"
-            TORCH_URL="https://download.pytorch.org/whl/cu124"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.4.0+cu124.html"
-            ;;
-        6)
-            CUDA_VERSION="cu118"
-            TORCH_VERSION="2.5.1"
-            TORCH_URL="https://download.pytorch.org/whl/cu118"
-            SCATTER_URL="https://data.pyg.org/whl/torch-2.5.1+cu118.html"
-            ;;
-        *)
-            echo "Invalid choice. Exiting."
-            exit 1
-            ;;
+        1) CUDA_VERSION="cpu" ;;
+        2) CUDA_VERSION="cu118" ;;
+        3) CUDA_VERSION="cu124" ;;
+        4) CUDA_VERSION="cu126" ;;
+        *) echo "Invalid choice. Defaulting to cu124."; CUDA_VERSION="cu124" ;;
     esac
 }
 
-# Get the user's CUDA version
-choose_cuda_version
+# Function to check if a Python package is installed and echo the output
+is_package_installed() {
+    output=$(python3 -c "import $1" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "$1 is installed."
+        return 0
+    else
+        echo "$1 is not installed. Error: $output"
+        return 1
+    fi
+}
 
-# Install PyTorch with the selected CUDA version
-echo "Installing PyTorch $TORCH_VERSION with $CUDA_VERSION support..."
-pip3 install torch==$TORCH_VERSION --index-url $TORCH_URL
+# Check if torch and torch-scatter are already installed
+if is_package_installed torch && is_package_installed torch_scatter; then
+    echo "torch and torch-scatter are already installed. Skipping CUDA version selection."
+else
+    choose_cuda_version
 
-# Install torch-scatter based on PyTorch and CUDA version
-echo "Installing torch-scatter for PyTorch $PYTORCH_VERSION with $CUDA_VERSION support..."
-pip3 install torch-scatter -f $SCATTER_URL
+    # Install torch and torch-scatter with the selected CUDA version
+    pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/$CUDA_VERSION
+    TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
+    pip3 install torch-scatter -f https://data.pyg.org/whl/torch-$TORCH_VERSION.html
+fi
 
 # Install the current package
 echo "Installing the package in editable mode..."
