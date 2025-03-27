@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 from torch import nn
 from scipy.special import spherical_jn
@@ -54,7 +55,7 @@ class BesselBasis(nn.Module):
 
 class BesselBasisVec(nn.Module):
 
-    def __init__(self, r_max, num_basis=8, accuracy=1e-5, trainable=True):
+    def __init__(self, r_max, num_basis=8, accuracy=1e-3, trainable=True):
         super(BesselBasisVec, self).__init__()
 
         self.trainable = trainable
@@ -65,7 +66,11 @@ class BesselBasisVec(nn.Module):
         Jn_values = []
         for n in range(num_basis):
             Jn_values.append(spherical_jn(n, r_values))
-        bessel_values = torch.stack(Jn_values, dim=0).float().T
+        if isinstance(Jn_values[0], np.ndarray):
+            bessel_values = torch.from_numpy(np.stack(Jn_values, axis=0)).float().T
+        else:
+            assert isinstance(Jn_values[0], torch.Tensor)
+            bessel_values = torch.stack(Jn_values, dim=0).float().T
 
         self.register_buffer("r_values", r_values)
         self.register_buffer("bessel_values", bessel_values)
