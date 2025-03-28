@@ -37,10 +37,11 @@ class EnsembleSampler(Sampler):
         yields batches, called once per batch step while iteraing dloader
         Returns batches, ensuring all conformations of a molecule appear together.
         """
-        np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
+        np.random.shuffle(self.ensemble_indices)  # Shuffle infra npzs
         batch = []
 
-        for ensemble in self.ensemble_indices:
+        for ensemble in self.ensemble_indices: # list of idxs of 1 npz possibily shufflable
+            np.random.shuffle(ensemble)  # Shuffle inside npz
             batch.extend(ensemble)
             while len(batch) > self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
