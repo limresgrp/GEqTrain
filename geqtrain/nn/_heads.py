@@ -314,7 +314,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
     @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
         # forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png
-        N, emb_dim = features.shape # N = num nodes or num edge or num ensemble confs
+        N, emb_dim = features.shape # N = num nodes or num ensemble confs
 
         attention_idxs = data[self.idx_key]
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"

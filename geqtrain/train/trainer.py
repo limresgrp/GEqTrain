@@ -579,7 +579,7 @@ class Trainer:
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
         # the correspondent kwargs in 'param_groups_dict' will overwrite the default kwargs of the optimizer
         param_groups_dict = {
-            'dampen':       {'lr': self.learning_rate * 1.e-1},
+            'dampen':       {'lr': self.learning_rate * 1.e-2},
             'nowd':         {'weight_decay': 0.0},
             "_wd":          {'weight_decay': self.head_wds},
         }

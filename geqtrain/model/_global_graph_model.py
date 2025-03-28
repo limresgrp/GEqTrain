@@ -72,6 +72,12 @@ def buildGlobalGraphModelLayers(config:Config):
     }
 
     layers.update({
+        "update0": (ReadoutModule, dict(
+            field=AtomicDataDict.NODE_ATTRS_KEY,
+            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
+            resnet=True,
+        )),
         "local_interaction": (InteractionModule, dict(
             name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
@@ -104,6 +110,12 @@ def buildGlobalGraphModelLayers(config:Config):
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
+        )),
+        "update2": (ReadoutModule, dict(
+            field=AtomicDataDict.NODE_FEATURES_KEY,
+            out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
+            resnet=True,
         )),
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,

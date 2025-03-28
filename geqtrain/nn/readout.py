@@ -206,13 +206,18 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
         # todo: if self.field == AtomicDataDict.edge then use edge_centers
         # todo: if self.field == AtomicDataDict.node features then use 'batch'
-        if self.field == AtomicDataDict.GRAPH_FEATURES_KEY or self.field == AtomicDataDict.EDGE_FEATURES_KEY: #  graph/edge cant attention; node/ensemble can
+        if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # edge cant attention; node/ensemble can
             scalar_attnt = False
+
+        if self.field == AtomicDataDict.GRAPH_FEATURES_KEY:
+            idx_key = 'ensemble_index'
+        elif self.field == 'node_features' or self.field == 'node_attrs':
+            idx_key = 'batch'
 
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
-            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key='batch', update_mlp=True)
-            self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key='batch')
+            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key=idx_key, update_mlp=True)
+            self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key=idx_key)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 
