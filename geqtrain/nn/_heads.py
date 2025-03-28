@@ -238,14 +238,15 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim =  self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.use_radial_bias = field == 'node_features' #AtomicDataDict.NODE_FEATURES_KEY #TODO: bring this inside geqtrain
+        self.use_radial_bias = field == 'node_features' or field == 'node_attrs' #AtomicDataDict.NODE_FEATURES_KEY #TODO: bring this inside geqtrain
         if self.use_radial_bias:
-            self.bias_norm = nn.LayerNorm(16)
+            self.rbf_emb_dim = 16
+            self.bias_norm = nn.LayerNorm(self.rbf_emb_dim)
             self.bias_proj = torch.nn.Sequential(
-                nn.Linear(16, 64),
+                nn.Linear(self.rbf_emb_dim, 4*self.rbf_emb_dim, bias=False),
                 nn.SiLU(),
-                nn.Linear(64, num_heads, bias=False)
-            )# nn.Linear(16, num_heads, bias=False)
+                nn.Linear(4*self.rbf_emb_dim, num_heads)
+            )
 
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
@@ -312,6 +313,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
     @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
+        # forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png
         N, emb_dim = features.shape # N = num nodes or num edge or num ensemble confs
 
         attention_idxs = data[self.idx_key]
@@ -361,9 +363,13 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         qvt.masked_fill_(bidirectional_mask, fill_value)
         qvt[row_all_true_mask] = 0.0 # replace rows of all -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output.
         attnt_coeffs = F.softmax(qvt, dim=-1)
-        attnt_coeffs[row_all_true_mask] = 0.0 # zero-out all spurius rows
+        attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all spurious rows
 
-        assert all(attnt_coeffs.sum(-1).sum(-1)[:,0] == counts)
+        assert torch.allclose(
+            attnt_coeffs.sum(-1).sum(-1)[:, 0],
+            counts.float(),
+            atol=1e-6
+        ), "Attention coefficients do not sum to the expected counts."
 
         temp_out_to_be_cat = attnt_coeffs @ v # so new we get back to shape: (bs, h, t, hdim)
         # goal shape: (bs, nh*t, c)
