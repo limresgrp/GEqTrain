@@ -238,22 +238,25 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim =  self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.bias_norm = nn.LayerNorm(16)
-        self.bias_proj = torch.nn.Sequential(
-            nn.Linear(16, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_heads, bias=False)
-        )# nn.Linear(16, num_heads, bias=False)
+        self.use_radial_bias = field == 'node_features' #AtomicDataDict.NODE_FEATURES_KEY #TODO: bring this inside geqtrain
+        if self.use_radial_bias:
+            self.bias_norm = nn.LayerNorm(16)
+            self.bias_proj = torch.nn.Sequential(
+                nn.Linear(16, 64),
+                nn.SiLU(),
+                nn.Linear(64, num_heads, bias=False)
+            )# nn.Linear(16, num_heads, bias=False)
 
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
                 mlp_input_dimension=self.n_inpt_scalars,
                 mlp_latent_dimensions=[4*self.n_inpt_scalars],
                 mlp_output_dimension=self.n_inpt_scalars,
+                mlp_nonlinearity = "swiglu",
             )
 
     def _add_edge_based_bias(self, data):
-        edge_radial_attrs = data["edge_radial_attrs"]
+        edge_radial_attrs = data["edge_radial_attrs"] # already modulated by cutoff() wrt r_max
         edge_index = data["edge_index"]
         batch_map = data['batch'] # Renamed from 'batch' to avoid conflict with loop var
         unique_idx, counts = torch.unique(batch_map, return_counts=True)
@@ -297,16 +300,15 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         updated_edge_radial_attrs = self.bias_norm(edge_radial_attrs)
         updated_edge_radial_attrs = self.bias_proj(updated_edge_radial_attrs)
-        updated_edge_radial_attrs = torch.nn.functional.sigmoid(updated_edge_radial_attrs)
+        updated_edge_radial_attrs = torch.sigmoid(updated_edge_radial_attrs)
 
         # --- Use advanced indexing to assign attributes ---
         # We use the calculated batch indices and local node indices to directly
         # place the edge attributes into the correct locations in the padded tensor.
         padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
 
+        padded_edge_attrs = rearrange(padded_edge_attrs, 'batch target source heads -> batch heads target source')
         return padded_edge_attrs
-
-
 
     @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
@@ -326,7 +328,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         unique_idx, counts = torch.unique(attention_idxs, return_counts=True)
         max_count = counts.max()
-        num_uniques = unique_idx.shape[0]
+        num_uniques = unique_idx.shape[0] # bs
 
         k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k
         q = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_q
@@ -346,13 +348,22 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         q = q.transpose(1,2)
         v = v.transpose(1,2)
 
-        bias_ = self._add_edge_based_bias(data)
-
         qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
         qvt /= self.scale
-        bias_ = rearrange(bias_, 'batch target source heads -> batch heads target source')
-        qvt *= bias_
+
+        bidirectional_mask = qvt == 0.0
+        row_all_true_mask = bidirectional_mask.all(dim=-1, keepdim=True).expand_as(bidirectional_mask) # to select rows that have only -inf values (s.t. exclude them from softmax otherwise autograd breaks)
+
+        if self.use_radial_bias:
+            qvt += self._add_edge_based_bias(data)
+
+        fill_value = -torch.inf # Or a large negative number like -1e9
+        qvt.masked_fill_(bidirectional_mask, fill_value)
+        qvt[row_all_true_mask] = 0.0 # replace rows of all -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output.
         attnt_coeffs = F.softmax(qvt, dim=-1)
+        attnt_coeffs[row_all_true_mask] = 0.0 # zero-out all spurius rows
+
+        assert all(attnt_coeffs.sum(-1).sum(-1)[:,0] == counts)
 
         temp_out_to_be_cat = attnt_coeffs @ v # so new we get back to shape: (bs, h, t, hdim)
         # goal shape: (bs, nh*t, c)
@@ -369,7 +380,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         return out
 
 
-class L1Scalarizer(GraphModuleMixin, nn.Module): # todo allow 4 options: 1) norms only 2) cosine similarity 3) both 4) dot prod
+class L1Scalarizer(GraphModuleMixin, nn.Module):
     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None, norm_order:int=2, output_l1:bool=True):
         super().__init__()
         self.field = field
