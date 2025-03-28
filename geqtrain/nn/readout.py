@@ -133,9 +133,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         # --- end definition of input/output irreps --- #
 
-        self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
-        if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # self.field == AtomicDataDict.GRAPH_FEATURES_KEY or
-            self.use_l1_scalarizer = False
+        # self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
+        # if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # self.field == AtomicDataDict.GRAPH_FEATURES_KEY or
+        #     self.use_l1_scalarizer = False
 
         # --- start layer construction --- #
 
@@ -200,8 +200,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if dampen:
             add_tags_to_module(self, 'dampen')
 
-        if self.use_l1_scalarizer:
-            self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
+        # if self.use_l1_scalarizer:
+        #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
         # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
         # todo: if self.field == AtomicDataDict.edge then use edge_centers
@@ -219,8 +219,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         with self.cm:
 
             # # scalarize norms and cos_similarity between l1s
-            if self.use_l1_scalarizer:
-                data = self.l1_scalarizer(data)
+            # if self.use_l1_scalarizer:
+            #     data = self.l1_scalarizer(data)
 
             # get features from input and create empty tensor to store output
             features = data[self.field]
