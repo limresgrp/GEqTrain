@@ -1,7 +1,7 @@
 from .init_utils import update_config
 from ._node_model import HeadlessNodeModel
 from ._graph_model import HeadlessGraphModel
-from ._global_graph_model import HeadlessGlobalGraphModel
+from ._global_graph_model import HeadlessGlobalGraphModel, moreGNNLayers
 from ._global_node_model import HeadlessGlobalNodeModel
 from ._heads import Heads
 from ._scale import PerNodeAttrsScale, PerTypeScale
@@ -26,4 +26,5 @@ __all__ = [
     initialize_from_state,
     load_model_state,
     model_from_config,
+    moreGNNLayers,
 ]

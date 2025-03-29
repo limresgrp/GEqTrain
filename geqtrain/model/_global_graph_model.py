@@ -135,6 +135,7 @@ def appendNGNNLayers(config):
 
     N:int = config.get('gnn_layers', 2)
     modules = {}
+    logging.info("--- Number of GNN layers {N}")
 
     for layer_idx in range(N-1):
         layer_name:str = f"interaction_{layer_idx}"
@@ -174,6 +175,11 @@ def appendNGNNLayers(config):
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
+        "global_node_pooling": (NodewiseReduce, dict(
+            field=AtomicDataDict.NODE_FEATURES_KEY,
+            out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+            # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
+        )),
     })
     return modules
 
@@ -195,6 +201,8 @@ def moreGNNLayers(config:Config):
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             attributes=config.get('edge_attributes'),
         ))
+    else:
+        logging.info("--- Working without edge_attributes")
 
     layers = {
         # -- Encode -- #
@@ -207,4 +215,7 @@ def moreGNNLayers(config:Config):
 
     layers.update(appendNGNNLayers(config))
 
-    return layers
+    return SequentialGraphNetwork.from_parameters(
+        shared_params=config,
+        layers=layers,
+    )
