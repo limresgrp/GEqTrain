@@ -55,6 +55,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
         scalar_attnt: bool = True,
+        num_heads: int = 32,
     ):
         super().__init__()
 
@@ -216,8 +217,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
-            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key=idx_key, update_mlp=True)
-            self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, idx_key=idx_key)
+            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
+            self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
 

@@ -2,7 +2,7 @@ import torch
 from geqtrain.data import AtomicDataDict
 from copy import deepcopy
 
-def edges_dropout(data, dropout_edges: float = 0.1):
+def edges_dropout(data, dropout_edges: float = 0.05):
 
     data = deepcopy(data)
 

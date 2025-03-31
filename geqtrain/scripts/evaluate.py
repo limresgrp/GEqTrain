@@ -173,7 +173,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=1,
+        default=2,
     )
     parser.add_argument(
         "-d",
@@ -223,6 +223,7 @@ def main(args=None, running_as_script: bool = True):
     logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
 
     # Do the defaults:
+    trainer = None
     if args.train_dir:
         if args.test_config is None:
             args.test_config = args.train_dir / "config.yaml"
@@ -247,7 +248,7 @@ def main(args=None, running_as_script: bool = True):
     # Load model
     logger.info(f"Loading model...")
     model, config = load_model(args.model, device=args.device)
-    if args.model is None:
+    if trainer:
         logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
 
     # Check model convergence with WeightWatcher
@@ -275,6 +276,7 @@ def main(args=None, running_as_script: bool = True):
     # Load metrics (if specified)
     metrics = None
     try:
+        logger.info(f"Metrics loading ... ")
         metrics_components = config.get("metrics_components", None)
         if metrics_components is not None:
             metrics, _ = instantiate(
@@ -288,6 +290,7 @@ def main(args=None, running_as_script: bool = True):
                 'type_names'   : config["type_names"],
                 'target_names' : config.get('target_names', list(metrics.keys)),
             }
+            logger.info(f"Metrics loaded")
     except:
         raise Exception("Failed to load Metrics.")
 

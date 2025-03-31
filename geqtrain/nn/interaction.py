@@ -28,7 +28,7 @@ from geqtrain.nn._film import FiLMFunction
 
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-
+from geqtrain.nn.AdaLN import AdaLN
 
 def log_feature_on_wandb(name:str, t:torch.tensor, train:bool):
   #todo: do we need to differenciate scalars with geom tensors?
@@ -267,15 +267,16 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             )
 
             if self.learn_cutoff_bias:
-                self.rbf_embedder = FiLMFunction(
-                    mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
-                    mlp_latent_dimensions=[4*self.irreps_in[self.edge_invariant_field].num_irreps],
-                    mlp_output_dimension=self.final_latent_mlp.out_features,
-                    mlp_nonlinearity='swiglu',
-                    zero_init_last_layer_weights=False,
-                    has_bias=False,
-                    final_non_lin='sigmoid'
-                )
+                # self.rbf_embedder = FiLMFunction(
+                #     mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
+                #     mlp_latent_dimensions=[4*self.irreps_in[self.edge_invariant_field].num_irreps],
+                #     mlp_output_dimension=self.final_latent_mlp.out_features,
+                #     mlp_nonlinearity='swiglu',
+                #     zero_init_last_layer_weights=False,
+                #     has_bias=False,
+                #     final_non_lin='sigmoid'
+                # )
+                self.rbf_embedder = AdaLN(self.latent_dim, self.irreps_in[self.edge_invariant_field].num_irreps)
 
             self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 

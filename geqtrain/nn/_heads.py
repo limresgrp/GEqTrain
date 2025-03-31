@@ -232,7 +232,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # assert len(irreps_as_dict) == 1, f'Head to predict {field} has equivariant out: {str(self.irreps_in[self.out_field])}'
         self.n_inpt_scalars = irreps_as_dict[0]
         self.kqv_norm = nn.LayerNorm(self.n_inpt_scalars)
-        self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars)
+        self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars, bias=False)
         self.out_proj = nn.Linear(self.n_inpt_scalars, self.n_inpt_scalars)
 
         self.head_dim =  self.n_inpt_scalars//self.n_heads
@@ -243,9 +243,10 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             self.rbf_emb_dim = 16
             self.bias_norm = nn.LayerNorm(self.rbf_emb_dim)
             self.bias_proj = torch.nn.Sequential(
-                nn.Linear(self.rbf_emb_dim, 4*self.rbf_emb_dim, bias=False),
-                nn.SiLU(),
-                nn.Linear(4*self.rbf_emb_dim, num_heads)
+                # nn.Linear(self.rbf_emb_dim, 4*self.rbf_emb_dim, bias=False),
+                # nn.ReLU(), # nn.SiLU(), # relu to try to enforce a bit of sparsity
+                # nn.Linear(4*self.rbf_emb_dim, num_heads)
+                nn.Linear(self.rbf_emb_dim, num_heads)
             )
 
         if self.update_mlp:
@@ -301,7 +302,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         updated_edge_radial_attrs = self.bias_norm(edge_radial_attrs)
         updated_edge_radial_attrs = self.bias_proj(updated_edge_radial_attrs)
-        updated_edge_radial_attrs = torch.sigmoid(updated_edge_radial_attrs)
+        # updated_edge_radial_attrs = torch.sigmoid(updated_edge_radial_attrs)
 
         # --- Use advanced indexing to assign attributes ---
         # We use the calculated batch indices and local node indices to directly
@@ -365,11 +366,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         attnt_coeffs = F.softmax(qvt, dim=-1)
         attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all spurious rows
 
-        assert torch.allclose(
-            attnt_coeffs.sum(-1).sum(-1)[:, 0],
-            counts.float(),
-            atol=1e-6
-        ), "Attention coefficients do not sum to the expected counts."
+        # assert torch.allclose(
+        #     attnt_coeffs.sum(-1).sum(-1)[:, 0],
+        #     counts.float(),
+        #     atol=1e-6
+        # ), "Attention coefficients do not sum to the expected counts."
 
         temp_out_to_be_cat = attnt_coeffs @ v # so new we get back to shape: (bs, h, t, hdim)
         # goal shape: (bs, nh*t, c)

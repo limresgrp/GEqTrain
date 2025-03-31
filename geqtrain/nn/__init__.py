@@ -16,6 +16,7 @@ from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 from ._heads import GVPGeqTrain, WeightedTP, TransformerBlock
+from .AdaLN import AdaLN
 
 __all__ = [
     GraphModuleMixin,
@@ -43,4 +44,5 @@ __all__ = [
     GVPGeqTrain,
     WeightedTP,
     TransformerBlock,
+    AdaLN,
 ]

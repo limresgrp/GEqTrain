@@ -72,7 +72,7 @@ def buildGlobalGraphModelLayers(config:Config):
     }
 
     layers.update({
-        "update0": (ReadoutModule, dict(
+        "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
@@ -111,7 +111,7 @@ def buildGlobalGraphModelLayers(config:Config):
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "update2": (ReadoutModule, dict(
+        "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
@@ -129,13 +129,22 @@ def buildGlobalGraphModelLayers(config:Config):
 
 ##################################################################################################
 
-# THE BELOW CAN BE INJECTED in buildGlobalGraphModelLayers when tested
-
 def appendNGNNLayers(config):
 
     N:int = config.get('gnn_layers', 2)
     modules = {}
-    logging.info("--- Number of GNN layers {N}")
+    logging.info(f"--- Number of GNN layers {N}")
+
+    # # attention on embeddings
+    modules.update({
+        "update_emb": (ReadoutModule, dict(
+            field=AtomicDataDict.NODE_ATTRS_KEY,
+            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
+            resnet=True,
+            num_heads=8,
+        ))
+    })
 
     for layer_idx in range(N-1):
         layer_name:str = f"interaction_{layer_idx}"
@@ -149,12 +158,12 @@ def appendNGNNLayers(config):
                 out_irreps=None,
                 output_ls=[0],
             )),
-            "local_pooling": (EdgewiseReduce, dict(
+            f"local_pooling_{layer_idx}": (EdgewiseReduce, dict(
                 field=AtomicDataDict.EDGE_FEATURES_KEY,
                 out_field=AtomicDataDict.NODE_FEATURES_KEY,
                 reduce=config.get("edge_reduce", "sum"),
             )),
-            "update": (ReadoutModule, dict(
+            f"update_{layer_idx}": (ReadoutModule, dict(
                 field=AtomicDataDict.NODE_FEATURES_KEY,
                 out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
                 out_irreps=None, # outs tensor of same o3.irreps of out_field
@@ -174,6 +183,12 @@ def appendNGNNLayers(config):
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
+        )),
+        "update": (ReadoutModule, dict(
+            field=AtomicDataDict.NODE_FEATURES_KEY,
+            out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
+            resnet=True,
         )),
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,

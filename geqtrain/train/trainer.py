@@ -1236,7 +1236,7 @@ class Trainer:
                 loss.backward()
                 self.accumulation_counter += 1
 
-                # if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
+                if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
                 # if self.debug: self._log_updates()
 
                 if self.accumulation_counter == self.accumulation_steps:
