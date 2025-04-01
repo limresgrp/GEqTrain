@@ -305,9 +305,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
         if self.is_local:
-            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1) # TODO add conditional to check if edge embedding are provided (if so they have to be catted)
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
         else:
-            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1) # TODO add conditional to check if edge embedding are provided (if so they have to be catted)
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
 
         # The nonscalar features. Initially, the edge data.
         eq_features = edge_attr
@@ -517,7 +517,7 @@ class InteractionLayer(torch.nn.Module):
                         # Node invariants for center and neighbor (chemistry)
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (40 if parent.name == 'local_interaction' else 0) #! TODO HERE
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (parent.irreps_in['edge_features'].num_irreps if parent.name == 'local_interaction' else 0)
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,
@@ -675,7 +675,7 @@ class InteractionLayer(torch.nn.Module):
         # From the latents, compute the weights for active edges:
         weights = self.env_embed_mlp(latents)
 
-        if self.film is not None: # TODO RENAME THIS WRT ITS TASK!
+        if self.film is not None:
             weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
 
         w_index: int = 0
