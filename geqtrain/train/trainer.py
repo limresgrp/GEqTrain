@@ -1,6 +1,7 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 from collections import defaultdict
+from e3nn import o3
 
 import inspect
 import logging
@@ -56,6 +57,8 @@ from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
 from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
+
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
     for param_group in optimizer.param_groups:
@@ -1218,11 +1221,16 @@ class Trainer:
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
 
-            if self.ibatch % 5 == 0 and not validation:
-                norms = torch.norm(out[AtomicDataDict.NODE_FEATURES_KEY], p=1, dim=-1)/ out[AtomicDataDict.NODE_FEATURES_KEY].shape[-1]
-                self.node_features_norms['node_repr_l1_norm_mean'].append(norms.mean())
-                self.node_features_norms['node_repr_l1_norm_std'].append(norms.std())
-                self.node_features_norms['node_repr_l1_norm_median'].append(norms.median())
+            if self.ibatch % 10 == 0 and not validation:
+                with torch.no_grad():
+                    irreps_as_dict = {i:mul for i, (mul, l) in enumerate(self.model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY])}
+                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
+                    split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+                    reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in self.model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY]]
+                    reprs = torch.split(node_reprs, split_sizes, dim=1)
+                    for l, repr in enumerate(reprs):
+                        norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
+                        self.node_features_norms[f'node_repr_l_{l}_mean'].append(norm)
 
             # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
             # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
