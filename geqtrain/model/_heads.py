@@ -5,7 +5,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     SequentialGraphNetwork,
     ReadoutModule,
-    GVPGeqTrain,
+    # GVPGeqTrain,
     WeightedTP,
     TransformerBlock,
 )

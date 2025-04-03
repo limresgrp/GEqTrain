@@ -15,7 +15,7 @@ from .readout import ReadoutModule
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
-from ._heads import GVPGeqTrain, WeightedTP, TransformerBlock
+from ._heads import WeightedTP, TransformerBlock # GVPGeqTrain
 from .AdaLN import AdaLN
 
 __all__ = [
@@ -41,7 +41,7 @@ __all__ = [
     SO3_Linear,
     SO3_LayerNorm,
     select_nonlinearity,
-    GVPGeqTrain,
+    # GVPGeqTrain,
     WeightedTP,
     TransformerBlock,
     AdaLN,

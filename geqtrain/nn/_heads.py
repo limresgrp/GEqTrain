@@ -7,7 +7,7 @@ import math
 import torch
 from einops import rearrange
 from torch import nn
-from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
+# from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from typing import List, Optional
 from geqtrain.utils import add_tags_to_module
@@ -35,74 +35,74 @@ class FFBlock(torch.nn.Module):
         return out
 
 
-class GVPGeqTrain(GraphModuleMixin, nn.Module):
-    '''https://github.com/lucidrains/geometric-vector-perceptron'''
-    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
-        super().__init__()
-        self.field = field
-        self.out_field = out_field
-        in_irreps = irreps_in[field]
-        self._init_irreps(
-            irreps_in=irreps_in,
-            irreps_out={self.out_field: in_irreps}, # TODO FIX not real
-        )
+# class GVPGeqTrain(GraphModuleMixin, nn.Module):
+#     '''https://github.com/lucidrains/geometric-vector-perceptron'''
+#     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
+#         super().__init__()
+#         self.field = field
+#         self.out_field = out_field
+#         in_irreps = irreps_in[field]
+#         self._init_irreps(
+#             irreps_in=irreps_in,
+#             irreps_out={self.out_field: in_irreps}, # TODO FIX not real
+#         )
 
-        self.dropout = GVPDropout(0.2)
+#         self.dropout = GVPDropout(0.2)
 
-        self.norm1 = GVPLayerNorm(64)
-        self.layer1 = GVP(
-            dim_vectors_in = 64, # env_embed_multiplicity
-            dim_feats_in = 64, # l0 dim (i.e. latent_dim)
+#         self.norm1 = GVPLayerNorm(64)
+#         self.layer1 = GVP(
+#             dim_vectors_in = 64, # env_embed_multiplicity
+#             dim_feats_in = 64, # l0 dim (i.e. latent_dim)
 
-            dim_vectors_out = 128, # out_multiplicity
-            dim_feats_out = 128, # new latent_dim
+#             dim_vectors_out = 128, # out_multiplicity
+#             dim_feats_out = 128, # new latent_dim
 
-            vector_gating = True
-        )
+#             vector_gating = True
+#         )
 
-        self.norm2 = GVPLayerNorm(128)
-        self.layer2 = GVP(
-            dim_vectors_in = 128, # env_embed_multiplicity
-            dim_feats_in = 128, # l0 dim (i.e. latent_dim)
+#         self.norm2 = GVPLayerNorm(128)
+#         self.layer2 = GVP(
+#             dim_vectors_in = 128, # env_embed_multiplicity
+#             dim_feats_in = 128, # l0 dim (i.e. latent_dim)
 
-            dim_vectors_out = 256, # out_multiplicity
-            dim_feats_out = 256, # new latent_dim
-            vector_gating = True
-        )
+#             dim_vectors_out = 256, # out_multiplicity
+#             dim_feats_out = 256, # new latent_dim
+#             vector_gating = True
+#         )
 
-        # for scalar property
-        self.norm3 = GVPLayerNorm(256)
-        self.final_layer = GVP(
-            dim_vectors_in = 256, # env_embed_multiplicity # 64x1o
-            dim_feats_in = 256, # l0 dim (i.e. latent_dim) # 512x0e
+#         # for scalar property
+#         self.norm3 = GVPLayerNorm(256)
+#         self.final_layer = GVP(
+#             dim_vectors_in = 256, # env_embed_multiplicity # 64x1o
+#             dim_feats_in = 256, # l0 dim (i.e. latent_dim) # 512x0e
 
-            dim_vectors_out = 64, # out_multiplicity
-            dim_feats_out = 1, # new latent_dim
+#             dim_vectors_out = 64, # out_multiplicity
+#             dim_feats_out = 1, # new latent_dim
 
-            vector_gating = True
-        )
-        self.l0_size = self.irreps_in[self.field][0].dim
-        self.l1_size = self.irreps_in[self.field][1].dim
+#             vector_gating = True
+#         )
+#         self.l0_size = self.irreps_in[self.field][0].dim
+#         self.l1_size = self.irreps_in[self.field][1].dim
 
-    def forward(self, data):
-        features = data[self.field]
+#     def forward(self, data):
+#         features = data[self.field]
 
-        feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-        vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
+#         feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
+#         vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
 
-        feats, vectors = self.norm1(feats, vectors)
-        feats, vectors = self.layer1((feats, vectors))
-        feats, vectors = self.dropout(feats, vectors)
+#         feats, vectors = self.norm1(feats, vectors)
+#         feats, vectors = self.layer1((feats, vectors))
+#         feats, vectors = self.dropout(feats, vectors)
 
-        feats, vectors = self.norm2(feats, vectors)
-        feats, vectors = self.layer2((feats, vectors))
-        feats, vectors = self.dropout(feats, vectors)
+#         feats, vectors = self.norm2(feats, vectors)
+#         feats, vectors = self.layer2((feats, vectors))
+#         feats, vectors = self.dropout(feats, vectors)
 
-        feats, vectors = self.norm3(feats, vectors)
-        feats, vectors = self.final_layer((feats, vectors))
+#         feats, vectors = self.norm3(feats, vectors)
+#         feats, vectors = self.final_layer((feats, vectors))
 
-        data[self.out_field] = feats
-        return data
+#         data[self.out_field] = feats
+#         return data
 
 
 class WeightedTP(GraphModuleMixin, nn.Module):
