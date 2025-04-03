@@ -267,6 +267,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             )
 
             if self.learn_cutoff_bias:
+                self.rbf_embedder = AdaLN(self.latent_dim, self.irreps_in[self.edge_invariant_field].num_irreps)
                 # self.rbf_embedder = FiLMFunction(
                 #     mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
                 #     mlp_latent_dimensions=[4*self.irreps_in[self.edge_invariant_field].num_irreps],
@@ -276,7 +277,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 #     has_bias=False,
                 #     final_non_lin='sigmoid'
                 # )
-                self.rbf_embedder = AdaLN(self.latent_dim, self.irreps_in[self.edge_invariant_field].num_irreps)
 
             self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
@@ -578,15 +578,16 @@ class InteractionLayer(torch.nn.Module):
         #         self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
         if self.learn_cutoff_bias:
-            self.rbf_embedder = FiLMFunction(
-                mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
-                mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
-                mlp_output_dimension=self.latent_mlp.out_features,
-                mlp_nonlinearity='swiglu',
-                zero_init_last_layer_weights=False,
-                has_bias=False,
-                final_non_lin='sigmoid'
-            )
+            self.rbf_embedder = AdaLN(self.latent_dim, parent.irreps_in[parent.edge_invariant_field].num_irreps)
+            # self.rbf_embedder = FiLMFunction(
+            #     mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
+            #     mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
+            #     mlp_output_dimension=self.latent_mlp.out_features,
+            #     mlp_nonlinearity='swiglu',
+            #     zero_init_last_layer_weights=False,
+            #     has_bias=False,
+            #     final_non_lin='sigmoid'
+            # )
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
