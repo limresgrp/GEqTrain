@@ -100,6 +100,7 @@ def run_inference(
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
     dropout_edges: float = 0.,
+    requires_grad: bool = False,
     **kwargs,
 ):
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
@@ -113,7 +114,7 @@ def run_inference(
 
     if skip_chunking:
         input_data = {
-            k: v
+            k: v.requires_grad_() if requires_grad and torch.is_floating_point(v) else v
             for k, v in batch.items()
             if k not in output_keys
         }
@@ -1243,6 +1244,7 @@ class Trainer:
                 batch_max_atoms=self.batch_max_atoms,
                 ignore_chunk_keys=self.ignore_chunk_keys,
                 dropout_edges=self.dropout_edges if not validation else 0.,
+                requires_grad=self.model_requires_grads,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
@@ -1259,7 +1261,7 @@ class Trainer:
                 loss.backward()
                 self.accumulation_counter += 1
 
-                # if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
+                if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
                 # if self.debug: self._log_updates()
 
                 if self.accumulation_counter == self.accumulation_steps:
@@ -1772,9 +1774,13 @@ class TrainerWandB(Trainer):
     def end_of_epoch_log(self):
         Trainer.end_of_epoch_log(self)
         if 'validation_loss' in self.mae_dict:
-            self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+            val_loss = self.mae_dict['validation_loss']
+            if val_loss > 0:
+                self.mae_dict.update({'validation_log_loss': math.log(val_loss)})
         if 'training_loss' in self.mae_dict:
-            self.mae_dict.update({'training_log_loss': math.log(self.mae_dict['training_loss'])})
+            train_loss = self.mae_dict['training_loss']
+            if train_loss > 0:
+                self.mae_dict.update({'training_log_loss': math.log(train_loss)})
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
             for norm in v:
