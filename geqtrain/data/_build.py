@@ -167,7 +167,7 @@ def dataset_from_config(config,
         key_clean_list = get_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
         n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
-        if n_workers>1:
+        if n_workers > 1:
             '''
             ! Known issue:
             if dataset is "in-memory" and n_workers>1 we have AND number of npz >=5000 (approximately):
@@ -177,10 +177,15 @@ def dataset_from_config(config,
             - option 1) faster preprocessing but slower training: keep n_workers>1 but use inmemory: false
             - option 2) slower preprocessing but faster train: keep inmemory: true (which is default behavior) but use n_workers = 1
             '''
-            # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-            chunksize = int(max(len(dataset_file_names_and_ensemble_indices) // (n_workers if inmemory else n_workers * .25), 1))
-            with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-                instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names_and_ensemble_indices, chunksize=chunksize)
+            # Ensure chunks are of size up to 4000 elements
+            chunksize = 5000
+            instances = []
+            for i in range(0, len(dataset_file_names_and_ensemble_indices), chunksize):
+                chunk = dataset_file_names_and_ensemble_indices[i:i + chunksize]
+                with Pool(processes=n_workers) as pool:  # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+                    results = pool.map(mp_handle_single_dataset_file_name, chunk)
+                    instances.extend(copy.deepcopy(results))
+                    del results
         else:
             instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names_and_ensemble_indices]
 
@@ -209,7 +214,8 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
             positional_args={},
             optional_args=_config,
         )
-    except FileNotFoundError:
+    except RuntimeError as e:
+        logging.warning(e)
         return None
     if instance.data is None:
         return None
