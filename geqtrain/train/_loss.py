@@ -6,6 +6,8 @@ import torch.nn
 
 from typing import Dict
 from importlib import import_module
+
+from torch_runstats import Reduction
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import instantiate_from_cls_name
 
@@ -192,6 +194,35 @@ class SimpleNodeLoss(SimpleGraphLoss):
         not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
 
         return pred_key, ref_key, not_nan_filter, center_nodes_filter
+
+
+class RMSDLoss(SimpleGraphLoss):
+
+    def __init__(self, func_name: str, params: dict = ...):
+        super().__init__('MSELoss', params)
+        self.reduction = Reduction.RMS
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        **kwargs,
+    ):
+        pred_key, not_nan_pred_filter, ref_key, not_nan_ref_filter = self.prepare(pred, ref, key, **kwargs)
+        pred_key = pred_key.view_as(ref_key)
+        not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
+
+        loss = torch.sum(self.func(pred_key, ref_key) * not_nan_filter, dim=-1)
+
+        if mean:
+            return torch.sqrt(loss.sum() / not_nan_filter.sum())
+        else:
+            # The accumulate_batch() method used by metrics first squares the loss, then computes the average and then extracts the root.
+            # Thus, we need to pass the sqrt(loss) to obtain the RMSD as output.
+            loss[~not_nan_filter[:, 0].bool()] = torch.nan
+            return torch.sqrt(loss)
 
 
 def instantiate_loss_function(name: str, params: Dict):
