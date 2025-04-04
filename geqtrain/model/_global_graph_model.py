@@ -147,7 +147,7 @@ def appendNGNNLayers(config):
     })
 
     for layer_idx in range(N-1):
-        layer_name:str = f"interaction_{layer_idx}"
+        layer_name:str = 'local_interaction' if layer_idx == 0 else f"interaction_{layer_idx}"
         modules.update({
             layer_name : (InteractionModule, dict(
                 name = layer_name,

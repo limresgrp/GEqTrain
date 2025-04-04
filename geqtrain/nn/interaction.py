@@ -98,6 +98,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.name = name
+        self.is_local = self.name == 'local_interaction'
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -285,7 +286,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.out_feat_elems = sum(out_feat_elems)
         self.out_irreps = out_irreps
         self.irreps_out.update({self.out_field: self.out_irreps})
-        self.is_local = self.name == 'local_interaction'
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center     = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -517,7 +517,8 @@ class InteractionLayer(torch.nn.Module):
                         # Node invariants for center and neighbor (chemistry)
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (parent.irreps_in['edge_features'].num_irreps if parent.name == 'local_interaction' else 0)
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
+                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps if parent.name == 'local_interaction' else 0) # if parent.is_local else 0)
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,
