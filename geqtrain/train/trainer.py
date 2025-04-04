@@ -422,6 +422,7 @@ class Trainer:
         mixed_precision: bool = False,
         hooks: Dict = {},
         use_grokfast: bool = False,
+        use_ema: bool = False,
         debug: bool = False,
         warmup_epochs: int | str = -1,
         head_wds: float = 0.0,
@@ -558,14 +559,77 @@ class Trainer:
         Optimization Step: After the specified number of accumulation steps, the gradients are used to update the model parameters, and the accumulation counter is reset.'''
         self.accumulation_counter = 0  # Counter for gradient accumulation
 
+    @property
+    def is_ddp(self):
+        '''returns T/F whether this trainer is being used in a ddp setting'''
+        return hasattr(self, 'rank')
+
     def _num_of_optim_steps_per_epoch(self) -> int:
-        '''returns number of batches in 1 epoch'''
-        if hasattr(self, "dl_train"):
-            assert math.ceil(len(self.dataset_train)/self.batch_size) == len(self.dl_train)
-            n = math.ceil(len(self.dl_train) / self.accumulation_steps)
-            self.logger.info(f"Number of optim steps per epoch {n}")
-            return n
-        raise ValueError("Missing attribute self.dl_train. Cannot infer number of steps per epoch.")
+        '''
+        Returns the number of optimizer steps performed per epoch by the current process.
+
+        This accounts for the number of batches processed by this specific rank
+        and gradient accumulation steps.
+        '''
+        if not hasattr(self, "dl_train") or self.dl_train is None:
+            raise ValueError("Attribute self.dl_train is missing or None. Cannot infer number of steps per epoch.")
+
+        if not isinstance(self.dl_train, DataLoader):
+             raise TypeError("self.dl_train must be a PyTorch DataLoader instance.")
+
+        # len(dataloader) correctly gives the number of batches yielded
+        # by this DataLoader instance, whether using DistributedSampler or not.
+        num_batches_per_process = len(self.dl_train)
+
+        if num_batches_per_process == 0:
+             self.logger.warning(f"DataLoader for the current process is empty (length is 0). "
+                                 f"This might happen with DDP, small datasets, and large world sizes. "
+                                 f"Returning 0 optimizer steps for this epoch.")
+             return 0
+
+        # Calculate the number of optimizer steps for this process
+        num_optim_steps = math.ceil(num_batches_per_process / self.accumulation_steps)
+
+        # --- Optional: Enhanced Logging ---
+        is_distributed = False
+        sampler_type = "N/A"
+        world_size = 1
+        rank = 0
+        if hasattr(self.dl_train, 'sampler') and self.dl_train.sampler is not None:
+            sampler_type = type(self.dl_train.sampler).__name__
+            # Check for common distributed sampler types
+            is_distributed = isinstance(self.dl_train.sampler, (DistributedSampler,)) # Add EnsembleDistributedSampler if needed
+            if is_distributed:
+                try:
+                    # Attempt to get world size and rank if possible (requires torch.distributed)
+                    import torch.distributed as dist
+                    if dist.is_available() and dist.is_initialized():
+                        world_size = dist.get_world_size()
+                        rank = dist.get_rank()
+                    else: # Fallback if not initialized or available
+                        # Sometimes sampler stores these
+                        if hasattr(self.dl_train.sampler, 'num_replicas'):
+                            world_size = self.dl_train.sampler.num_replicas
+                        if hasattr(self.dl_train.sampler, 'rank'):
+                            rank = self.dl_train.sampler.rank
+                except ImportError:
+                    self.logger.warning("torch.distributed not available for detailed DDP logging.")
+                except Exception as e:
+                    self.logger.warning(f"Could not get DDP info (world_size/rank): {e}")
+
+
+        self.logger.info(
+            f"Calculating optim steps per epoch: "
+            f"DataLoader length (batches for this process rank={rank}/{world_size}): {num_batches_per_process}, "
+            f"Accumulation steps: {self.accumulation_steps}, "
+            f"Sampler type: {sampler_type}, "
+            f"Distributed: {is_distributed}"
+        )
+        self.logger.info(f"Number of optim steps per epoch (for this process): {num_optim_steps}")
+        # --- End Optional Logging ---
+
+        return num_optim_steps
+
 
     def init_objects(self):
         '''
@@ -645,7 +709,7 @@ class Trainer:
             all_args=self.kwargs,
             optional_args=self.optimizer_kwargs,
         )
-        self.grads = None
+        self.grads = None # as requested in https://github.com/ironjr/grokfast
 
         # initialize scheduler
 
@@ -715,6 +779,18 @@ class Trainer:
             for key in self.train_on_keys:
                 if self.loss.remove_suffix(key) not in self.model.irreps_out:
                     raise RuntimeError(f"Loss function include fields {self.loss.remove_suffix(key)} that are not predicted by the model {self.model.irreps_out}")
+
+        # --- set up ema
+        self.ema = None
+        if self.use_ema:
+            self.logger.info(f"Using EMA")
+            from torch_ema import ExponentialMovingAverage # https://pypi.org/project/torch-ema/
+            self.ema = ExponentialMovingAverage(
+                self.model.parameters(),
+                decay=0.999, # or 0.99 or 0.995
+                use_num_updates=True, #self.ema_use_num_updates,
+            )
+
 
     def log_data_points(self, dataset, prefix: str):
         loss_clean_keys = [self.loss.remove_suffix(key) for key in self.loss.keys]
@@ -816,6 +892,20 @@ class Trainer:
 
         return dictionary
 
+    def save_ema_model(self, path, blocking: bool = True):
+        if self.use_ema:
+            # If using EMA, store the EMA validation model
+            # that gave us the good val metrics that made the model "best"
+            # in the first place
+            cm = self.ema.average_parameters()
+        else:
+            # otherwise, do nothing
+            cm = contextlib.nullcontext()
+
+        with cm:
+            self.save_model(path, blocking=blocking)
+
+
     def save(self, filename: Optional[str] = None, format=None, blocking: bool = True):
         """save the file as filename
 
@@ -851,7 +941,7 @@ class Trainer:
         )
         logger.debug(f"Saved trainer to {filename}")
 
-        self.save_model(self.last_model_path, blocking=blocking)
+        self.save_ema_model(self.last_model_path, blocking=blocking)
         logger.debug(f"Saved last model to to {self.last_model_path}")
 
         return filename
@@ -1223,10 +1313,12 @@ class Trainer:
 
             if self.ibatch % 10 == 0 and not validation:
                 with torch.no_grad():
-                    irreps_as_dict = {i:mul for i, (mul, l) in enumerate(self.model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY])}
+                    # only master logs its features
+                    model = self.model.module if self.is_ddp else self.model
+                    irreps_as_dict = {i:mul for i, (mul, l) in enumerate(model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY])}
                     node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
                     split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
-                    reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in self.model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY]]
+                    reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model[-1].irreps_in[AtomicDataDict.NODE_FEATURES_KEY]]
                     reprs = torch.split(node_reprs, split_sizes, dim=1)
                     for l, repr in enumerate(reprs):
                         norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
@@ -1244,7 +1336,8 @@ class Trainer:
                 loss.backward()
                 self.accumulation_counter += 1
 
-                if self.use_grokfast: self.grads = gradfilter_ema(self.model, grads=self.grads)
+                if self.use_grokfast:
+                    self.grads = gradfilter_ema(self.model, grads=self.grads)
                 # if self.debug: self._log_updates()
 
                 if self.accumulation_counter == self.accumulation_steps:
@@ -1255,6 +1348,9 @@ class Trainer:
                     self.norms_clip.append(float(max_grad_norm))
 
                     self.optim.step()
+                    if self.use_ema:
+                        self.ema.update()
+
                     self.optim.zero_grad(set_to_none=True)
                     self.lr_sched_step(batch_lvl=True)
                     self.accumulation_counter = 0
@@ -1310,8 +1406,11 @@ class Trainer:
             self.reset_metrics()
             self.n_batches = len(dloader)
 
+            emacm = False
             if category == VALIDATION:
                 self.model.eval()
+                if self.use_ema:
+                    emacm = True
             else:
                 self.model.train()
                 self.optim.zero_grad(set_to_none=True)
@@ -1322,7 +1421,11 @@ class Trainer:
 
             cm = contextlib.nullcontext() if (self.model_requires_grads or not category == VALIDATION) else torch.no_grad()
             for self.ibatch, batch in enumerate(dloader):
-                success = self.batch_step(data=batch, ctx_mngr=cm, validation=(category == VALIDATION))
+                if emacm:
+                    with self.ema.average_parameters(): #! warning: not possible to add this to cm
+                        success = self.batch_step(data=batch, ctx_mngr=cm, validation=(category == VALIDATION))
+                else:
+                    success = self.batch_step(data=batch, ctx_mngr=cm, validation=(category == VALIDATION))
 
                 if success:
                     self.end_of_batch_log(batch_type=category)
@@ -1417,7 +1520,7 @@ class Trainer:
                 self.best_metrics = current_metrics
                 self.best_epoch = self.iepoch
 
-                self.save_model(self.best_model_path, blocking=False)
+                self.save_ema_model(self.best_model_path, blocking=False)
 
                 self.logger.info(f"! Best model saved {self.best_epoch:8d} {self.best_metrics:8.3f}")
 
@@ -1428,9 +1531,8 @@ class Trainer:
                 self.save_checkpoint_freq > 0
                 and (self.iepoch + 1) % self.save_checkpoint_freq == 0
             ):
-                ckpt_path = self.output.generate_file(
-                    f"ckpt{self.iepoch+1}.pth")
-                self.save_model(ckpt_path, blocking=False)
+                ckpt_path = self.output.generate_file(f"ckpt{self.iepoch+1}.pth")
+                self.save_ema_model(ckpt_path, blocking=False)
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
@@ -1694,21 +1796,20 @@ class Trainer:
             timeout=config.get('dloader_timeout', 30) if using_multiple_workers > 0 else 0,
             generator=self.dataset_rng,
         )
-
-        if using_multiple_workers:
-            dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-
         dataset_mode = config.get("dataset_mode", "single")
         assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
         use_ensemble = dataset_mode == 'ensemble'
-
-        if use_ensemble and batch_sampler is None:
-            batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
+        if use_ensemble:
+            if batch_sampler is None:
+                batch_sampler = EnsembleSampler(self.dataset_train, self.batch_size)
         else:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
             ))
+            
+        if using_multiple_workers:
+            dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
@@ -1720,14 +1821,14 @@ class Trainer:
 
         # validation, on the other hand, shouldn't shuffle
         # we still pass the generator just to be safe
-        if use_ensemble and batch_validation_sampler is None:
-            batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
+        if use_ensemble:
+            if batch_validation_sampler is None:
+                batch_validation_sampler = EnsembleSampler(self.dataset_val, self.validation_batch_size)
         else:
             dl_kwargs.update(dict(
                 batch_size=self.validation_batch_size,
                 shuffle=False,
             ))
-
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,
@@ -1796,8 +1897,10 @@ class DistributedTrainer(Trainer):
         batch_sampler           : Sampler | None=None,
         batch_validation_sampler: Sampler | None=None,
     ):
-        use_ensemble = config.get("dataset_mode", "single")
-        assert use_ensemble in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {use_ensemble}"
+        dataset_mode = config.get("dataset_mode", "single")
+        assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
+        use_ensemble = dataset_mode == 'ensemble'
+
         if use_ensemble:
             sampler_class = EnsembleDistributedSampler
             kwargs_keys = ['batch_sampler', 'batch_validation_sampler']
@@ -1825,7 +1928,7 @@ class DistributedTrainer(Trainer):
     def set_model(self, model):
         super().set_model(model)
         from torch.nn.parallel import DistributedDataParallel as DDP
-        self.model = DDP(self.model, device_ids=[self.rank]) # find_unused_parameters=True is for debug purposes only, heavy hit on performance
+        self.model = DDP(self.model, device_ids=[self.rank]) #, find_unused_parameters=True) # is for debug purposes only, heavy hit on performance
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
@@ -1833,7 +1936,7 @@ class DistributedTrainer(Trainer):
 
     def _update_metrics(self, out:Dict[str, torch.Tensor], ref_data:Dict[str, torch.Tensor]) -> None:
         # collect targets/predictions from different processes for current batch/key, preds/targets can be of different shapes across processes (e.g. if atom-wise, whereas in mol-wise they SHOULD be the same as batch size)
-        _keys = set(self.metrics.clean_keys)
+        _keys = set(self.metrics.clean_keys) # all keys in out/ref_data for which we must compute metric
         sync_dict_of_tensors_across_GPUs(out, self.world_size, _keys)
         sync_dict_of_tensors_across_GPUs(ref_data, self.world_size, _keys)
 
