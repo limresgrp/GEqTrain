@@ -84,10 +84,6 @@ def parse_attrs(
 
             if options.get('attribute_type', 'categorical') == 'numerical':
                 _input_type = val
-                if options.get('standardize', True):
-                    mean = np.mean(_input_type, axis=-2, keepdims=True)
-                    std = np.std(_input_type, axis=-2, keepdims=True)
-                    _input_type = (_input_type - mean) / (std + 1e-8)
             else:
                 if "embedding_dimensionality" not in options:  # this is not an attribute to parse
                     continue
