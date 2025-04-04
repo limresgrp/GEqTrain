@@ -167,18 +167,18 @@ def dataset_from_config(config,
         n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
         if n_workers>1:
             '''
-            ! Known issue:
-            if dataset is "in-memory" and n_workers>1 we have AND number of npz >=5000 (approximately):
-                RuntimeError: unable to mmap ... bytes from file <filename not specified>: Cannot allocate memory (...)
-
-            Solution:
-            - option 1) faster preprocessing but slower training: keep n_workers>1 but use inmemory: false
-            - option 2) slower preprocessing but faster train: keep inmemory: true (which is default behavior) but use n_workers = 1
+            sysctl vm.max_map_count # Use this to check the limit of maps for shared memory
+            sudo sysctl -w vm.max_map_count=NEW_VALUE # If necessary, change it with this command (valid until restart)
             '''
-            # if inmemory: an even split; elif NOT-inmemory: we can't afford loading the whole dset in different processes
-            chunksize = int(max(len(dataset_file_names_and_ensemble_indices) // (n_workers if inmemory else n_workers * .25), 1))
-            with Pool(processes=n_workers) as pool: # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
-                instances = pool.map(mp_handle_single_dataset_file_name, dataset_file_names_and_ensemble_indices, chunksize=chunksize)
+            # Ensure chunks are of size up to chunksize elements
+            chunksize = 10000
+            instances = []
+            for i in range(0, len(dataset_file_names_and_ensemble_indices), chunksize):
+                chunk = dataset_file_names_and_ensemble_indices[i:i + chunksize]
+                with Pool(processes=n_workers) as pool:  # avoid ProcessPoolExecutor: https://stackoverflow.com/questions/18671528/processpoolexecutor-from-concurrent-futures-way-slower-than-multiprocessing-pool
+                    results = pool.map(mp_handle_single_dataset_file_name, chunk)
+                    instances.extend(copy.deepcopy(results))
+                    del results
         else:
             instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names_and_ensemble_indices]
 
