@@ -66,7 +66,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         out_irreps: Optional[Union[o3.Irreps, str]] = None, #! out_irreps: if None: (yaml.latent_dim x lmax), else yaml.out_irreps
         output_ls:  Optional[List[int]]             = None,
         output_mul: Optional[Union[str, int]]       = None, #! 3 options: 1) None: don't change out_irreps mul, 2) 'hidden': mul=yaml.latent_dim, 3) int
-        avg_num_neighbors: Optional[float]          = None,
         # cutoffs
         TanhCutoff_n: float = 6.,
         # alias:
@@ -239,8 +238,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     two_body_latent=two_body_latent,
                     latent=latent,
                     env_embed=env_embed,
-
-                    avg_num_neighbors=avg_num_neighbors,
                 )
             )
 
@@ -404,8 +401,6 @@ class InteractionLayer(torch.nn.Module):
         two_body_latent: torch.nn.Module, # constructor func
         latent: torch.nn.Module,
         env_embed: torch.nn.Module,
-        avg_num_neighbors: float,
-        avg_num_neighbors_is_learnable: bool = True,
     ) -> None:
         super().__init__()
         #! cannot store self.parent = parent due to nn recursive loops
@@ -623,7 +618,8 @@ class InteractionLayer(torch.nn.Module):
         # updated local_env_per_active_atom
         return self.reshape_in_module(expanded_features_per_active_atom)
 
-    def apply_residual_stream(self, latents, new_latents, this_layer_update_coeff, active_edges):
+
+    def apply_residual_stream(self, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
         if self.layer_index > 0:
             assert this_layer_update_coeff is not None
             # At init, we assume new and old to be approximately uncorrelated
@@ -686,7 +682,6 @@ class InteractionLayer(torch.nn.Module):
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
-
         eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs

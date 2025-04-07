@@ -9,7 +9,6 @@ from typing import (
     Dict
 )
 import bisect
-import warnings
 import numpy as np
 import logging
 import inspect
@@ -21,6 +20,8 @@ from os.path import dirname, basename, abspath
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
+from geqtrain.utils.torch_geometric.data import Data
+from geqtrain.utils.torch_geometric.dataset import IndexType
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 
@@ -83,10 +84,6 @@ def parse_attrs(
 
             if options.get('attribute_type', 'categorical') == 'numerical':
                 _input_type = val
-                if options.get('standardize', True):
-                    mean = np.mean(_input_type, axis=-2, keepdims=True)
-                    std = np.std(_input_type, axis=-2, keepdims=True)
-                    _input_type = (_input_type - mean) / (std + 1e-8)
             else:
                 if "embedding_dimensionality" not in options:  # this is not an attribute to parse
                     continue
@@ -259,6 +256,30 @@ class AtomicDataset(Dataset):
             root=root,
             transform=Compose([load_callable(transf) for transf in transforms]) if transforms else None
         )
+
+    def __getitem__(
+        self,
+        idx: Union[int, np.integer, IndexType],
+    ) -> Union["Dataset", Data]:
+        r"""In case :obj:`idx` is of type integer, will return the data object
+        at index :obj:`idx` (and transforms it in case :obj:`transform` is
+        present).
+        In case :obj:`idx` is a slicing object, *e.g.*, :obj:`[2:5]`, a list, a
+        tuple, a PyTorch :obj:`LongTensor` or a :obj:`BoolTensor`, or a numpy
+        :obj:`np.array`, will return a subset of the dataset at the specified
+        indices."""
+        if (
+            isinstance(idx, (int, np.integer))
+            or (isinstance(idx, torch.Tensor) and idx.dim() == 0)
+            or (isinstance(idx, np.ndarray) and np.isscalar(idx))
+        ):
+
+            data = self.get(self.indices()[idx])
+            data = data if self.transform is None else self.transform(copy.deepcopy(data)) # Call deepcopy to avoid stacking transforms over epochs
+            return data
+
+        else:
+            return self.index_select(idx)
 
     def _get_parameters(self) -> Dict[str, Any]:
         """Get a dict of the parameters used to build this dataset."""
@@ -627,23 +648,27 @@ class NpzDataset(AtomicInMemoryDataset):
     ):
         self.key_mapping = key_mapping
 
-        super().__init__(
-            pbc=pbc,
-            file_name=file_name,
-            ensemble_index=ensemble_index,
-            url=url,
-            root=root,
-            ignore_fields=ignore_fields,
-            extra_fixed_fields=extra_fixed_fields,
-            include_frames=include_frames,
-            target_indices=target_indices,
-            target_key=target_key,
-            node_attributes=node_attributes,
-            edge_attributes=edge_attributes,
-            graph_attributes=graph_attributes,
-            extra_attributes=extra_attributes,
-            transforms=transforms,
-        )
+        try:
+            super().__init__(
+                pbc=pbc,
+                file_name=file_name,
+                ensemble_index=ensemble_index,
+                url=url,
+                root=root,
+                ignore_fields=ignore_fields,
+                extra_fixed_fields=extra_fixed_fields,
+                include_frames=include_frames,
+                target_indices=target_indices,
+                target_key=target_key,
+                node_attributes=node_attributes,
+                edge_attributes=edge_attributes,
+                graph_attributes=graph_attributes,
+                extra_attributes=extra_attributes,
+                transforms=transforms,
+            )
+        except Exception as e:
+            logging.error(f"Error in file {self.raw_file_names}")
+            raise e
 
     @property
     def raw_file_names(self):

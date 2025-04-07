@@ -1,12 +1,11 @@
 import torch
 import torch.nn
-import math
 from e3nn.o3 import Irreps
 from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
-
+import math
 from typing import Dict, Optional, List
 
 
@@ -77,10 +76,11 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             if 'embedding_dimensionality' not in values: # if attr is not used as embedding
                 continue
 
+            irreps_in[field] = None
             embedding_dim = values['embedding_dimensionality']
             output_embedding_dim += embedding_dim
             if values.get('attribute_type', 'categorical') == 'numerical':
-                numerical_attrs.append(field)
+                self._numerical_attrs.append(field)
             else:
                 n_types = values.get('actual_num_types', num_types) # ! IMPO should be + 1 for masking category but handled via cfg.yaml s.t. round emb_module.weight.shape[0] to be set to the closest power of 2 possible
                 emb_module = torch.nn.Embedding(n_types, embedding_dim)
@@ -96,6 +96,8 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         self.attr_modules = attr_modules
         irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
+        self._has_numericals = len(self._numerical_attrs) > 0
+
 
     @torch.cuda.amp.autocast(enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -109,9 +111,11 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             x_emb = emb_layer(x)
             out.append(x_emb)
 
-        for attribute_name in self.numerical_attrs:
-            x = data[attribute_name]
-            out.append(x)
+        if self._has_numericals:
+            assert hasattr(self, '_numerical_attrs') # Needed to jit compile
+            for attribute_name in self._numerical_attrs:
+                x = data[attribute_name]
+                out.append(x)
 
         data[self.out_field] = torch.cat(out, dim=-1).float()
         return data

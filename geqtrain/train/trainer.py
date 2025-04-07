@@ -105,6 +105,8 @@ def run_inference(
     noise: Optional[float] = None,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
+    dropout_edges: float = 0.,
+    requires_grad: bool = False,
     **kwargs,
 ):
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
@@ -118,7 +120,7 @@ def run_inference(
 
     if skip_chunking:
         input_data = {
-            k: v
+            k: v.requires_grad_() if requires_grad and torch.is_floating_point(v) else v
             for k, v in batch.items()
             # if k not in output_keys
         }
@@ -146,11 +148,38 @@ def run_inference(
         ref_data[AtomicDataDict.NOISE_KEY] = noise * torch.randn_like(input_data[AtomicDataDict.POSITIONS_KEY])
         input_data[AtomicDataDict.POSITIONS_KEY] += ref_data[AtomicDataDict.NOISE_KEY]
 
+    if dropout_edges > 0:
+        aply_dropout_edges(dropout_edges, input_data)
+
     with cm, precision:
         out = model(input_data)
         del input_data
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
+
+def aply_dropout_edges(dropout_edges, input_data):
+    edge_index = input_data[AtomicDataDict.EDGE_INDEX_KEY]
+    num_edges = edge_index.size(1)
+    num_dropout_edges = int(dropout_edges * num_edges)
+
+        # Randomly select edges to drop
+    drop_edges = torch.randperm(num_edges, device=edge_index.device)[:num_dropout_edges]
+    keep_edges = torch.ones(num_edges, dtype=torch.bool, device=edge_index.device)
+    keep_edges[drop_edges] = False
+
+        # Ensure at least some edges per node center
+    node_centers = edge_index[0].unique()
+    remaining_node_centers = edge_index[0, keep_edges].unique()
+    combined = torch.cat((node_centers, remaining_node_centers))
+    uniques, counts = combined.unique(return_counts=True)
+    dropped_out_node_centers = uniques[counts == 1]
+    for node in dropped_out_node_centers:
+        node_edges = (edge_index[0] == node).nonzero(as_tuple=True)[0]
+        keep_edges[node_edges[torch.randint(len(node_edges), (max(1, int((1-dropout_edges)*len(node_edges))),))]] = True
+
+    input_data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
+    if AtomicDataDict.EDGE_CELL_SHIFT_KEY in input_data:
+        input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
 
 def prepare_chunked_input_data(
     already_computed_nodes: Optional[torch.Tensor],
@@ -436,6 +465,10 @@ class Trainer:
         self.model = None
         logging.debug("* Initialize Trainer")
 
+        # --- dropout_edges
+        dropout_edges = dropout_edges if isinstance(dropout_edges, float) else 0.2 if dropout_edges is True else 0.
+
+
         # --- write all self.init_keys in self AND in _local_kwargs, init_keys are all kwargs of ctor
         _local_kwargs = {}
         for key in self.init_keys:
@@ -485,7 +518,7 @@ class Trainer:
         # --- loss/logger printing info
         self.metrics_metadata = {
             'type_names': self.type_names,
-            'target_names': self.target_names,
+            'target_names': self.target_names or ['target'],
         }
 
         # --- filter node target to train on based on node type or type name
@@ -1307,6 +1340,8 @@ class Trainer:
                 noise=self.noise,
                 batch_max_atoms=self.batch_max_atoms,
                 ignore_chunk_keys=self.ignore_chunk_keys,
+                dropout_edges=self.dropout_edges if not validation else 0.,
+                requires_grad=self.model_requires_grads,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
@@ -1338,7 +1373,9 @@ class Trainer:
 
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
-                # if self.debug: self._log_updates()
+
+                # if self.debug:
+                #     self._log_updates()
 
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
@@ -1807,7 +1844,7 @@ class Trainer:
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
             ))
-            
+
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
@@ -1865,9 +1902,13 @@ class TrainerWandB(Trainer):
     def end_of_epoch_log(self):
         Trainer.end_of_epoch_log(self)
         if 'validation_loss' in self.mae_dict:
-            self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+            val_loss = self.mae_dict['validation_loss']
+            if val_loss > 0:
+                self.mae_dict.update({'validation_log_loss': math.log(val_loss)})
         if 'training_loss' in self.mae_dict:
-            self.mae_dict.update({'training_log_loss': math.log(self.mae_dict['training_loss'])})
+            train_loss = self.mae_dict['training_loss']
+            if train_loss > 0:
+                self.mae_dict.update({'training_log_loss': math.log(train_loss)})
         wandb.log(self.mae_dict)
         for k, v in self.norm_dict.items():
             for norm in v:

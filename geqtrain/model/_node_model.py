@@ -14,7 +14,6 @@ from geqtrain.nn import (
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
-    ReadoutModule,
 )
 
 

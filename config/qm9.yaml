@@ -1,0 +1,198 @@
+# general
+root: /scratch/angiod/GEqTrain/qm9
+run_name: debug.alpha
+experiment_description: "Alpha - 100k train samples. 19.4k valid samples."
+
+seed: 0
+dataset_seed: 0
+append: true
+default_dtype: float32
+
+# --- M O D E L --- #
+model_builders:
+  - HeadlessGlobalGraphModel
+  - Heads
+
+# - general - #
+use_weight_norm: false # Cannot jit compile when using this
+use_mace_product: true
+
+# - cutoffs - #
+r_max: 7.0
+
+# - radial basis - #
+edge_radial_attrs_basis: geqtrain.nn.BesselBasisVec
+TanhCutoff_n: 6
+num_basis: 16
+
+# - symmetry - #
+l_max: 3
+parity: o3_full
+
+# --- interaction layers --- #
+num_layers: 2
+latent_dim: 64
+env_embed_multiplicity: 8
+
+latent: geqtrain.nn.ScalarMLPFunction
+mlp_latent_dimensions: [256]
+mlp_nonlinearity: swiglu
+
+# - local attention - #
+local_interaction_use_attention: true
+local_interaction_head_dim: 64
+
+# - context aware attention - #
+context_aware_interaction_use_attention: true
+context_aware_interaction_head_dim: 64
+
+# - products - #
+local_interaction_use_mace_product: true
+
+interaction_output_ls: [0] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
+# ---  END interaction layers  --- #
+
+# --- START pooling layer --- #
+pooling_use_attention: false
+pooling_use_gating: true
+# ---  END pooling layer  --- #
+
+# --- START HEADS --- #
+head_wds: 0.001
+head_node_output_wd: true
+heads:
+  - [graph_features, graph_output, 1x0e]
+
+# ---  END HEADS  --- #
+
+# --- E N D   M O D E L --- #
+
+# --- D A T A S E T --- #
+
+dataset_num_workers: 1
+
+# - train - #
+dataset_list: # if you provide only training dataset, it will be split 80-20% in train and validation
+  - dataset: npz
+    dataset_input: /my_path/to/qm9/processed/
+    key_mapping:
+      pos: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
+      x: node_input_features
+      y: graph_output
+      z: node_types
+
+# validation_dataset_list: # If you also provide the validation, this will be used as validation and the full training as training
+#   - validation_dataset: npz
+#     validation_dataset_input: /my_path/to/qm9/processed_valid
+#     key_mapping:
+#       pos: pos
+#       x: node_input_features
+#       y: graph_output
+#       z: node_types
+
+# - register fields - #
+node_fields:
+  - node_input_features
+
+# - define node attributes - #
+node_attributes:
+  node_types: # this kword must match the red kword in key_mapping
+    embedding_dimensionality: 32
+    fixed: true
+  node_input_features:
+    attribute_type: numerical
+    embedding_dimensionality: 11
+
+type_names:
+  - X
+  - H
+  - He
+  - Li
+  - Be
+  - B
+  - C
+  - N
+  - O
+  - F
+
+target_names: ['alpha'] # 'mu', 'alpha', 'homo', 'lumo', 'gap', 'r2', 'zpve', 'U0', 'U', 'H', 'G', 'Cv']
+target_indices: [1]
+target_key: graph_output
+
+# --- R E G U L A R I Z A T I O N --- #
+
+# dropout: 0.001
+dropout_edges: 0.005
+
+# --- L O S S --- #
+
+loss_coeffs:
+  - graph_output: # target -? key taken from dat dict of batch
+    - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
+    - MSELoss # loss function
+
+# --- M E T R I C S --- #
+
+metrics_components:
+  - graph_output:
+    - L1Loss
+  - graph_output:
+    - L1Loss
+    - PerTarget: true
+
+# --- L O G G I N G --- #
+
+verbose: info
+log_batch_freq: 50
+
+wandb: false
+wandb_project: qm9
+# code_folder_name: qm9 # - use if you run geqtrain from a different repo, to save source code of your repo - #
+wandb_watch: true # - log gradients and/or parameters of the model - #
+wandb_watch_kwargs:
+  log: 'all'      # either 'gradients', 'parameters', 'all' or None
+  log_freq: 1000  # log every N batches
+  log_graph: true # log graph topology
+
+# --- T R A I N I N G --- #
+
+batch_size: 128
+validation_batch_size: 128
+dataloader_num_workers: 4
+
+# Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
+skip_chunking: true
+batch_max_atoms: 10000             # Limit the maximum number of nodes of a graph to be loaded on memory in a single batch
+
+max_epochs: 10000
+learning_rate: 1.e-4
+train_val_split: random
+shuffle: true
+metrics_key: validation_loss
+
+# - optimizer - #
+optimizer_name: AdamW
+optimizer_params:
+  amsgrad: false
+  betas: !!python/tuple
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  weight_decay: 1.e-4
+max_gradient_norm: 10.
+
+lr_scheduler_name: CosineAnnealingLR
+
+# # lr scheduler, drop lr if no improvement for tot epochs
+# lr_scheduler_name: ReduceLROnPlateau
+# lr_scheduler_patience: 3
+# lr_scheduler_factor: 0.7
+
+early_stopping_lower_bounds:
+  LR: 1.0e-7
+
+early_stopping_patiences:
+  validation_loss: 50
+
+sanitize_gradients:   false # If true, zero out NaN gradients. Activate only if you are training on a dataset which can have bad behaving graphs
+model_requires_grads: false # If true, run validation step without using torch.no_grads(). Use if your model uses automatic differentiation internally
