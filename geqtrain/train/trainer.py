@@ -1346,7 +1346,7 @@ class Trainer:
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
 
-            if self.ibatch % 10 == 0 and not validation:
+            if (self.ibatch + 1) % self.log_batch_freq == 0 or (self.ibatch + 1) == self.n_batches and not validation:
                 with torch.no_grad():
                     # only master logs its features
                     model = self.model.module if self.is_ddp else self.model
@@ -1533,9 +1533,7 @@ class Trainer:
                 batch_logger.info(header)
 
         batch_logger.info(mat_str)
-        if (self.ibatch + 1) % self.log_batch_freq == 0 or (
-            self.ibatch + 1
-        ) == self.n_batches:
+        if (self.ibatch + 1) % self.log_batch_freq == 0 or (self.ibatch + 1) == self.n_batches:
             self.logger.info(log_str)
 
     def end_of_epoch_save(self):

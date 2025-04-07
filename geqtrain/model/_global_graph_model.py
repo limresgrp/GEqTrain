@@ -142,7 +142,7 @@ def appendNGNNLayers(config):
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
-            num_heads=8,
+            num_heads=8, # this number must be a 0 reminder of the sum of catted nn.embedded features (node and edges)
         ))
     })
 
