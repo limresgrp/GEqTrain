@@ -75,13 +75,9 @@ def instanciate_train_val_dsets(config: Config) -> Tuple[Union[InMemoryConcatDat
         validation_dataset = None
     return train_dataset, validation_dataset
 
-def load_trainer_and_model(rank: int, world_size: int, config: Config, old_config: Optional[Dict] = None, is_restart=False):
-
-    if old_config is None:
-        old_config = dict(config)
-
+def load_trainer_and_model(rank: int, world_size: int, config: Config, is_restart=False):
     if config.use_dt:
-        old_config.update({
+        config.update({
             "rank": rank,
             "world_size": world_size,
         })
@@ -97,16 +93,16 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, old_confi
 
         if config.use_dt:
             from geqtrain.train import DistributedTrainerWandB
-            trainer, model = DistributedTrainerWandB.from_dict(old_config)
+            trainer, model = DistributedTrainerWandB.from_config(config)
         else:
             from geqtrain.train import TrainerWandB
-            trainer, model = TrainerWandB.from_dict(old_config)
+            trainer, model = TrainerWandB.from_config(config)
     else:
         if config.use_dt:
             from geqtrain.train import DistributedTrainer
-            trainer, model = DistributedTrainer.from_dict(old_config)
+            trainer, model = DistributedTrainer.from_config(config)
         else:
             from geqtrain.train import Trainer
-            trainer, model = Trainer.from_dict(old_config)
+            trainer, model = Trainer.from_config(config)
 
     return trainer, model

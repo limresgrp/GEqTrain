@@ -999,7 +999,9 @@ class Trainer:
         return cls.from_dict(dictionary, append)
 
 
-    def load_state_dicts_for_restart(self, dictionary):
+    def load_state_dicts_for_restart(self, config: Config):
+        dictionary: dict = config.as_dict()
+
         # ! progress implies that we are resuming training from last_model_path
         assert "progress" in dictionary, "key: 'progress' not present in dictionary, are you running a restart?"
         assert "state_dict" in dictionary, "key: 'state_dict' not present in dictionary, are you running a restart?"
@@ -1043,7 +1045,11 @@ class Trainer:
             raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
 
     @classmethod
-    def from_dict(cls, dictionary, append: Optional[bool] = None):
+    def from_config(cls, config: Config, append: Optional[bool] = None):
+        return cls.from_dict(config.as_dict(), append)
+
+    @classmethod
+    def from_dict(cls, dictionary: dict, append: Optional[bool] = None):
         """load model from dictionary
 
         Args:
