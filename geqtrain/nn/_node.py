@@ -60,23 +60,22 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         out_field:str,
         attributes: Dict[str, Dict] = {}, # key to parse from yaml
         num_types: Optional[int] = None,
-        irreps_in=None,
         use_masking: bool = True,
-        fields_to_mask: List[str] = []
+        fields_to_mask: List[str] = [],
+        irreps_in=None,
     ):
         super().__init__()
         self.out_field = out_field
         self.use_masking = use_masking
         self.fields_to_mask = fields_to_mask
-        numerical_attrs = []
-        attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
+        self._numerical_attrs = []
+        self._attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
         for field, values in attributes.items():
 
             if 'embedding_dimensionality' not in values: # if attr is not used as embedding
                 continue
 
-            irreps_in[field] = None
             embedding_dim = values['embedding_dimensionality']
             output_embedding_dim += embedding_dim
             if values.get('attribute_type', 'categorical') == 'numerical':
@@ -90,20 +89,18 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
                 torch.nn.init.xavier_uniform_(emb_module.weight)
                 emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
 
-                attr_modules[field] = emb_module
+                self._attr_modules[field] = emb_module
 
-        self.numerical_attrs = numerical_attrs
-        self.attr_modules = attr_modules
         irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
         self._has_numericals = len(self._numerical_attrs) > 0
 
 
-    @torch.cuda.amp.autocast(enabled=False) # embeddings always kept to high precision, regardless of AMP
+    @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
-        for attribute_name, emb_layer in self.attr_modules.items():
-            x = data[attribute_name]
+        for attribute_name, emb_layer in self._attr_modules.items():
+            x = data[attribute_name].squeeze(-1)
 
             if self.use_masking and attribute_name in self.fields_to_mask:
                 x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] -1) # last index is reserved for masking, make sure to match this in yaml
