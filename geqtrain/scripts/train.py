@@ -121,15 +121,17 @@ def main(args=None):
         world_size = configure_dist_training(args)
 
         # autonomous handling of rank, each process runs func
-        mp.spawn(func, args=(world_size, config, train_dataset, validation_dataset,), nprocs=world_size, join=True)
+        mp.spawn(func, args=(world_size, config.as_dict(), train_dataset, validation_dataset,), nprocs=world_size, join=True)
     else:
-        func(rank=0, world_size=1, config=config, train_dataset=train_dataset, validation_dataset=validation_dataset)
+        func(rank=0, world_size=1, config=config.as_dict(), train_dataset=train_dataset, validation_dataset=validation_dataset)
     return
 
 
-def fresh_start(rank: int, world_size: int, config: Config, train_dataset, validation_dataset):
+def fresh_start(rank: int, world_size: int, config: dict, train_dataset, validation_dataset):
     try:
-        assert isinstance(config, Config), "config must be of type Config"
+        # Necessary for mp.spawn
+        assert isinstance(config, dict), f"config must be of type Dict. It is of type {type(config)}"
+        config = Config.from_dict(config)
 
         if config.use_dt:
             setup_distributed_training(rank, world_size)

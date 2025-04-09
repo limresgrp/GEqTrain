@@ -301,7 +301,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        if self.is_local:
+        if self.is_local and AtomicDataDict.EDGE_FEATURES_KEY in data:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
         else:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
@@ -513,7 +513,10 @@ class InteractionLayer(torch.nn.Module):
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
                         + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
-                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps if parent.name == 'local_interaction' else 0) # if parent.is_local else 0)
+                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps
+                            if parent.name == 'local_interaction' and AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
+                            else 0
+                        )
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,

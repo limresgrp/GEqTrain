@@ -29,7 +29,7 @@ class Queue():
         return np.std(self.items)
 
 @torch.no_grad()
-def gradient_clipping(model, gradnorm_queue):
+def gradient_clipping(model, gradnorm_queue, is_master):
 
     if gradnorm_queue.is_empty():
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2.0)
@@ -48,7 +48,7 @@ def gradient_clipping(model, gradnorm_queue):
     else:
         gradnorm_queue.add(float(grad_norm))
 
-    if float(grad_norm) > max_grad_norm:
+    if is_master and float(grad_norm) > max_grad_norm:
         print(f'Clipped gradient with value {grad_norm:.1f} '
               f'while allowed {max_grad_norm:.1f}')
     return grad_norm, max_grad_norm
