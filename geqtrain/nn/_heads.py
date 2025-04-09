@@ -312,7 +312,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         padded_edge_attrs = rearrange(padded_edge_attrs, 'batch target source heads -> batch heads target source')
         return padded_edge_attrs
 
-    @torch.cuda.amp.autocast(enabled=False) # attention always kept to high precision, regardless of AMP
+    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
         # forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png
         N, emb_dim = features.shape # N = num nodes or num ensemble confs

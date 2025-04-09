@@ -97,7 +97,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
-    @torch.cuda.amp.autocast(enabled=False) # embeddings always kept to high precision, regardless of AMP
+    @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
         for attribute_name, emb_layer in self.attr_modules.items():
