@@ -453,6 +453,7 @@ class Trainer:
         use_grokfast: bool = False,
         use_ema: bool = False,
         debug: bool = False,
+        dropout_edges: float = 0.,
         warmup_epochs: int | str = -1,
         head_wds: float = 0.0,
         accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
@@ -464,10 +465,6 @@ class Trainer:
         self.cumulative_wall = 0
         self.model = None
         logging.debug("* Initialize Trainer")
-
-        # --- dropout_edges
-        dropout_edges = dropout_edges if isinstance(dropout_edges, float) else 0.2 if dropout_edges is True else 0.
-
 
         # --- write all self.init_keys in self AND in _local_kwargs, init_keys are all kwargs of ctor
         _local_kwargs = {}
@@ -1386,9 +1383,10 @@ class Trainer:
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
-                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorm_queue)
-                    self.norms.append(grad_norm.item())
-                    self.norms_clip.append(float(max_grad_norm))
+                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorm_queue, self.is_master)
+                    if self.is_master:
+                        self.norms.append(grad_norm.item())
+                        self.norms_clip.append(float(max_grad_norm))
 
                     self.optim.step()
                     if self.use_ema:
@@ -1653,9 +1651,6 @@ class Trainer:
                 self.mae_dict[f"{category}_{key}"] = value
 
         self.norm_dict = dict(Grad_norm=self.norms, Grad_clip_val=self.norms_clip, **self.node_features_norms)
-
-        if not self.is_master:
-            return
 
         if self.iepoch == 0:
             self.init_epoch_logger.info(header)
