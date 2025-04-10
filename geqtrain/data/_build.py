@@ -171,7 +171,7 @@ def dataset_from_config(config,
             sudo sysctl -w vm.max_map_count=NEW_VALUE # If necessary, change it with this command (valid until restart)
             '''
             # Ensure chunks are of size up to chunksize elements
-            chunksize = 10000
+            chunksize = 40000
             instances = []
             for i in range(0, len(dataset_file_names_and_ensemble_indices), chunksize):
                 chunk = dataset_file_names_and_ensemble_indices[i:i + chunksize]
