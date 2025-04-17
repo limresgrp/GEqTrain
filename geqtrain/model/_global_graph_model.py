@@ -219,17 +219,25 @@ def moreGNNLayers(config:Config):
     else:
         edge_embedder = None
         logging.info("--- Working without edge_attributes")
+    
+    if 'graph_attributes' in config:
+        graph_embedder = EmbeddingGraphAttrs
+    else:
+        graph_embedder = None
+        logging.info("--- Working without graph_attributes")
 
     layers = {
         # -- Encode -- #
         "node_attrs":         node_embedder,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     if edge_embedder != None:
         layers.update({"edge_attrs": edge_embedder})
+    
+    if graph_embedder != None:
+        layers.update({"graph_attrs": graph_embedder})
 
     layers.update(appendNGNNLayers(config))
 
