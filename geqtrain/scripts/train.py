@@ -104,7 +104,7 @@ def main(args=None):
     if found_restart_file:
         config, progress_config = check_for_config_updates(config)
         logging.info("--- Restart ---")
-        func = partial(restart, progress_config=progress_config)
+        func = partial(restart, progress_config=progress_config.as_dict())
     else:
         if config.get("fine_tune", False):
             logging.info("--- Fine-Tuning ---")
@@ -152,7 +152,7 @@ def fresh_start(rank: int, world_size: int, config: dict, train_dataset, validat
             model, _ = model_from_config(config=config, initialize=True, dataset=trainer.dataset_train)
             logging.info("Successfully built the network!")
 
-        trainer.init(model=model)
+        trainer.init_model(model=model)
         trainer.update_kwargs(config)
 
         # Equivar test
@@ -181,8 +181,14 @@ def fresh_start(rank: int, world_size: int, config: dict, train_dataset, validat
         except:
             pass
 
-def restart(rank, world_size, config: Config, progress_config: Config, train_dataset, validation_dataset):
+def restart(rank, world_size, config: dict, train_dataset, validation_dataset, progress_config: dict):
     try:
+        # Necessary for mp.spawn
+        assert isinstance(config, dict), f"config must be of type Dict. It is of type {type(config)}"
+        config = Config.from_dict(config)
+        assert isinstance(progress_config, dict), f"progress_config must be of type Dict. It is of type {type(progress_config)}"
+        progress_config = Config.from_dict(progress_config)
+
         if config.use_dt:
             setup_distributed_training(rank, world_size)
 
@@ -220,7 +226,7 @@ def check_for_config_updates(config):
         raise ValueError("Cannot restart training of a fine-tuning run")
 
     modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
-                        "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
+                        "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads",
                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
                         "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds"
                     ]

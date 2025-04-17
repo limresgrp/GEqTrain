@@ -110,7 +110,7 @@ def node_types_to_keep(config):
     if keep_type_names is not None:
         from geqtrain.train.utils import find_matching_indices
         config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
-    return config.get("keep_node_types", None) # keep_node_types
+    return config.get("keep_node_types", None)
 
 def node_types_to_exclude(config):
     # --- exclude edges from center node to specified node types
@@ -118,7 +118,7 @@ def node_types_to_exclude(config):
     if exclude_type_names_from_edges is not None:
         from geqtrain.train.utils import find_matching_indices
         config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
-    return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
+    return config.get("exclude_node_types_from_edges", None)
 
 def dataset_from_config(config,
                         prefix: str = "dataset",
@@ -191,23 +191,22 @@ def dataset_from_config(config,
 
 
 def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_names_and_ensemble_indices):
-    _config = copy.deepcopy(config) # this might not be required but kept for saefty
     ensemble_index, dataset_file_name = dataset_file_names_and_ensemble_indices
     file_name_key = f"{prefix}_file_name"
-    _config[file_name_key] = dataset_file_name
+    config[file_name_key] = dataset_file_name
     ensemble_index_key = f"{prefix}_ensemble_index"
-    _config[ensemble_index_key] = ensemble_index
+    config[ensemble_index_key] = ensemble_index
 
     # Register fields:
     # This might reregister fields, but that's OK:
-    instantiate(register_fields, all_args=_config)
+    instantiate(register_fields, all_args=config)
 
     try:
         instance, _ = instantiate(
             class_name,     # dataset selected to be instanciated
             prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
             positional_args={},
-            optional_args=_config,
+            optional_args=config,
         )
     except RuntimeError as e:
         logging.warning(e)
@@ -305,7 +304,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
         # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
         keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
 
-    keep_nodes_filter = torch.zeros(len(node_types) * data.num_graphs, dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
+    keep_nodes_filter = torch.zeros(len(data.pos), dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
     keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
     update_edge_index(data, keep_edges_filter)
     for key_clean in key_clean_list:
