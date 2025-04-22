@@ -194,7 +194,7 @@ def restart(rank, world_size, config: dict, train_dataset, validation_dataset, p
 
         trainer, model = load_trainer_and_model(rank, world_size, progress_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
-        trainer.init(model=model)
+        trainer.init_model(model=model)
         trainer.load_state_dicts_for_restart(progress_config)
         trainer.update_kwargs(config)
 
