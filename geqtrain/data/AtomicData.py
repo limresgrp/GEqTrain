@@ -277,10 +277,10 @@ class AtomicData(Data):
 
         pos = torch.as_tensor(pos, dtype=torch.float32)
 
-        # Process '_mask' arguments in kwargs
-        mask_keys = [key for key in kwargs.keys() if key.endswith('_mask')]
+        # Process '__mask__' arguments in kwargs
+        mask_keys = [key for key in kwargs.keys() if key.endswith('__mask__')]
         for mask_key in mask_keys:
-            root_key = mask_key[:-5]  # Remove '_mask' suffix to get the root key
+            root_key = mask_key[:-8]  # Remove '_mask' suffix to get the root key
             mask = torch.as_tensor(kwargs[mask_key], dtype=torch.bool)
             if root_key in kwargs:
                 kwargs[root_key] = kwargs[root_key][mask]
