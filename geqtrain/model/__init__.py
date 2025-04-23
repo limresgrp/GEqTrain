@@ -5,6 +5,7 @@ from ._global_graph_model import HeadlessGlobalGraphModel, moreGNNLayers
 from ._global_node_model import HeadlessGlobalNodeModel
 from ._heads import Heads
 from ._scale import PerNodeAttrsScale, PerTypeScale
+from ._combine import Combine
 from ._weight_init import (
     uniform_initialize_FCs,
     initialize_from_state,
@@ -27,4 +28,5 @@ __all__ = [
     load_model_state,
     model_from_config,
     moreGNNLayers,
+    Combine,
 ]
