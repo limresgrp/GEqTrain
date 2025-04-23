@@ -11,12 +11,13 @@ from ._edgewise import (  # noqa: F401
     # EdgewiseLinear,
 )  # noqa: F401
 from .interaction import InteractionModule
-from .readout import ReadoutModule
+from .readout import ReadoutModule, ReadoutModuleWithConditioning
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 from ._heads import WeightedTP, TransformerBlock # GVPGeqTrain
 from .AdaLN import AdaLN
+from ._combine import CombineModule
 
 __all__ = [
     GraphModuleMixin,
@@ -32,6 +33,7 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
+    ReadoutModuleWithConditioning,
     PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
@@ -45,4 +47,5 @@ __all__ = [
     WeightedTP,
     TransformerBlock,
     AdaLN,
+    CombineModule,
 ]
