@@ -317,7 +317,7 @@ class Config(object):
         c.update(dictionary)
         c.parse_node_types()
         c.parse_attributes()
-        c.parse_targets_metadata()
+        # c.parse_targets_metadata()
         return c
 
     @staticmethod

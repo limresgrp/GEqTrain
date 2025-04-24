@@ -76,16 +76,20 @@ class Loss:
         '''
         loss = 0.0
         contrib = {} # hash map of non-weighted contributions to loss in this batch
-        for key in self.keys: # for k in "losses-keys" (i.e. the losses names as listed in yaml) that have to be evaluated
-            _loss = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
-                pred=pred,
-                ref=ref,
-                key=self.remove_suffix(key),
-                mean=True,
-                **kwargs,
-            )
-            contrib[key] = _loss
-            loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
+        try:
+            for key in self.keys: # for k in "losses-keys" (i.e. the losses names as listed in yaml) that have to be evaluated
+                _loss = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
+                    pred=pred,
+                    ref=ref,
+                    key=self.remove_suffix(key),
+                    mean=True,
+                    **kwargs,
+                )
+                contrib[key] = _loss
+                loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
+        except:
+            print(f'Error while computing loss for key: {key}')
+            raise
 
         return loss, contrib
 

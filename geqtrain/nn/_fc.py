@@ -1,12 +1,12 @@
 """ Adapted from https://github.com/mir-group/allegro
 """
-
+import math
 import torch
 from typing import List, Optional
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule, SwiGLU
+from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule
 from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
 
@@ -128,22 +128,27 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             elif mlp_nonlinearity == "silu":
                 nonlin_const = normalize2mom(nonlinearity).cst
             elif mlp_nonlinearity == "swiglu":
-                nonlin_const = 2.02 # avoids variance explosion in interaction layers
+                nonlin_const = 1.55
 
-        if bias is not None: has_bias = True
+        if bias is not None:
+            has_bias = True
 
         sequential_dict = OrderedDict()
         for layer_index, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
 
             bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
-            is_last_layer = layer_index == num_layers - 1
-            if mlp_nonlinearity == "swiglu" and not is_last_layer: h_out = 2*h_out
-            lin_layer = torch.nn.Linear(h_in, h_out, bias=False if self.use_layer_norm else bias_condition)
+            is_last_layer = layer_index == (num_layers - 1)
+
+            if mlp_nonlinearity == "swiglu" and not is_last_layer:
+                h_out = 2*h_out
+
+            lin_layer = torch.nn.Linear(h_in, h_out, bias=bias_condition)
 
             if (nonlinearity is None) or is_last_layer:
                 self.gain = None
                 norm_const = 1.
                 modules = [(f"linear_{layer_index}", lin_layer)]
+                torch.nn.init.kaiming_normal_(lin_layer.weight, mode='fan_in', nonlinearity='linear')
             else:
                 norm_const = nonlin_const
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
@@ -153,15 +158,23 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
                     modules.append((f"dropout_{layer_index}", torch.nn.Dropout(dropout)))
 
-            if self.use_layer_norm: modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
-            if zero_init_last_layer_weights: norm_const = norm_const * 1.e-1
+                fan_in = lin_layer.weight.size(1)
+                std = norm_const / math.sqrt(fan_in)
+                torch.nn.init.normal_(lin_layer.weight, mean=0, std=std)
+
+            if self.use_layer_norm:
+                modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
+            if zero_init_last_layer_weights:
+                norm_const = norm_const * 1.e-1
 
             # initialize weights
             with torch.no_grad():
-                torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const if not self.gain else self.gain)
+                # torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const if not self.gain else self.gain)
                 if lin_layer.bias is not None:
-                    if is_last_layer and bias is not None: lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
-                    else: torch.nn.init.zeros_(lin_layer.bias)
+                    if is_last_layer and bias is not None:
+                        lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
+                    else:
+                        torch.nn.init.zeros_(lin_layer.bias)
 
             # Apply weight normalization if specified, must be done after weight initialization
             if self.use_weight_norm:

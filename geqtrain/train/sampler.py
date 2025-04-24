@@ -15,35 +15,39 @@ def _group_by_ensemble(n_observations, ensemble_indices):
             ensemble_dict[ensemble_index] = []
         ensemble_dict[ensemble_index].extend(list(range(offset, offset + n_observations)))  # Store all conformations
         offset += n_observations
-    
+
     return list(ensemble_dict.values())
 
 class EnsembleSampler(Sampler):
     """
-    Ensures that all conformations of a molecule (from the same npz file) 
+    Ensures that all conformations of a molecule (from the same npz file)
     appear in the same batch.
+    The ensembled batch is created following the order of batch['dataset_raw_file_name']
     """
     def __init__(self, dataset, batch_size):
         self.dataset = dataset
         self.batch_size = batch_size
-        
+
         # Group indices by ensemble (each molecule)
         self.ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
         self.n_obs = self.dataset.n_observations.sum()
 
     def __iter__(self):
         """
+        np.random.shuffle is called once per epoch (once for train and once for val)
+        yields batches, called once per batch step while iteraing dloader
         Returns batches, ensuring all conformations of a molecule appear together.
         """
-        np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
+        np.random.shuffle(self.ensemble_indices)  # Shuffle infra npzs
         batch = []
-        
-        for ensemble in self.ensemble_indices:
+
+        for ensemble in self.ensemble_indices: # list of idxs of 1 npz possibily shufflable
+            np.random.shuffle(ensemble)  # Shuffle inside npz
             batch.extend(ensemble)
-            while len(batch) >= self.batch_size:
+            while len(batch)>= self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
                 batch = batch[self.batch_size:]  # Keep remaining elements for next batch
-        
+
         if batch:  # Yield any remaining elements
             yield batch
 
@@ -55,7 +59,7 @@ class EnsembleSampler(Sampler):
 
 class EnsembleDistributedSampler(DistributedSampler):
     """
-    Distributed sampler that ensures all conformations of a molecule (ensemble) 
+    Distributed sampler that ensures all conformations of a molecule (ensemble)
     are always assigned to the same worker.
     !!! TODO STILL NOT WORKING PROPERLY !!!
     """
@@ -109,13 +113,13 @@ class EnsembleDistributedSampler(DistributedSampler):
         """
         np.random.shuffle(self.ensemble_indices)  # Shuffle molecules
         batch = []
-        
+
         for ensemble in self.ensemble_indices:
             batch.extend(ensemble)
             if len(batch) >= self.batch_size:
                 yield batch[:self.batch_size]  # Yield a full batch
                 batch = batch[self.batch_size:]  # Keep remaining elements for next batch
-        
+
         if batch:  # Yield any remaining elements
             yield batch
         yield self.indices  # Yield distributed indices for current GPU

@@ -19,7 +19,7 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
         irreps_edge_sh (int, str, or o3.Irreps): if int, will be treated as lmax for o3.Irreps.spherical_harmonics(lmax)
         edge_sh_normalize (bool, default: True): whether to normalize the spherical harmonics
         edge_sh_normalization (str): the normalization scheme to use
-        out_field (str, default: AtomicDataDict.EDGE_ATTRS_KEY: data/irreps field
+        out_field (str, default: AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY: data/irreps field
     """
 
     out_field: str

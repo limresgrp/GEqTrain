@@ -13,6 +13,7 @@ from einops.layers.torch import Rearrange
 class MakeWeightedChannels(torch.nn.Module):
     '''
     outputs a LC of input SH given some set of weights
+    weights and input are provided from external code: this class does not contain learnable weights
     '''
     weight_numel: int
     multiplicity_out: int

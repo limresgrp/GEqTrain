@@ -84,10 +84,6 @@ def parse_attrs(
 
             if options.get('attribute_type', 'categorical') == 'numerical':
                 _input_type = val
-                if options.get('standardize', True):
-                    mean = np.mean(_input_type, axis=-2, keepdims=True)
-                    std = np.std(_input_type, axis=-2, keepdims=True)
-                    _input_type = (_input_type - mean) / (std + 1e-8)
             else:
                 if "embedding_dimensionality" not in options:  # this is not an attribute to parse
                     continue
@@ -133,7 +129,7 @@ class InMemoryConcatDataset(ConcatDataset):
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     @property
     def ensemble_indices(self):
         return self._ensemble_indices
@@ -165,7 +161,7 @@ class LazyLoadingConcatDataset(Dataset):
     @property
     def n_observations(self):
         return self._n_observations
-    
+
     @property
     def ensemble_indices(self):
         return self._ensemble_indices
@@ -180,7 +176,7 @@ class LazyLoadingConcatDataset(Dataset):
             return self._cumsum
         self._cumsum = np.cumsum(self.n_observations)
         return self._cumsum
-    
+
     def from_indexed_dataset(self, indexed_dataset):
         instance = copy.deepcopy(self)
         instance.set_lazy_datasets(indexed_dataset)
@@ -260,7 +256,7 @@ class AtomicDataset(Dataset):
             root=root,
             transform=Compose([load_callable(transf) for transf in transforms]) if transforms else None
         )
-    
+
     def __getitem__(
         self,
         idx: Union[int, np.integer, IndexType],
@@ -503,11 +499,11 @@ class AtomicInMemoryDataset(AtomicDataset):
                 _fields=graph_fields,
             )
 
-            # check keys (refactor this)
-            node_fields  = {k: v for k, v in node_fields.items() if v is not None}
-            edge_fields  = {k: v for k, v in edge_fields.items() if v is not None}
-            graph_fields = {k: v for k,v in graph_fields.items() if v is not None}
-            extra_fields = {k: v for k,v in extra_fields.items() if v is not None}
+            # check keys and ensure 1d arrays become 2d with shape (d, 1)
+            node_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in node_fields.items()  if v is not None}
+            edge_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in edge_fields.items()  if v is not None}
+            graph_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in graph_fields.items() if v is not None}
+            extra_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in extra_fields.items() if v is not None}
 
             all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
             assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
@@ -542,9 +538,9 @@ class AtomicInMemoryDataset(AtomicDataset):
             data_list = [  # list of AtomicData-pyg-object objects
                 constructor(
                     **{
-                        **{f: v[i] for f, v in node_fields.items() if v is not None},
-                        **{f: v[i] for f, v in edge_fields.items() if v is not None},
-                        **{f: v[i] if len(v.shape) > 1 else v for f, v in graph_fields.items() if v is not None},
+                        **{f: v[i] for f, v in node_fields.items()  if v is not None},
+                        **{f: v[i] for f, v in edge_fields.items()  if v is not None},
+                        **{f: v[i] for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
                     }, pbc=self.pbc, ignore_fields=self.ignore_fields)
@@ -736,7 +732,7 @@ class NpzDataset(AtomicInMemoryDataset):
         for key in mapped.keys():
             for fields in [node_fields, edge_fields, graph_fields, extra_fields, fixed_fields]:
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
-                    fields[key] = fields[key].astype(np.int64)
+                    fields[key] = fields[key].astype(np.int64) # keep int64 since cross entropy based pytorch loss functions require this dtype
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
                     fields[key] = fields[key].astype(np.float32)
 
