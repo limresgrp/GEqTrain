@@ -2,7 +2,12 @@ from typing import Optional, Union, List
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
-from geqtrain.data import AtomicDataDict, _NODE_FIELDS
+from geqtrain.data import (
+    AtomicDataDict,
+    _NODE_FIELDS,
+    _EDGE_FIELDS,
+    _GRAPH_FIELDS,
+)
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn._film import FiLMFunction
 from geqtrain.nn.allegro import Linear
@@ -56,6 +61,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         ignore_amp: bool = False, # wheter to adopt amp or not
         scalar_attnt: bool = True,
         num_heads: int = 32,
+        dataset_mode: str = 'single', # single|ensemble
     ):
         super().__init__()
 
@@ -204,13 +210,17 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
         # todo: if self.field == AtomicDataDict.edge then use edge_centers
         # todo: if self.field == AtomicDataDict.node features then use 'batch'
-        if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # edge cant attention; node/ensemble can
-            scalar_attnt = False
-
-        if self.field == AtomicDataDict.GRAPH_FEATURES_KEY:
-            idx_key = 'ensemble_index'
-        elif self.field == 'node_features' or self.field == 'node_attrs':
+        if self.field in _NODE_FIELDS:
             idx_key = 'batch'
+        elif self.field in _EDGE_FIELDS: # edge cant attention; node/ensemble can
+            scalar_attnt = False
+        elif self.field in _GRAPH_FIELDS:
+            if dataset_mode == 'ensemble':
+                idx_key = 'ensemble_index'
+            else:
+                scalar_attnt = False
+        else:
+            raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
 
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
