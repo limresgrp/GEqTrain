@@ -189,7 +189,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
 
         super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version
 
-
     @classmethod
     def from_parameters(
         cls,
@@ -260,7 +259,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             built_modules.append(instance)
 
         return cls(OrderedDict(zip(layers.keys(), built_modules)))
-
 
     def append(self, name: str, module: GraphModuleMixin) -> None:
         r"""Append a module to the SequentialGraphNetwork.

@@ -61,7 +61,7 @@ class BesselBasisVec(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
-        
+
         r_values = torch.linspace(0., r_max, self.num_points)
         Jn_values = []
         for n in range(num_basis):
@@ -105,12 +105,12 @@ class GaussianBasis(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
-        
+
         r_values = torch.linspace(0., r_max, self.num_points)
 
         def gaussian(x, mu, sigma):
             return torch.exp(-((x - mu) ** 2) / (2 * sigma ** 2)) / math.sqrt(2 * math.pi * sigma ** 2)
-        
+
         G_values = []
         step = r_max / num_basis
         for n in range(num_basis):
@@ -152,12 +152,12 @@ class PolyBasisVec(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
-        
+
         r_values = torch.linspace(0., r_max, self.num_points)
 
         def poly(x, power):
             return torch.pow(x, -power)
-        
+
         P_values = []
         for power in range(1, num_basis + 1):
             P_values.append(poly(r_values, power=power))

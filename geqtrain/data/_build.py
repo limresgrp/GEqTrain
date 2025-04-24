@@ -110,7 +110,7 @@ def node_types_to_keep(config):
     if keep_type_names is not None:
         from geqtrain.train.utils import find_matching_indices
         config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
-    return config.get("keep_node_types", None) # keep_node_types
+    return config.get("keep_node_types", None)
 
 def node_types_to_exclude(config):
     # --- exclude edges from center node to specified node types
@@ -118,7 +118,7 @@ def node_types_to_exclude(config):
     if exclude_type_names_from_edges is not None:
         from geqtrain.train.utils import find_matching_indices
         config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
-    return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
+    return config.get("exclude_node_types_from_edges", None)
 
 def dataset_from_config(config,
                         prefix: str = "dataset",
@@ -169,16 +169,11 @@ def dataset_from_config(config,
         n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
         if n_workers > 1:
             '''
-            ! Known issue:
-            if dataset is "in-memory" and n_workers>1 we have AND number of npz >=5000 (approximately):
-                RuntimeError: unable to mmap ... bytes from file <filename not specified>: Cannot allocate memory (...)
-
-            Solution:
-            - option 1) faster preprocessing but slower training: keep n_workers>1 but use inmemory: false
-            - option 2) slower preprocessing but faster train: keep inmemory: true (which is default behavior) but use n_workers = 1
+            sysctl vm.max_map_count # Use this to check the limit of maps for shared memory
+            sudo sysctl -w vm.max_map_count=NEW_VALUE # If necessary, change it with this command (valid until restart)
             '''
-            # Ensure chunks are of size up to 4000 elements
-            chunksize = 5000
+            # Ensure chunks are of size up to chunksize elements
+            chunksize = 10000
             instances = []
             for i in range(0, len(dataset_file_names_and_ensemble_indices), chunksize):
                 chunk = dataset_file_names_and_ensemble_indices[i:i + chunksize]
@@ -196,23 +191,22 @@ def dataset_from_config(config,
 
 
 def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_names_and_ensemble_indices):
-    _config = copy.deepcopy(config) # this might not be required but kept for saefty
     ensemble_index, dataset_file_name = dataset_file_names_and_ensemble_indices
     file_name_key = f"{prefix}_file_name"
-    _config[file_name_key] = dataset_file_name
+    config[file_name_key] = dataset_file_name
     ensemble_index_key = f"{prefix}_ensemble_index"
-    _config[ensemble_index_key] = ensemble_index
+    config[ensemble_index_key] = ensemble_index
 
     # Register fields:
     # This might reregister fields, but that's OK:
-    instantiate(register_fields, all_args=_config)
+    instantiate(register_fields, all_args=config)
 
     try:
         instance, _ = instantiate(
             class_name,     # dataset selected to be instanciated
             prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
             positional_args={},
-            optional_args=_config,
+            optional_args=config,
         )
     except RuntimeError as e:
         logging.warning(e)
@@ -264,7 +258,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
         new_node_index_slices = node_filter_cumsum[torch.as_tensor(data.__slices__[key_clean][1:]) - 1].tolist()
         new_node_index_slices.insert(0, 0)
         data.__slices__[key_clean] = torch.tensor(new_node_index_slices, dtype=torch.long, device=node_filter.device)
-    
+
     def update_edge_index(data, edge_filter: torch.Tensor):
         data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
         if len(edge_filter) == 0:
@@ -298,19 +292,19 @@ def remove_node_centers_for_NaN_targets_and_edges(
             keep_edges_filter.append(torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten()))
         elif key_clean in _EXTRA_FIELDS:
             pass
-    
+
     if len(keep_edges_filter) > 0:
         keep_edges_filter = torch.any(torch.stack(keep_edges_filter), dim=0)
     else:
         keep_edges_filter = torch.ones(len(node_center_edge_idcs), dtype=torch.bool)
-    
+
     # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
     if exclude_node_types_from_edges is not None:
         exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
         # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
         keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
 
-    keep_nodes_filter = torch.zeros(len(node_types) * data.num_graphs, dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
+    keep_nodes_filter = torch.zeros(len(data.pos), dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
     keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
     update_edge_index(data, keep_edges_filter)
     for key_clean in key_clean_list:

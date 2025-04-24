@@ -19,20 +19,59 @@ from ._spmm import ExplicitGradSpmm
 
 
 def codegen_strided_tensor_product_forward(
-    irreps_in1: o3.Irreps,
-    in1_var: List[float],
-    irreps_in2: o3.Irreps,
-    in2_var: List[float],
+    irreps_in1: o3.Irreps,                  # Input irreps
+    in1_var: List[float],                   # Variance scaling factors
+    irreps_in2: o3.Irreps,                  # Input irreps
+    in2_var: List[float],                   # Variance scaling factors
     irreps_out: o3.Irreps,
-    out_var: List[float],
-    instructions: List[Instruction],
-    normalization: str = "component",
-    shared_weights: bool = False,
+    out_var: List[float],                   # Variance scaling factors
+    instructions: List[Instruction],        # How to combine input irreps
+    normalization: str = "component",       # "component" (default) or "norm"
+    shared_weights: bool = False,           # Share weights across batch dimensions
     specialized_code: bool = True,
-    sparse_mode: Optional[str] = None,
+    sparse_mode: Optional[str] = None,      # None (dense), "coo", or "csr"
     pad_to_alignment: int = 1,
 ) -> Optional[fx.GraphModule]:
-    """Returns None if strided doesn't make sense for this TP."""
+    """
+    returns: a fx.GraphModule i.e. a nn.Module with a ``forward``
+
+    Args:
+        irreps_in1 (o3.Irreps): Irreducible representations of the first input tensor.
+        in1_var (List[float]): Variances associated with each irrep component of the first input.
+
+        irreps_in2 (o3.Irreps): Irreducible representations of the second input tensor.
+        in2_var (List[float]): Variances associated with each irrep component of the second input.
+
+        irreps_out (o3.Irreps): Irreducible representations of the output tensor.
+        out_var (List[float]): Variances associated with each irrep component of the output.
+
+        instructions (List[Instruction]): List of instructions defining how to combine irreps from inputs to outputs.
+                                         Each instruction specifies (i_in1, i_in2, i_out) indices and connection mode.
+
+        normalization (str, optional): Normalization scheme for Wigner 3-j symbols.
+                                        Options are "component" or "norm". Defaults to "component".
+
+        shared_weights (bool, optional): Whether to share weights across different paths if weights are used. Defaults to False.
+
+        specialized_code (bool, optional): Flag to indicate if specialized code generation is desired. Currently must be True. Defaults to True.
+
+        sparse_mode (Optional[str], optional): Mode for sparse tensor operations. Options are None (dense), "coo", "csr". Defaults to None.
+
+        pad_to_alignment (int, optional): Pad dimensions to be multiples of this value for strided layout. Defaults to 1.
+
+    Returns:
+        Optional[fx.GraphModule]: A PyTorch GraphModule representing the optimized tensor product computation,
+                                 or None if strided layout is not possible.
+
+    Raises:
+        ValueError: If input irreps cannot be strided or if there are inconsistencies in instructions.
+
+    Notes:
+        - The `instructions` define the specific tensor product pathways based on irrep indices and connection modes.
+        - Normalization is applied to the Wigner 3-j symbols to control the variance of the output.
+        - Sparse mode allows for potentially more efficient computation when dealing with sparse Wigner 3-j tensors.
+    """
+
     # TODO padding
     # Check if irreps can be strided
     try:
@@ -362,13 +401,61 @@ def Contracter(
     irreps_in2,
     irreps_out,
     instructions: List[Tuple[int, int, int]],
-    has_weight: bool,
+    has_weight: bool, # whether the tp has internal weigths or not
     connection_mode: str,
     pad_to_alignment: int = 1,
     normalization='component',
     shared_weights: bool = False,
     sparse_mode: Optional[str] = None,
-):
+) -> torch.nn.Module:
+    '''
+    Wrapper for creating tensor product modules.
+
+    connection_mode:
+        "uvw": Full tensor product (mul_in1 × mul_in2 → mul_out)
+        "uuu": Diagonal (mul_in1 = mul_in2 = mul_ou
+
+    Instructions
+        List of Instruction objects specifying:
+        i_in1, i_in2: Input irreps to combine
+        i_out: Output irrep index
+
+    path_weight: Scaling factor for the path
+
+    Performance: Use sparse_mode="csr" for large irreps to save memory.
+    Debugging: Set sparse_mode=None for einsum-based execution.
+
+
+    --- Usage example: ---
+
+    # Define irreps (1 vector, 2 vectors)
+    irreps_in1 = o3.Irreps("1x1o")
+    irreps_in2 = o3.Irreps("2x1o")
+    irreps_out = o3.Irreps("3x1o")
+
+    # Instructions: Combine all input pairs into output
+    instructions = [
+        (0, 0, 0),  # in1[0] ⊗ in2[0] → out[0]
+        (0, 1, 1),  # in1[0] ⊗ in2[1] → out[1]
+    ]
+
+    # Build tensor product module
+    tp = Contracter(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions=instructions,
+        has_weight=True,
+        connection_mode="uvw",
+    )
+
+    # Apply to inputs
+    x1 = torch.randn(10, irreps_in1.dim)  # Batch x dim_in1
+    x2 = torch.randn(10, irreps_in2.dim)  # Batch x dim_in2
+    w = torch.randn(3)  # Weights for 3 paths
+    out = tp(x1, x2, w)  # Shape (10, irreps_out.dim)
+
+    '''
     irreps_in1 = o3.Irreps(irreps_in1)
     assert all(mul == irreps_in1[0].mul for mul, ir in irreps_in1)
     irreps_in2 = o3.Irreps(irreps_in2)

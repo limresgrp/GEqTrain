@@ -10,10 +10,10 @@ def print_eval(gt, preds, logits):
         auc
     )
 
-  if len(logits)<5:
-      # single smile eval mode
-      for i in range(len(logits)): print(f"gt: {gt[i]}, preds: {preds[i]}, logits: {logits[i]}")
-      return
+#   if len(logits)<5:
+#       # single smile eval mode
+#       for i in range(len(logits)): print(f"gt: {gt[i]}, preds: {preds[i]}, logits: {logits[i]}")
+#       return
 
   cm = confusion_matrix(gt, preds, labels=[False, True])
   tn, fp, fn, tp = cm.ravel()
@@ -43,21 +43,27 @@ def print_eval(gt, preds, logits):
 
 
 class AccuracyMetric(object):
-    def __init__(self, key:str):
+    def __init__(self, key:str, bce:bool=True):
         '''key: key to be taken from ref_data'''
         self.key = key
         self._gts_list, self._preds_list, self._logits_list = [], [], []
+        # self.BCE = bce
 
     def __call__(self, batch_index, chunk_index, out, ref_data, data, pbar, **kwargs):
         '''the signature of this method must always match: out_callback signature in evaluate.py'''
         target = ref_data[self.key].cpu().bool()
+
+        # if self.BCE:
         _logits = out[self.key].sigmoid()
         prediction = (_logits>.5).cpu().bool()
+        # else:
+        #     prediction = out[self.key].softmax(-1).argmax(-1)
+        #     _logits = out[self.key][...,prediction][...,0]
 
-        target.squeeze().dim()
         self._gts_list += target.squeeze().tolist() if target.squeeze().dim() != 0 else [target.squeeze().tolist()]
         self._logits_list += _logits.squeeze().tolist() if _logits.squeeze().dim() != 0 else [_logits.squeeze().tolist()]
         self._preds_list += prediction.squeeze().tolist() if prediction.squeeze().dim() != 0 else [prediction.squeeze().tolist()]
+        assert len(self._gts_list) == len(self._preds_list) ==len(self._logits_list)
 
     def print_current_result(self):
         print_eval(self._gts_list, self._preds_list, self._logits_list)

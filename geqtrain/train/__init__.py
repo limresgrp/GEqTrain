@@ -7,7 +7,7 @@ from .distributed_training_utils import (
 )
 from .trainer import Trainer, TrainerWandB, DistributedTrainer, DistributedTrainerWandB
 from .utils import evaluate_end_chunking_condition, instanciate_train_val_dsets, load_trainer_and_model
-from ._loss import SimpleLoss, SimpleGraphLoss, SimpleNodeLoss, RMSDLoss
+from ._loss import SimpleLoss, SimpleLossWithNaNsFilter, SimpleNodeLoss, RMSDLoss
 
 
 __all__ = [
@@ -16,7 +16,7 @@ __all__ = [
     DistributedTrainer,
     DistributedTrainerWandB,
     SimpleLoss,
-    SimpleGraphLoss,
+    SimpleLossWithNaNsFilter,
     SimpleNodeLoss,
     RMSDLoss,
     evaluate_end_chunking_condition,

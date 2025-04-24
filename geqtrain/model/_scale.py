@@ -11,7 +11,7 @@ from geqtrain.nn import (
 )
 
 
-def PerNodeAttrsScale(model, config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
+def PerNodeAttrsScale(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
     logging.info("--- Building PerTypeScale Module ---")
 
     layers = {
@@ -27,7 +27,7 @@ def PerNodeAttrsScale(model, config:Config, initialize: bool, dataset: Optional[
         layers=layers,
     )
 
-def PerTypeScale(model, config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> PerTypeScaleModule:
+def PerTypeScale(model, config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
     logging.info("--- Building PerTypeScale Module ---")
 
     layers = {

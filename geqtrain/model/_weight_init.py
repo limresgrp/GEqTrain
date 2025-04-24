@@ -1,8 +1,5 @@
 import math
-
 import torch
-
-import e3nn.o3
 import e3nn.nn
 
 from geqtrain.nn import GraphModuleMixin

@@ -5,25 +5,62 @@ from geqtrain.data import AtomicDataset
 from geqtrain.utils import load_callable, Config, add_tags_to_parameter
 from typing import Tuple, Dict
 
+def add_suffix(_str: str, i: int) -> str:
+    return _str.__add__(f".__{i}__")
 
-def parse_model_builders(config):
+def remove_suffix(_str: str, i: int) -> str:
+    suff = f".__{i}__"
+    return _str[:-len(suff)]
+
+def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
 
     builders = config.get("model_builders", None)
     if builders is None:
         raise ValueError("No model_builders found in config")
 
-    builders_and_params = {}
-    for builder in builders:
+    builders_and_params = dict()
+    for i, builder in enumerate(builders):
         if isinstance(builder, dict):
-            assert len(builder) == 1, "Only one builder can be specified at a time"
-            _callable = list(builder.keys())[0] # get the only key
-            assert len(builder.values()) == 1, "Only one set of parameters can be specified at a time for now"
-            builders_and_params[_callable] = list(builder.values()) # assert list(builder.values())
+            if "cls" in builder:
+                """ Option 1
+                    model_builders:
+                        - cls: InteractionModule
+                          name: my_interaction
+                          weights: tune # load|tune|freeze
+                          ...other params
+                    
+                    Load single module class 'InteractionModule' (found by default inside geqtrain.nn)
+                    and register in the SequentialGraphNetwork with name 'my_interaction'.
+                    If weights are provided, try to load them into this module.
+                    Use specified 'fine_tune_lr' learning rate for weights of this module.
+                """
+                _callable = add_suffix("Module", i)
+                params = builder
+            else:
+                """ Option 2
+                    model_builders:
+                        - Heads: tune # load|tune|freeze
+                    
+                    Load packaged model function 'Heads' (found by default inside geqtrain.model)
+                    If weights are provided, try to load them into this module.
+                    Use specified 'fine_tune_lr' learning rate for weights of modules packaged into this model.
+                """
+                assert len(builder) == 1
+                _callable = add_suffix(list(builder.keys())[0], i)
+                params = {"weights": list(builder.values())[0]}
+            builders_and_params[_callable] = params
         elif isinstance(builder, str):
-            builders_and_params[builder] = []
+            """ Option 3
+                model_builders:
+                    - Heads
+                
+                Load packaged model function 'Heads' (found by default inside geqtrain.model)
+                Initialize weights from scratch
+            """
+            _callable = add_suffix(builder, i)
+            builders_and_params[_callable] = dict()
 
-    return builders_and_params #! todo do list k: [k:{load:T, lr:x, freeze:y}]
-
+    return builders_and_params
 
 def flatten_list(nested_list):
     """
@@ -46,7 +83,6 @@ def flatten_list(nested_list):
             flattened.append(element)
 
     return flattened
-
 
 def model_from_config(
     config: Config,
@@ -76,30 +112,42 @@ def model_from_config(
     Returns:
         built Model
     """
+
+    # parse builders and extract their params
     model_builders = parse_model_builders(config)
-    builders, fine_tune_params = [], []
-    for k, v in model_builders.items():
-        builders.append(load_callable(k, prefix="geqtrain.model"))
-        fine_tune_params.append(v)
+    builders, prms, weights_prms = [], [], []
+    for i, (k, v) in enumerate(model_builders.items()):
+        _callable = remove_suffix(k, i)
+        builders.append(load_callable(_callable, prefix="geqtrain.model"))
+        weights_prms.append(v.pop("weights", None))
+        prms.append(v)
 
-    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
-    fine_tune_params_provided = any(flatten_list(fine_tune_params))
-    if not model_for_fine_tuning and fine_tune_params_provided:
-        raise ValueError("fine_tune_params provided in model_builders but fine_tune model is not provided")
-
-    if model_for_fine_tuning:
-        assert fine_tune_params_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not fine_tune_params provided in model_builders"
-
+    # checks
     if 'progress' in config and model_for_fine_tuning:
         raise ValueError("cannot restart and fine-tune at the same time, if you want to fine-tune, do a fresh start")
 
-    weights_to_drop_from_model_state: set[str] = set() # used in case of fine-tuning
-    weights_already_loaded = set()
+    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
+    weights_prms_provided = any(flatten_list(weights_prms))
+    if not model_for_fine_tuning and weights_prms_provided:
+        raise ValueError("weights_params provided in model_builders but fine_tune model is not provided")
 
+    if model_for_fine_tuning:
+        assert weights_prms_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not weights_params provided in model_builders"
+
+    weights_to_drop_from_model_state: set[str] = set() # used in case of fine-tuning
+    weights_already_loaded: set[str] = set()
+
+    # build model
     model = None
-    for builder, ft_params in zip(builders, fine_tune_params):
-        pnames = inspect.signature(builder).parameters # get kwargs of factory method signature
+    for builder, _prms, _w_prm in zip(builders, prms, weights_prms):
         params = {}
+        if _prms.get("cls", None) is not None:
+            params["cls"]  = load_callable(_prms.pop("cls"), prefix="geqtrain.nn")
+            params["name"] = _prms.pop("name")
+            for _p, _v in _prms.items():
+                config.update({f'{params["name"]}_{_p}': _v})
+        
+        pnames = inspect.signature(builder).parameters # get kwargs of factory method signature
         if "initialize" in pnames:
             params["initialize"] = initialize
         if "deploy" in pnames:
@@ -126,23 +174,26 @@ def model_from_config(
             if model is not None:
                 raise RuntimeError(f"All model_builders after the first one that returns a model must take the model as an argument; {builder.__name__} doesn't")
 
-        model = builder(**params)
+        model: Module = builder(**params)
         if 'progress' in config or deploy:
             continue
 
         current_model_param_names = set(k for k, _ in model.named_parameters())
         params_just_added = current_model_param_names - weights_already_loaded
-        if not ft_params : # if no fine-tuning params, then params of module must be dropped when loading model params; in train-from-scratch scenario all params have to be dropped from state dict
+        if _w_prm is None: # if no fine-tuning params, then params of module must be dropped when loading model params; in train-from-scratch scenario all params have to be dropped from state dict
             weights_to_drop_from_model_state.update(params_just_added)
         else:
             for n, p in model.named_parameters():
                 if n in params_just_added:
                     # opt1: freeze
-                    if "freeze" in ft_params:
+                    if _w_prm == "freeze":
                         p.requires_grad = False
                     # opt2: tune with initial lr: fine_tune_lr
-                    elif "tune" in ft_params:
+                    elif _w_prm == "tune":
                         add_tags_to_parameter(p, "tune")
+                    # opt3: load weights if they exist
+                    else:
+                        assert _w_prm == "load", f"'weights' param must be one among freeze|tune|load. Got {_w_prm}."
 
         weights_already_loaded.update(current_model_param_names)
 

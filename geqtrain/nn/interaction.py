@@ -28,7 +28,7 @@ from geqtrain.nn._film import FiLMFunction
 
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-
+from geqtrain.nn.AdaLN import AdaLN
 
 def log_feature_on_wandb(name:str, t:torch.tensor, train:bool):
   #todo: do we need to differenciate scalars with geom tensors?
@@ -97,6 +97,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.name = name
+        self.is_local = self.name == 'local_interaction'
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -264,15 +265,16 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             )
 
             if self.learn_cutoff_bias:
-                self.rbf_embedder = FiLMFunction(
-                    mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
-                    mlp_latent_dimensions=[2*self.irreps_in[self.edge_invariant_field].num_irreps],
-                    mlp_output_dimension=self.final_latent_mlp.out_features,
-                    mlp_nonlinearity='swiglu',
-                    zero_init_last_layer_weights=False,
-                    has_bias=False,
-                    final_non_lin='sigmoid'
-                )
+                self.rbf_embedder = AdaLN(self.latent_dim, self.irreps_in[self.edge_invariant_field].num_irreps)
+                # self.rbf_embedder = FiLMFunction(
+                #     mlp_input_dimension=self.irreps_in[self.edge_invariant_field].num_irreps,
+                #     mlp_latent_dimensions=[4*self.irreps_in[self.edge_invariant_field].num_irreps],
+                #     mlp_output_dimension=self.final_latent_mlp.out_features,
+                #     mlp_nonlinearity='swiglu',
+                #     zero_init_last_layer_weights=False,
+                #     has_bias=False,
+                #     final_non_lin='sigmoid'
+                # )
 
             self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
@@ -299,7 +301,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
+        if self.is_local and AtomicDataDict.EDGE_FEATURES_KEY in data:
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
+        else:
+            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
+
         # The nonscalar features. Initially, the edge data.
         eq_features = edge_attr
 
@@ -392,7 +398,7 @@ class InteractionLayer(torch.nn.Module):
         previous_latent_dim: Optional[int],
         graph_conditioning_field: str,
         env_weighter: MakeWeightedChannels,
-        two_body_latent: torch.nn.Module,
+        two_body_latent: torch.nn.Module, # constructor func
         latent: torch.nn.Module,
         env_embed: torch.nn.Module,
     ) -> None:
@@ -506,7 +512,11 @@ class InteractionLayer(torch.nn.Module):
                         # Node invariants for center and neighbor (chemistry)
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
+                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps
+                            if parent.name == 'local_interaction' and AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
+                            else 0
+                        )
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,
@@ -560,17 +570,23 @@ class InteractionLayer(torch.nn.Module):
         self._env_weighter = env_weighter
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
 
-        if self.learn_cutoff_bias:
-            self.rbf_embedder = FiLMFunction(
-                mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
-                mlp_latent_dimensions=[2*parent.irreps_in[parent.edge_invariant_field].num_irreps],
-                mlp_output_dimension=self.latent_mlp.out_features,
-                mlp_nonlinearity='swiglu',
-                zero_init_last_layer_weights=False,
-                has_bias=False,
-                final_non_lin='sigmoid'
-            )
+        # if not self.use_attention:
+        #     if avg_num_neighbors_is_learnable:
+        #         self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
+        #     else:
+        #         self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
+        if self.learn_cutoff_bias:
+            self.rbf_embedder = AdaLN(self.latent_dim, parent.irreps_in[parent.edge_invariant_field].num_irreps)
+            # self.rbf_embedder = FiLMFunction(
+            #     mlp_input_dimension=parent.irreps_in[parent.edge_invariant_field].num_irreps,
+            #     mlp_latent_dimensions=[4*parent.irreps_in[parent.edge_invariant_field].num_irreps],
+            #     mlp_output_dimension=self.latent_mlp.out_features,
+            #     mlp_nonlinearity='swiglu',
+            #     zero_init_last_layer_weights=False,
+            #     has_bias=False,
+            #     final_non_lin='sigmoid'
+            # )
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
@@ -593,7 +609,6 @@ class InteractionLayer(torch.nn.Module):
         W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
         # updated emb_latent
         return torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
-
 
     def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers) -> torch.Tensor:
         # Asserts needed for JIT
@@ -667,10 +682,9 @@ class InteractionLayer(torch.nn.Module):
         w_index: int = 0
         if self.layer_index == 0:
             # embed initial edge
-            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
+            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
-        
         eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs
@@ -714,14 +728,14 @@ class InteractionLayer(torch.nn.Module):
         inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
 
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
-          return latents, inv_latent, None
+            return latents, inv_latent, None
 
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
+            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
         return latents, inv_latent, eq_features

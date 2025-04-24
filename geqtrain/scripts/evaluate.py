@@ -17,7 +17,7 @@ from geqtrain.train.trainer import get_output_keys, run_inference, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
-
+from geqtrain.train.sampler import EnsembleSampler
 
 def init_logger(log: str = None):
     from geqtrain.utils import Output
@@ -173,7 +173,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=1,
+        default=2,
     )
     parser.add_argument(
         "-d",
@@ -223,6 +223,7 @@ def main(args=None, running_as_script: bool = True):
     logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
 
     # Do the defaults:
+    trainer = None
     if args.train_dir:
         if args.test_config is None:
             args.test_config = args.train_dir / "config.yaml"
@@ -247,7 +248,23 @@ def main(args=None, running_as_script: bool = True):
     # Load model
     logger.info(f"Loading model...")
     model, config = load_model(args.model, device=args.device)
-    logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
+    if trainer:
+        logger.info(f"Model loaded:\n\t{args.model}\n\tSaved at epoch {trainer['progress']['best_epoch']}")
+
+    # Check model convergence with WeightWatcher
+    # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
+    ww = False #True
+    if ww:
+        import weightwatcher as ww
+        watcher = ww.WeightWatcher(model = model)
+        details = watcher.analyze(plot=True)
+        print(details)
+
+        # Write dataframe into a file in args.train_dir
+        if args.train_dir:
+            details_file = args.train_dir / "weightwatcher_details.csv"
+            details.to_csv(details_file, index=False)
+            logger.info(f"WeightWatcher details saved to {details_file}")
 
     # Load config file
     logger.info(f"Loading config file...")
@@ -259,6 +276,7 @@ def main(args=None, running_as_script: bool = True):
     # Load metrics (if specified)
     metrics = None
     try:
+        logger.info(f"Metrics loading ... ")
         metrics_components = config.get("metrics_components", None)
         if metrics_components is not None:
             metrics, _ = instantiate(
@@ -272,6 +290,7 @@ def main(args=None, running_as_script: bool = True):
                 'type_names'   : config["type_names"],
                 'target_names' : config.get('target_names', list(metrics.keys)),
             }
+            logger.info(f"Metrics loaded")
     except:
         raise Exception("Failed to load Metrics.")
 
@@ -291,11 +310,22 @@ def main(args=None, running_as_script: bool = True):
         for loss_func in metrics.funcs.values():
             _init(loss_func, dataset, model)
 
-    dataloader = DataLoader(
-        dataset=dataset,
-        shuffle=False,
-        batch_size=args.batch_size,
-    )
+    # set up dataloader
+    dl_kwargs = {'dataset':dataset,'shuffle':False}
+    # evaluate wheter to use EnsembleSampler or not
+    dataset_mode = config.get("dataset_mode", "single")
+    assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
+    use_ensemble = dataset_mode == 'ensemble'
+
+    # use_ensemble not yet working
+    use_ensemble = False
+    if use_ensemble:
+        sampler = EnsembleSampler(dataset, args.batch_size)
+        dl_kwargs.update(dict(sampler=sampler))
+    else:
+        dl_kwargs.update(dict(batch_size=args.batch_size))
+
+    dataloader = DataLoader(**dl_kwargs)
 
     # run inference
     logger.info("Starting...")
@@ -343,7 +373,7 @@ def main(args=None, running_as_script: bool = True):
                 lines = []
                 if pbar.n == 0:
                     lines.append("batch,chunk,atom_number,node_type,pred,ref,dataset_raw_file_name")
-    
+
                 for idx, (_atom_number, _node_type, _node_output) in enumerate(zip(atom_number, node_type, node_output)):
                     _ref_node_output = ref_node_output[idx].item() if ref_node_output is not None else 0
                     lines.append(f"{batch_index:6},{chunk_index:4},{_atom_number.item():6},{_node_type.item():6},{_node_output.item():10.4f},{_ref_node_output:10.4f},{dataset_raw_file_name}")
@@ -403,11 +433,12 @@ def main(args=None, running_as_script: bool = True):
     output_keys, per_node_outputs_keys = get_output_keys(metrics)
 
     # TODO: make this somehow conditional from cmd line; care: it must be wrt a key
-    use_accuracy = False
+    use_accuracy = True
     if use_accuracy:
         from geqtrain.utils.evaluate_utils import AccuracyMetric
-        classification_metrics = AccuracyMetric(output_keys[0])
-        chunk_callbacks += [classification_metrics]
+        for k in set(output_keys):
+            if k in ['bace_head']:
+                chunk_callbacks += [AccuracyMetric(k)]
 
     config.pop("device")
     infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
