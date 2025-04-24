@@ -135,7 +135,7 @@ def model_from_config(
         assert weights_prms_provided, f"Fine-tuning {model_for_fine_tuning} provided, but not weights_params provided in model_builders"
 
     weights_to_drop_from_model_state: set[str] = set() # used in case of fine-tuning
-    weights_already_loaded = set()
+    weights_already_loaded: set[str] = set()
 
     # build model
     model = None

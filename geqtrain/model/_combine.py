@@ -1,6 +1,4 @@
 import logging
-from typing import Optional
-from torch.utils.data import ConcatDataset
 from geqtrain.utils import Config
 
 from geqtrain.nn import (
@@ -9,7 +7,7 @@ from geqtrain.nn import (
 )
 
 
-def Combine(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def Combine(model, config: Config) -> SequentialGraphNetwork:
     logging.info("--- Building PerTypeScale Module ---")
 
     layers = {
