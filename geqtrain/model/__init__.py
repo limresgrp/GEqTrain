@@ -11,6 +11,7 @@ from ._weight_init import (
     initialize_from_state,
     load_model_state,
 )
+from ._module import Module
 
 from ._build import model_from_config
 
@@ -29,4 +30,5 @@ __all__ = [
     model_from_config,
     moreGNNLayers,
     Combine,
+    Module,
 ]
