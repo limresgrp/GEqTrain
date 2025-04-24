@@ -1,17 +1,11 @@
 # taken from https://github.com/jwohlwend/boltz/blob/main/src/boltz/model/modules/transformers.py
 
-from torch import nn, sigmoid
-from torch.nn import (
-    # LayerNorm,
-    Linear,
-    Module,
-)
-
+from torch import nn, sigmoid, tanh
 
 # pytorch 2.6 ln
 import numbers
 from torch import Size, Tensor
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union
 _shape_t = Union[int, List[int], Size]
 
 import torch
@@ -156,31 +150,38 @@ class LayerNorm(nn.Module):
 
 
 
-class AdaLN(Module):
+class AdaLN(nn.Module):
     """Adaptive Layer Normalization: https://arxiv.org/pdf/2212.09748
     Rather than directly learn dimensionwise scale and shift parameters γ and β, we regress
     them from the sum of the embedding vectors of t and c.
     """
 
-    def __init__(self, dim, dim_single_cond):
+    def __init__(self, dim, cond_dim, activation='tanh'):
         """Initialize the adaptive layer normalization.
 
         Parameters
         ----------
         dim : int
             The input dimension.
-        dim_single_cond : int
+        cond_dim : int
             The single condition dimension.
 
         """
         super().__init__()
-        self.a_norm = LayerNorm(dim, elementwise_affine=False, bias=False)
-        self.s_norm = LayerNorm(dim_single_cond, bias=False)
-        self.s_scale = Linear(dim_single_cond, dim)
-        self.s_bias = Linear(dim_single_cond, dim, bias=False)
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False, bias=False)
+        self.cond_proj = nn.Sequential(
+            nn.LayerNorm(cond_dim, bias=False),
+            nn.Linear(cond_dim, dim * 2)
+        )
 
-    def forward(self, a, s):
-        a = self.a_norm(a)
-        s = self.s_norm(s)
-        a = sigmoid(self.s_scale(s)) * a + self.s_bias(s)
-        return a
+        activations = {
+            'sigmoid': (sigmoid, 0),
+            'tanh':    (tanh,    1),
+        }
+        self.act, self.act_off = activations.get(activation)
+
+    def forward(self, x, cond):
+        x = self.norm(x)
+        scale, bias = self.cond_proj(cond).chunk(2, dim=-1)
+        scale = self.act(scale) + self.act_off
+        return scale * x + bias
