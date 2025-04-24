@@ -56,20 +56,20 @@ def buildGlobalGraphModelLayers(config:Config):
     else:
         raise ValueError('Missing node_attributes in yaml')
 
-    if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            attributes=config.get('edge_attributes'),
-        ))
-
     layers = {
         # -- Encode -- #
         "node_attrs":         node_embedder,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "graph_attrs":        EmbeddingGraphAttrs,
-        "edge_attrs":         edge_embedder
     }
+
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+        layers["edge_attrs"] = edge_embedder
 
     layers.update({
         "update": (ReadoutModule, dict(
