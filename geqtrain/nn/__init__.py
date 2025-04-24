@@ -18,6 +18,8 @@ from ._film import FiLMFunction
 from ._heads import WeightedTP, TransformerBlock # GVPGeqTrain
 from .AdaLN import AdaLN
 from ._combine import CombineModule
+from ._ddp import DDP
+from ._grad_output import SetRequireGradsOutput, GradientOutput
 
 __all__ = [
     GraphModuleMixin,
@@ -48,4 +50,7 @@ __all__ = [
     TransformerBlock,
     AdaLN,
     CombineModule,
+    DDP,
+    SetRequireGradsOutput,
+    GradientOutput,
 ]

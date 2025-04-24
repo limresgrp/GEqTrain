@@ -11,6 +11,7 @@ from ._weight_init import (
     initialize_from_state,
     load_model_state,
 )
+from ._grads import GradOutput
 from ._module import Module
 
 from ._build import model_from_config
@@ -29,6 +30,7 @@ __all__ = [
     load_model_state,
     model_from_config,
     moreGNNLayers,
+    GradOutput,
     Combine,
     Module,
 ]
