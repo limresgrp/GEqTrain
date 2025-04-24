@@ -57,7 +57,7 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
 class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
-        out_field:str,
+        out_field: str,
         attributes: Dict[str, Dict] = {}, # key to parse from yaml
         num_types: Optional[int] = None,
         use_masking: bool = True,

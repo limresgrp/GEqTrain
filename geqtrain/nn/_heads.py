@@ -258,9 +258,9 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             )
 
     def _add_edge_based_bias(self, data):
-        edge_radial_attrs = data["edge_radial_attrs"] # already modulated by cutoff() wrt r_max
-        edge_index = data["edge_index"]
-        batch_map = data['batch'] # Renamed from 'batch' to avoid conflict with loop var
+        edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated by cutoff() wrt r_max
+        edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY]
+        batch_map         = data[AtomicDataDict.BATCH_KEY]
         unique_idx, counts = torch.unique(batch_map, return_counts=True)
         max_count = counts.max()
         num_uniques = unique_idx.shape[0]
