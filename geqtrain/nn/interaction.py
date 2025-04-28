@@ -577,6 +577,8 @@ class InteractionLayer(torch.nn.Module):
 
         if self.learn_cutoff_bias:
             self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
+        
+        self.post_norm = torch.nn.LayerNorm(self.latent_dim)
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
@@ -633,6 +635,7 @@ class InteractionLayer(torch.nn.Module):
             new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
         else:
             new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
+        new_latents = self.post_norm(new_latents)
 
         latents = apply_residual_stream(self.layer_index==0, latents, new_latents, this_layer_update_coeff, active_edges)
 
