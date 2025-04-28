@@ -156,7 +156,7 @@ class AdaLN(nn.Module):
     them from the sum of the embedding vectors of t and c.
     """
 
-    def __init__(self, dim, cond_dim, activation='tanh'):
+    def __init__(self, dim, cond_dim, activation='sigmoid'):
         """Initialize the adaptive layer normalization.
 
         Parameters
@@ -168,11 +168,10 @@ class AdaLN(nn.Module):
 
         """
         super().__init__()
-        self.norm = nn.LayerNorm(dim, elementwise_affine=False, bias=False)
-        self.cond_proj = nn.Sequential(
-            nn.LayerNorm(cond_dim, bias=False),
-            nn.Linear(cond_dim, dim * 2)
-        )
+        self.x_norm     = LayerNorm(dim, elementwise_affine=False, bias=False)
+        self.cond_norm  = LayerNorm(cond_dim, bias=False)
+        self.cond_scale = nn.Linear(cond_dim, dim)
+        self.cond_bias  = nn.Linear(cond_dim, dim, bias=False)
 
         activations = {
             'sigmoid': (sigmoid, 0),
@@ -181,7 +180,8 @@ class AdaLN(nn.Module):
         self.act, self.act_off = activations.get(activation)
 
     def forward(self, x, cond):
-        x = self.norm(x)
-        scale, bias = self.cond_proj(cond).chunk(2, dim=-1)
+        x     = self.x_norm(x)
+        cond  = self.cond_norm(cond)
         scale = self.act(scale) + self.act_off
+        bias  = self.cond_bias(cond)
         return scale * x + bias
