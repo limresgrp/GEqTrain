@@ -14,6 +14,7 @@ from geqtrain.utils import add_tags_to_module
 from torch.nn import GroupNorm
 from torch.nn import functional as F
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
+from geqtrain.data import AtomicDataDict
 
 class FFBlock(torch.nn.Module):
     def __init__(self, inp_size, out_size:int|None=None, residual:bool=True, group_norm:bool=False):
@@ -161,7 +162,6 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
         super().__init__()
         self.field = field
         self.out_field = out_field
-        in_irreps = irreps_in[field]
 
         irreps_out = e3nn.o3.Irreps('1x0e')
         self._init_irreps(
@@ -172,8 +172,8 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
         self.l0_size = self.irreps_in[self.field][0].dim
         self.l1_size = self.irreps_in[self.field][1].dim
         self.final_block = FFBlock(self.l0_size, 1, residual=False)
-        self.l1 = L0IndexedAttention(irreps_in,field,out_field)
-        self.l2 = L0IndexedAttention(irreps_in,field,out_field)
+        self.l1 = L0IndexedAttention(irreps_in, field, out_field)
+        self.l2 = L0IndexedAttention(irreps_in, field, out_field)
         add_tags_to_module(self, '_wd')
 
     def forward(self, data):
@@ -238,15 +238,15 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim =  self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.use_radial_bias = field == 'node_features' or field == 'node_attrs' #AtomicDataDict.NODE_FEATURES_KEY #TODO: bring this inside geqtrain
+        self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
         if self.use_radial_bias:
-            self.rbf_emb_dim = 16
-            self.bias_norm = nn.LayerNorm(self.rbf_emb_dim)
+            rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY].dim
+            self.bias_norm = nn.LayerNorm(rbf_emb_dim)
             self.bias_proj = torch.nn.Sequential(
-                # nn.Linear(self.rbf_emb_dim, 4*self.rbf_emb_dim, bias=False),
+                # nn.Linear(rbf_emb_dim, 4*rbf_emb_dim, bias=False),
                 # nn.ReLU(), # nn.SiLU(), # relu to try to enforce a bit of sparsity
-                # nn.Linear(4*self.rbf_emb_dim, num_heads)
-                nn.Linear(self.rbf_emb_dim, num_heads)
+                # nn.Linear(4*rbf_emb_dim, num_heads)
+                nn.Linear(rbf_emb_dim, num_heads)
             )
 
         if self.update_mlp:
@@ -258,17 +258,14 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             )
 
     def _add_edge_based_bias(self, data):
-        '''
-        idea: build square matrix (..., max_num_nodes, max_num_nodes) where each entry is a scalar obtained by embedding the radial dist between those 2 nodes
-        we are shifting edge_index back to be on single mol to batchify wrt it
-        returns: torch.tensor of shape: (num_uniques, num_heads, max_num_nodes, max_num_nodes)
-        '''
-        edge_radial_attrs = data["edge_radial_attrs"] # already modulated wrt r_max; shape: (E, rbf_emb_size)
-        edge_index = data["edge_index"] # (2, E)
-        batch_map = data['batch'] # assings each node to a given mol
+        edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
+        edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY] # (2, E)
+        batch_map         = data[AtomicDataDict.BATCH_KEY] # assings each node to a given mol
         unique_idx, counts = torch.unique(batch_map, return_counts=True) # num_of mols, num of atoms per mol
         max_count = counts.max() # max num of nodes in atoms in batch
         num_uniques = unique_idx.shape[0] # num of mols in batch
+
+        num_total_edges, num_edge_features = edge_radial_attrs.shape
         device = edge_radial_attrs.device
         counts = counts.to(device)
 

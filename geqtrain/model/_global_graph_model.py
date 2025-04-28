@@ -56,20 +56,20 @@ def buildGlobalGraphModelLayers(config:Config):
     else:
         raise ValueError('Missing node_attributes in yaml')
 
-    if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            attributes=config.get('edge_attributes'),
-        ))
-
     layers = {
         # -- Encode -- #
         "node_attrs":         node_embedder,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "graph_attrs":        EmbeddingGraphAttrs,
-        "edge_attrs":         edge_embedder
     }
+
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+        layers["edge_attrs"] = edge_embedder
 
     layers.update({
         "update": (ReadoutModule, dict(
@@ -142,7 +142,7 @@ def appendNGNNLayers(config):
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
-            num_heads=8,
+            num_heads=8, # this number must be a 0 reminder of the sum of catted nn.embedded features (node and edges)
         ))
     })
 
@@ -220,16 +220,24 @@ def moreGNNLayers(config:Config):
         edge_embedder = None
         logging.info("--- Working without edge_attributes")
 
+    if 'graph_attributes' in config:
+        graph_embedder = EmbeddingGraphAttrs
+    else:
+        graph_embedder = None
+        logging.info("--- Working without graph_attributes")
+
     layers = {
         # -- Encode -- #
         "node_attrs":         node_embedder,
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        "graph_attrs":        EmbeddingGraphAttrs,
     }
 
     if edge_embedder != None:
         layers.update({"edge_attrs": edge_embedder})
+
+    if graph_embedder != None:
+        layers.update({"graph_attrs": graph_embedder})
 
     layers.update(appendNGNNLayers(config))
 

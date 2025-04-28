@@ -16,6 +16,9 @@ from geqtrain.data import (
     AtomicDataDict,
     AtomicInMemoryDataset,
     _NODE_FIELDS,
+    _EDGE_FIELDS,
+    _GRAPH_FIELDS,
+    _EXTRA_FIELDS,
     register_fields,
 )
 from geqtrain.utils import (
@@ -27,13 +30,12 @@ from geqtrain.utils import (
 from functools import partial
 from multiprocessing import Pool
 
-def get_ignore_nan_loss_key_clean(config: Config, loss_key:str):
+def get_key_clean(config: Config, loss_key:str):
     from geqtrain.train.utils import parse_loss_metrics_dict
     loss_keys = set()
     for loss_dict in config.get(loss_key, []):
         key, _, _, func_params = list(parse_loss_metrics_dict(loss_dict))[0]
-        if func_params.get('ignore_nan', False):
-            loss_keys.add(key)
+        loss_keys.add(key)
     return list(loss_keys)
 
 def get_class_name(config_dataset_type):
@@ -108,7 +110,7 @@ def node_types_to_keep(config):
     if keep_type_names is not None:
         from geqtrain.train.utils import find_matching_indices
         config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
-    return config.get("keep_node_types", None) # keep_node_types
+    return config.get("keep_node_types", None)
 
 def node_types_to_exclude(config):
     # --- exclude edges from center node to specified node types
@@ -116,7 +118,7 @@ def node_types_to_exclude(config):
     if exclude_type_names_from_edges is not None:
         from geqtrain.train.utils import find_matching_indices
         config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
-    return config.get("exclude_node_types_from_edges", None) # exclude_node_types_from_edges
+    return config.get("exclude_node_types_from_edges", None)
 
 def dataset_from_config(config,
                         prefix: str = "dataset",
@@ -162,10 +164,10 @@ def dataset_from_config(config,
         logging.info(f"Using {'' if inmemory else 'NOT-'}inmemory dataset.")
 
         # --- multiprocessing handling of npz reading
-        key_clean_list = get_ignore_nan_loss_key_clean(config, loss_key)
+        key_clean_list = get_key_clean(config, loss_key)
         mp_handle_single_dataset_file_name = partial(handle_single_dataset_file_name, config, prefix, class_name, inmemory, key_clean_list)
         n_workers = int(min(len(dataset_file_names_and_ensemble_indices), config.get('dataset_num_workers', len(os.sched_getaffinity(0)))))  # pid=0 the calling process
-        if n_workers>1:
+        if n_workers > 1:
             '''
             sysctl vm.max_map_count # Use this to check the limit of maps for shared memory
             sudo sysctl -w vm.max_map_count=NEW_VALUE # If necessary, change it with this command (valid until restart)
@@ -189,33 +191,39 @@ def dataset_from_config(config,
 
 
 def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_names_and_ensemble_indices):
-    _config = copy.deepcopy(config) # this might not be required but kept for saefty
     ensemble_index, dataset_file_name = dataset_file_names_and_ensemble_indices
     file_name_key = f"{prefix}_file_name"
-    _config[file_name_key] = dataset_file_name
+    config[file_name_key] = dataset_file_name
     ensemble_index_key = f"{prefix}_ensemble_index"
-    _config[ensemble_index_key] = ensemble_index
+    config[ensemble_index_key] = ensemble_index
 
     # Register fields:
     # This might reregister fields, but that's OK:
-    instantiate(register_fields, all_args=_config)
+    instantiate(register_fields, all_args=config)
 
     try:
         instance, _ = instantiate(
             class_name,     # dataset selected to be instanciated
             prefix=prefix,  # look for this prefix word in yaml to select get the params for the ctor
             positional_args={},
-            optional_args=_config,
+            optional_args=config,
         )
-    except FileNotFoundError:
+    except RuntimeError as e:
+        logging.warning(e)
+        return None
+    if instance.data is None:
         return None
 
     """
     !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
     """
     if inmemory:
-        # Filter out nan nodes and nodes with type_names that we don't want to keep
-        instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
+        if not config.get("equivariance_test", False):
+            # Filter out nan nodes and nodes with type_names that we don't want to keep
+            default_num_threads = torch.get_num_threads() # default is 64 (always?)
+            torch.set_num_threads(1)  # torch.argwhere, torch.isin and torch.nonzero may parallelize on many cpus and clutter the machine
+            instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
+            torch.set_num_threads(default_num_threads)
         return instance
 
     # otherwise return the non-in-mem data struct that contains all info to reinstanciate instance at runtime
@@ -226,7 +234,6 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
     }
     del instance
     return out
-
 
 def remove_node_centers_for_NaN_targets_and_edges(
     dataset: AtomicInMemoryDataset,
@@ -243,6 +250,15 @@ def remove_node_centers_for_NaN_targets_and_edges(
     def get_node_types_mask(node_types, filter, data):
         return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
 
+    def update_node_index(data, key_clean: str, node_filter: torch.Tensor):
+        data[key_clean] = data[key_clean][node_filter]
+        if len(node_filter) == 0:
+            return
+        node_filter_cumsum = node_filter.cumsum(0)
+        new_node_index_slices = node_filter_cumsum[torch.as_tensor(data.__slices__[key_clean][1:]) - 1].tolist()
+        new_node_index_slices.insert(0, 0)
+        data.__slices__[key_clean] = torch.tensor(new_node_index_slices, dtype=torch.long, device=node_filter.device)
+
     def update_edge_index(data, edge_filter: torch.Tensor):
         data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
         if len(edge_filter) == 0:
@@ -256,25 +272,44 @@ def remove_node_centers_for_NaN_targets_and_edges(
             data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
 
     # - Remove edges of atoms whose result is NaN - #
+    node_center_edge_idcs = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+    keep_edges_filter = []
     for key_clean in key_clean_list:
-        if key_clean not in _NODE_FIELDS:
-            continue
-        if key_clean in data:
-            if keep_node_types is not None:
+        if key_clean not in data: continue
+        if key_clean in _GRAPH_FIELDS:
+            # if any loss requires the full graph, we cannot drop any edge
+            keep_edges_filter.append(torch.ones(len(node_center_edge_idcs), dtype=torch.bool))
+        if key_clean in _EDGE_FIELDS: # TODO remove edges for which we have nan targets
+            pass
+        elif key_clean in _NODE_FIELDS:
+            if keep_node_types is not None: # Set target values to nan for nodes not present in 'keep_node_types'
                 remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
                 data[key_clean][remove_node_types_mask] = torch.nan
             val: torch.Tensor = data[key_clean]
-            if val.dim() == 1:
-                val = val.reshape(len(val), -1)
+            if val.dim() == 1: val = val.reshape(len(val), -1)
 
-            not_nan_edge_filter = torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][0], torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten())
-            update_edge_index(data, not_nan_edge_filter)
+            # Here we are performing the UNION of edge_idcs we want to keep, across different target keys
+            keep_edges_filter.append(torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten()))
+        elif key_clean in _EXTRA_FIELDS:
+            pass
+
+    if len(keep_edges_filter) > 0:
+        keep_edges_filter = torch.any(torch.stack(keep_edges_filter), dim=0)
+    else:
+        keep_edges_filter = torch.ones(len(node_center_edge_idcs), dtype=torch.bool)
 
     # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
     if exclude_node_types_from_edges is not None:
         exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
-        keep_edges_filter = ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
-        update_edge_index(data, keep_edges_filter)
+        # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
+        keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+
+    keep_nodes_filter = torch.zeros(len(data.pos), dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
+    keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
+    update_edge_index(data, keep_edges_filter)
+    for key_clean in key_clean_list:
+        if key_clean in _NODE_FIELDS and key_clean in data:
+            update_node_index(data, key_clean, keep_nodes_filter)
 
     if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
         return None

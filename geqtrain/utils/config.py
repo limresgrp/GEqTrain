@@ -317,7 +317,6 @@ class Config(object):
         c.update(dictionary)
         c.parse_node_types()
         c.parse_attributes()
-        # c.parse_targets_metadata()
         return c
 
     @staticmethod
@@ -414,26 +413,3 @@ class Config(object):
                 self[attr][key].update({
                     "actual_num_types": num_types + int(can_be_undefined)
                 })
-
-    def parse_targets_metadata(self):
-        '''
-        parses information relatet to target_* from yaml
-        '''
-
-        if "target_names" in self:
-            target_names = [str(target_names) for target_names in self["target_names"]]
-            self["target_names"] = target_names
-            num_targets = len(target_names)
-             # check consistency
-            assert len(self.get("target_names", [])) == num_targets
-        if "target_means" in self:
-            target_means = [float(x) for x in self['target_means']]
-            self.target_means = target_means
-            n = len(target_means)
-            assert len(target_means) == n
-        if "target_stds" in self:
-            target_stds = [float(x) for x in self['target_stds']]
-            self.target_stds = target_stds
-            n = len(target_stds)
-            assert len(target_stds) == n
-

@@ -36,7 +36,10 @@ def buildHeadlessGlobalNodeModelLayers(config:Config):
 
     layers = {
         # -- Encode -- #
-        "node_attrs":         EmbeddingAttrs,
+        "node_attrs": (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.NODE_ATTRS_KEY,
+            attributes=config.get('node_attributes'),
+        )),
         "edge_radial_attrs":  BasisEdgeRadialAttrs,
         "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "graph_attrs":        EmbeddingGraphAttrs,
@@ -52,7 +55,7 @@ def buildHeadlessGlobalNodeModelLayers(config:Config):
             out_irreps=None,
             output_ls=[0],
         )),
-        "local_pooling": (EdgewiseReduce, dict(
+        "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
