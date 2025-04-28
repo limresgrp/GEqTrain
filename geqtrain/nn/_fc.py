@@ -92,7 +92,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         dropout: Optional[float] = None,
         dampen: bool = False,
         wd: bool = False,
-        gain:Optional[float] = None,
+        gain: Optional[float] = None,
     ):
         super().__init__()
         dimensions = (
@@ -107,7 +107,6 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.use_weight_norm = use_weight_norm
         self.dim_weight_norm = dim_weight_norm
         self.use_layer_norm = use_layer_norm
-        self.gain = gain
 
         nonlinearity = {
             None: None,
@@ -119,23 +118,29 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             "sigmoid": torch.nn.functional.sigmoid,
         }[mlp_nonlinearity]
 
+        if nonlinearity is None:
+            gain = None
+        self.gain = gain
+
         nonlin_const = 1.0
-        if nonlinearity is not None:
-            if mlp_nonlinearity == "ssp":
-                nonlin_const = normalize2mom(ShiftedSoftPlus).cst
-            elif mlp_nonlinearity in ["selu", "relu", "sigmoid"]:
-                nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
-            elif mlp_nonlinearity == "silu":
-                nonlin_const = normalize2mom(nonlinearity).cst
-            elif mlp_nonlinearity == "swiglu":
-                nonlin_const = 1.55
+        if self.gain is not None:
+            nonlin_const = self.gain
+        else:
+            if nonlinearity is not None:
+                if mlp_nonlinearity == "ssp":
+                    nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+                elif mlp_nonlinearity in ["selu", "relu", "sigmoid"]:
+                    nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
+                elif mlp_nonlinearity == "silu":
+                    nonlin_const = normalize2mom(nonlinearity).cst
+                elif mlp_nonlinearity == "swiglu":
+                    nonlin_const = 1.55
 
         if bias is not None:
             has_bias = True
 
         sequential_dict = OrderedDict()
         for layer_index, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
-
             bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
             is_last_layer = layer_index == (num_layers - 1)
 
@@ -143,33 +148,34 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 h_out = 2*h_out
 
             lin_layer = torch.nn.Linear(h_in, h_out, bias=bias_condition)
+            modules = [(f"linear_{layer_index}", lin_layer)]
 
             if (nonlinearity is None) or is_last_layer:
-                self.gain = None
                 norm_const = 1.
-                modules = [(f"linear_{layer_index}", lin_layer)]
-                torch.nn.init.kaiming_normal_(lin_layer.weight, mode='fan_in', nonlinearity='linear')
             else:
                 norm_const = nonlin_const
                 non_lin_instance = select_nonlinearity(mlp_nonlinearity)
-                modules = [(f"linear_{layer_index}", lin_layer)]
                 modules.append((f"activation_{layer_index}", non_lin_instance))
                 if dropout is not None:
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
                     modules.append((f"dropout_{layer_index}", torch.nn.Dropout(dropout)))
 
-                fan_in = lin_layer.weight.size(1)
-                std = norm_const / math.sqrt(fan_in)
-                torch.nn.init.normal_(lin_layer.weight, mean=0, std=std)
-
-            if self.use_layer_norm:
+            if layer_index == 0 and self.use_layer_norm:
                 modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
-            if zero_init_last_layer_weights:
-                norm_const = norm_const * 1.e-1
+
+            if zero_init_last_layer_weights and is_last_layer:
+                # Scale the weights of the last layer by 1.e-1
+                norm_const *= 1.e-1
 
             # initialize weights
             with torch.no_grad():
-                # torch.nn.init.orthogonal_(lin_layer.weight, gain=norm_const if not self.gain else self.gain)
+                # fan_in  preserves the magnitude in the forward pass.
+                # fan_out preserves the magnitude in the backward pass.
+                # fan_out might work better when the loss oscillates a lot.
+                # Check discusison at https://stackoverflow.com/questions/61848635/how-to-decide-which-mode-to-use-for-kaiming-normal-initialization
+                fan_out, fan_in = lin_layer.weight.size()
+                std = norm_const / math.sqrt(fan_in)
+                torch.nn.init.normal_(lin_layer.weight, mean=0, std=std)
                 if lin_layer.bias is not None:
                     if is_last_layer and bias is not None:
                         lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)

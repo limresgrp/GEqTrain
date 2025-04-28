@@ -150,6 +150,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         assert self.n_scalars_in > 0
 
         self.n_scalars_out = out_irreps.ls.count(0)
+        scalar_attnt = False
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
