@@ -141,7 +141,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
         sequential_dict = OrderedDict()
         for layer_index, (h_in, h_out) in enumerate(zip(dimensions, dimensions[1:])):
-            bias_condition = False if self.use_layer_norm else has_bias
+            bias_condition = False if (layer_index == 0 and self.use_layer_norm) else has_bias
             is_last_layer = layer_index == (num_layers - 1)
 
             if mlp_nonlinearity == "swiglu" and not is_last_layer:
@@ -160,12 +160,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
                     modules.append((f"dropout_{layer_index}", torch.nn.Dropout(dropout)))
 
+            if layer_index == 0 and self.use_layer_norm:
+                modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
+
             if zero_init_last_layer_weights and is_last_layer:
                 # Scale the weights of the last layer by 1.e-1
                 norm_const *= 1.e-1
-            
-            if self.use_layer_norm:
-                modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
 
             # initialize weights
             with torch.no_grad():
