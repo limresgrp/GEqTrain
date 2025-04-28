@@ -170,8 +170,8 @@ class AdaLN(nn.Module):
         super().__init__()
         self.x_norm     = LayerNorm(dim, elementwise_affine=False, bias=False)
         self.cond_norm  = LayerNorm(cond_dim, bias=False)
-        self.cond_scale = nn.Linear(cond_dim, dim)
-        self.cond_bias  = nn.Linear(cond_dim, dim, bias=False)
+        self.cond_lin_proj_with_bias = nn.Linear(cond_dim, dim)
+        self.cond_lin_proj = nn.Linear(cond_dim, dim, bias=False)
 
         activations = {
             'sigmoid': (sigmoid, 0),
@@ -180,8 +180,12 @@ class AdaLN(nn.Module):
         self.act, self.act_off = activations.get(activation)
 
     def forward(self, x, cond):
+        # apply prenorms
         x     = self.x_norm(x)
         cond  = self.cond_norm(cond)
-        scale = self.act(scale) + self.act_off
-        bias  = self.cond_bias(cond)
-        return scale * x + bias
+
+        # get gating coeffs and bias as func of cond
+        scale = self.act(self.cond_lin_proj_with_bias(cond)) + self.act_off # cond_as_gating_coeffs
+        shift = self.cond_lin_proj(cond) # cond_as_shift
+
+        return scale * x + shift
