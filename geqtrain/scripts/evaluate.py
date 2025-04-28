@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import time
 import argparse
@@ -81,6 +82,9 @@ def init_logger(log: str = None):
     return logger, metricslogger, csvlogger, xyzlogger
 
 def infer(dataloader, model, device, output_keys=[], per_node_outputs_keys=[], chunk_callbacks=[], batch_callbacks=[], **kwargs):
+    requires_grad = kwargs.pop('model_requires_grads', False)
+    if requires_grad:
+        model.train()
     pbar = tqdm(dataloader)
     for batch_index, data in enumerate(pbar):
         already_computed_nodes = None
@@ -90,10 +94,11 @@ def infer(dataloader, model, device, output_keys=[], per_node_outputs_keys=[], c
                 model=model,
                 data=data,
                 device=device,
-                cm=torch.no_grad(),
+                cm=contextlib.nullcontext() if requires_grad else torch.no_grad(),
                 already_computed_nodes=already_computed_nodes,
                 output_keys=output_keys,
                 per_node_outputs_keys=per_node_outputs_keys,
+                requires_grad=requires_grad,
                 **kwargs,
             )
 
@@ -331,8 +336,9 @@ def main(args=None, running_as_script: bool = True):
     logger.info("Starting...")
 
     def metrics_callback(batch_index, chunk_index, out, ref_data, data, pbar, **kwargs): # Keep **kwargs or callback fails
-        # accumulate metrics
-        batch_metrics = metrics(pred=out, ref=ref_data)
+        with torch.no_grad():
+            # accumulate metrics
+            batch_metrics = metrics(pred=out, ref=ref_data)
 
         mat_str = f"{batch_index}, {chunk_index}"
         header = "batch,chunk"
@@ -349,7 +355,7 @@ def main(args=None, running_as_script: bool = True):
             metricslogger.info(header)
         metricslogger.info(mat_str)
 
-        del out, ref_data
+        del out, ref_data, data
 
     def out_callback(batch_index, chunk_index, out, ref_data, data, pbar, **kwargs): # Keep **kwargs or callback fails
 
@@ -440,7 +446,7 @@ def main(args=None, running_as_script: bool = True):
             if k in ['bace_head']:
                 chunk_callbacks += [AccuracyMetric(k)]
 
-    config.pop("device")
+    config.pop("device", None)
     infer(dataloader, model, device, output_keys, per_node_outputs_keys, chunk_callbacks=chunk_callbacks, **config)
 
     if use_accuracy:
