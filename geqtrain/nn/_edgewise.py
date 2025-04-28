@@ -100,9 +100,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         edge_feat = data[self.field]
 
-        species = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-        num_nodes = species.shape[0]
-        assert num_nodes == data[AtomicDataDict.POSITIONS_KEY].shape[0]
+        num_nodes = data[AtomicDataDict.POSITIONS_KEY].shape[0]
 
         if self.use_attention and self.node_attr_to_query is not None:
             Q = self.node_attr_to_query(data[AtomicDataDict.NODE_ATTRS_KEY][edge_center])

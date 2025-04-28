@@ -150,6 +150,16 @@ def run_inference(
         out = model(input_data)
         del input_data
 
+    # if a module of model has ref_data_keys as attr
+    # then take the string associated to that field and
+    # write it into ref_data as {str}+_target
+    for (name, module) in model:
+        if hasattr(module, 'ref_data_keys'):
+            for k in module.ref_data_keys:
+                target = out[k]
+                key_clean = k.replace("_target", "")
+                ref_data[key_clean] = target
+
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
 def prepare_chunked_input_data(
@@ -1333,6 +1343,8 @@ class Trainer:
             del ref_data
 
             if not validation:
+                # ref for how ddp works: https://pytorch.org/docs/stable/notes/ddp.html#internal-design;
+                # TLDR: every process must call gradfilter_ema (if grokfast), gradient_clipping, optim.step() ema.update(), lr_sched_step and accumulation_counter++
                 loss.backward()
                 self.accumulation_counter += 1
 
@@ -1807,7 +1819,7 @@ class Trainer:
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
             ))
-            
+
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
@@ -1865,7 +1877,10 @@ class TrainerWandB(Trainer):
     def end_of_epoch_log(self):
         Trainer.end_of_epoch_log(self)
         if 'validation_loss' in self.mae_dict:
-            self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+            try:
+                self.mae_dict.update({'validation_log_loss': math.log(self.mae_dict['validation_loss'])})
+            except:
+                print('ERRORO', self.mae_dict['validation_loss'])
         if 'training_loss' in self.mae_dict:
             self.mae_dict.update({'training_log_loss': math.log(self.mae_dict['training_loss'])})
         wandb.log(self.mae_dict)

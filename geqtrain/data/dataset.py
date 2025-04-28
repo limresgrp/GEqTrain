@@ -659,7 +659,7 @@ class NpzDataset(AtomicInMemoryDataset):
         _dir = self.raw_dir + "/" + self.raw_file_names[0]
         print(_dir)
         try:
-            data = np.load(_dir, allow_pickle=True)
+            data = np.load(_dir, allow_pickle=True, mmap_mode='r')
         except:
             logging.error(f"File {_dir} not found")
             raise FileNotFoundError(f"File {_dir} not found")

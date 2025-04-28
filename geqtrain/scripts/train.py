@@ -186,7 +186,7 @@ def restart(rank, world_size, config, train_dataset, validation_dataset):
                          "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers",
                          "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
                          "report_init_validation", "metrics_key", "max_gradient_norm",
-                        ]
+                        ] # todo: "num_types" should be added here after moving binning functionality away from dataset creation
 
         for k,v in config.items():
             if v != old_config.get(k, ""):

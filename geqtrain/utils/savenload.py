@@ -275,7 +275,7 @@ def load_file(supported_formats: dict, filename: str, enforced_format: str = Non
     elif format == "npz":
         import numpy as np
 
-        return np.load(filename, allow_pickle=True)
+        return np.load(filename, allow_pickle=True, mmap_mode='r')
     else:
         raise NotImplementedError(
             f"Input format not supported:" f" try from {supported_formats.keys()}"

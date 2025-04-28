@@ -49,10 +49,10 @@ class FFBlock(torch.nn.Module):
 
 #         self.dropout = GVPDropout(0.2)
 
-#         self.norm1 = GVPLayerNorm(64)
+#         self.norm1 = GVPLayerNorm(256)
 #         self.layer1 = GVP(
-#             dim_vectors_in = 64, # env_embed_multiplicity
-#             dim_feats_in = 64, # l0 dim (i.e. latent_dim)
+#             dim_vectors_in = 256, # env_embed_multiplicity
+#             dim_feats_in = 256, # l0 dim (i.e. latent_dim)
 
 #             dim_vectors_out = 128, # out_multiplicity
 #             dim_feats_out = 128, # new latent_dim
@@ -258,30 +258,32 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             )
 
     def _add_edge_based_bias(self, data):
-        edge_radial_attrs = data["edge_radial_attrs"] # already modulated by cutoff() wrt r_max
-        edge_index = data["edge_index"]
-        batch_map = data['batch'] # Renamed from 'batch' to avoid conflict with loop var
-        unique_idx, counts = torch.unique(batch_map, return_counts=True)
-        max_count = counts.max()
-        num_uniques = unique_idx.shape[0]
-
-        num_total_edges, num_edge_features = edge_radial_attrs.shape
+        '''
+        idea: build square matrix (..., max_num_nodes, max_num_nodes) where each entry is a scalar obtained by embedding the radial dist between those 2 nodes
+        we are shifting edge_index back to be on single mol to batchify wrt it
+        returns: torch.tensor of shape: (num_uniques, num_heads, max_num_nodes, max_num_nodes)
+        '''
+        edge_radial_attrs = data["edge_radial_attrs"] # already modulated wrt r_max; shape: (E, rbf_emb_size)
+        edge_index = data["edge_index"] # (2, E)
+        batch_map = data['batch'] # assings each node to a given mol
+        unique_idx, counts = torch.unique(batch_map, return_counts=True) # num_of mols, num of atoms per mol
+        max_count = counts.max() # max num of nodes in atoms in batch
+        num_uniques = unique_idx.shape[0] # num of mols in batch
         device = edge_radial_attrs.device
+        counts = counts.to(device)
 
         # --- Precompute cumulative node counts ---
-        # This helps find the starting global index for each graph
-        # Ensure counts is on the correct device
-        counts = counts.to(device)
-        # cum_counts will store the starting index offset for each graph
+        # This helps find the starting global index for each graph in edge_index
+        # cum_counts will store the starting index offset for each graph, used to index into edge_index
         # Example: if counts is [10, 5, 8], cum_counts will be [0, 10, 15]
-        zero_pad = torch.zeros(1, dtype=counts.dtype, device=device)
-        cum_counts = torch.cat([zero_pad, counts.cumsum(dim=0)[:-1]], dim=0)
+        zero_pad = torch.zeros(1, dtype=counts.dtype, device=device) # tensor([0]) with shape: torch.Size([1])
+        cum_counts = torch.cat([zero_pad, counts.cumsum(dim=0)[:-1]], dim=0) # starting from [0] appends cum sum of counts
 
         # --- Determine batch index for each edge ---
         # Since edges are within graphs, the batch index of the source node
         # determines the edge's batch index.
         src_nodes_global = edge_index[0]
-        edge_batch_indices = batch_map[src_nodes_global] # Shape: [E_total]
+        edge_batch_indices = batch_map[src_nodes_global] # Shape: [E_total], for each edge, get graph idx
 
         # --- Calculate local node indices for each edge ---
         # Subtract the cumulative count (start offset) of the corresponding batch
@@ -309,29 +311,30 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # place the edge attributes into the correct locations in the padded tensor.
         padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
 
-        padded_edge_attrs = rearrange(padded_edge_attrs, 'batch target source heads -> batch heads target source')
+        padded_edge_attrs = rearrange(padded_edge_attrs, 'batch source target heads -> batch heads source target')
         return padded_edge_attrs
+
 
     @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
-        # forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png
-        N, emb_dim = features.shape # N = num nodes or num ensemble confs
-
-        attention_idxs = data[self.idx_key]
+        '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
+        attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
 
+        N, emb_dim = features.shape # N = num nodes or N ensemble confs; depends on self.field
         _dtype = features.dtype
         _device = features.device
-
         residual = features
 
-        features = self.kqv_norm(features)
-        kvq = self.kqv_proj(features)
-        _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
-
+        # fetch and preprocess attnt idxs
         unique_idx, counts = torch.unique(attention_idxs, return_counts=True)
         max_count = counts.max()
         num_uniques = unique_idx.shape[0] # bs
+
+        # map features to kqv
+        features = self.kqv_norm(features)
+        kvq = self.kqv_proj(features)
+        _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
 
         k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k
         q = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_q
