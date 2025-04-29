@@ -1,5 +1,5 @@
 import torch
-from geqtrain.data import AtomicDataDict
+from geqtrain.data import AtomicDataDict, _EDGE_FIELDS
 from copy import deepcopy
 
 def edges_dropout(data, dropout_edges: float = 0.05):
@@ -27,10 +27,10 @@ def edges_dropout(data, dropout_edges: float = 0.05):
 
     for k,v in data:
         try:
-            if v.shape[-1] == edge_index.shape[-1]:
-                data[k] = v[..., keep_edges]
+            if k in _EDGE_FIELDS and v is not None and k != AtomicDataDict.EDGE_INDEX_KEY:
+                data[k] = v[keep_edges]
         except:
             pass
 
-    data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
+    data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:,keep_edges]
     return data

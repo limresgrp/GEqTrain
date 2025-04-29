@@ -151,12 +151,12 @@ def _process_dict(kwargs, ignore_fields):
 
         # check if it must be added the batch size, nb: bs always = 1 when reading data
         if len(v.shape) == 0:
-            # kwargs[k] = v.unsqueeze(-1)
+            kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
         # check if it must be added the batch size, nb: bs always = 1 when reading data
         if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
-            # kwargs[k] = v.unsqueeze(-1)
+            kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
         # consistency checks
@@ -290,7 +290,7 @@ class AtomicData(Data):
                 raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
             # Remove the '_mask' key from kwargs
             del kwargs[mask_key]
-        
+
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
 

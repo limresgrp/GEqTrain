@@ -500,10 +500,10 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
 
             # check keys and ensure 1d arrays become 2d with shape (d, 1)
-            node_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in node_fields.items()  if v is not None}
-            edge_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in edge_fields.items()  if v is not None}
-            graph_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in graph_fields.items() if v is not None}
-            extra_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in extra_fields.items() if v is not None}
+            node_fields  = {k:v for k,v in node_fields.items()  if v is not None}
+            edge_fields  = {k:v for k,v in edge_fields.items()  if v is not None}
+            graph_fields = {k:v for k,v in graph_fields.items() if v is not None}
+            extra_fields = {k:v for k,v in extra_fields.items() if v is not None}
 
             all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
             assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
