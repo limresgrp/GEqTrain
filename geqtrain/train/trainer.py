@@ -101,6 +101,7 @@ def run_inference(
     ignore_chunk_keys: List[str] = [],
     dropout_edges: float = 0.,
     requires_grad: bool = False,
+    is_ddp: bool = False,
     **kwargs,
 ):
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
@@ -148,7 +149,7 @@ def run_inference(
     # if a module of model has ref_data_keys as attr
     # then take the string associated to that field and
     # write it into ref_data as {str}+_target
-    for (name, module) in model:
+    for (name, module) in (model.module if is_ddp else model):
         if hasattr(module, 'ref_data_keys'):
             for k in module.ref_data_keys:
                 target = out[k]
@@ -1377,6 +1378,7 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
                 dropout_edges=self.dropout_edges if not validation else 0.,
                 requires_grad=self.model_requires_grads,
+                is_ddp=self.is_ddp,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
