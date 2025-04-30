@@ -150,7 +150,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         assert self.n_scalars_in > 0
 
         self.n_scalars_out = out_irreps.ls.count(0)
-        scalar_attnt = False
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
@@ -208,12 +207,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # if self.use_l1_scalarizer:
         #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
-        # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
-        # todo: if self.field == AtomicDataDict.edge then use edge_centers
-        # todo: if self.field == AtomicDataDict.node features then use 'batch'
         if self.field in _NODE_FIELDS:
             idx_key = 'batch'
-        elif self.field in _EDGE_FIELDS: # edge cant attention; node/ensemble can
+        elif self.field in _EDGE_FIELDS: # edge can't attention; node/ensemble can
+            # todo: if self.field == AtomicDataDict.edge then use edge_centers
             scalar_attnt = False
         elif self.field in _GRAPH_FIELDS:
             if dataset_mode == 'ensemble':
@@ -251,7 +248,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         return data
-    
+
     def _initialize_features(self, data):
         # get features from input and create empty tensor to store output
         features = data[self.field]
@@ -261,7 +258,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             device=features.device
         )
         return features, out_features
-    
+
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         # invariant output may be present or not
         # scalarize norms and cos_similarity between l1s
@@ -277,7 +274,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
         return out_features
-    
+
     def _handle_vectorial_output(self, features, data, active_nodes, out_features):
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
@@ -288,7 +285,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             eq_features = self.eq_readout(eq_features, weights)
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features
-    
+
     def _apply_residual_update(self, out_features, data):
         assert self._resnet_update_coeff is not None
         old_features = data[self.out_field]
@@ -374,7 +371,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_output_dimension=self.n_scalars_out,
                 mlp_nonlinearity=None,
             )
-        
+
         if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.film_vectorial = FiLMFunction(
                 mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
@@ -382,7 +379,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_output_dimension=self.eq_readout.weight_numel,
                 mlp_nonlinearity=None,
             )
-    
+
     def _initialize_features(self, data):
         # get features from input and create empty tensor to store output
         features, out_features = super()._initialize_features(data)
@@ -391,7 +388,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         features = self.fc1(features)
         features = self.film2(features, conditioning)
         return features, out_features
-    
+
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)
         out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
@@ -399,7 +396,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
             data[self.conditioning_field],
         )
         return out_features
-    
+
     def _handle_vectorial_output(self, features, data, active_nodes, out_features):
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
