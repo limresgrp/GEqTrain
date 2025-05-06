@@ -220,8 +220,15 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         else:
             raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
 
+        if self.n_scalars_in == 0:
+            scalar_attnt = False
+
+        if not self.has_invariant_output and self.has_equivariant_output and self.eq_has_internal_weights:
+            scalar_attnt = False
+
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
+            assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
 
@@ -238,6 +245,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         else:
             active_nodes = torch.arange(len(features), device=features.device)
+
+        if self.scalar_attnt:
+            features = self._apply_scalar_attnt(features, data)
 
         if self.has_invariant_output:
             out_features = self._handle_invariant_output(features, data, active_nodes, out_features)
@@ -259,19 +269,19 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         )
         return features, out_features
 
+    def _apply_scalar_attnt(self, features, data):
+        split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
+        scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
+        scalars = self.ensemble_attnt1(scalars, data)
+        scalars = self.ensemble_attnt2(scalars, data)
+        features = torch.cat((scalars, equiv), dim=-1)
+        return features
+
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         # invariant output may be present or not
         # scalarize norms and cos_similarity between l1s
         # if self.use_l1_scalarizer:
         #     data = self.l1_scalarizer(data)
-
-        if self.scalar_attnt:
-            split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
-            scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
-            scalars = self.ensemble_attnt1(scalars, data)
-            scalars = self.ensemble_attnt2(scalars, data)
-            features = torch.cat((scalars, equiv), dim=-1)
-
         out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
         return out_features
 
