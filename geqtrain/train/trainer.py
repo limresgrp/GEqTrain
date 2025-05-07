@@ -1419,7 +1419,7 @@ class Trainer:
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
-                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, self.is_master)
+                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, 0 if not self.is_ddp else self.rank)
                     if self.is_master:
                         self.gradnorms.append(grad_norm.item())
                         self.gradnorms_clip.append(float(max_grad_norm))
