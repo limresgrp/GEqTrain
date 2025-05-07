@@ -343,7 +343,7 @@ class AtomicData(Data):
     def __cat_dim__(self, key, value, graph_fields):
         if key == AtomicDataDict.EDGE_INDEX_KEY:
             return 1  # always cat in the edge dimension
-        elif key in graph_fields:
+        elif key in graph_fields.union(_GRAPH_FIELDS):
             # graph-level properties and so need a new batch dimension
             return None
         return 0  # cat along node/edge dimension

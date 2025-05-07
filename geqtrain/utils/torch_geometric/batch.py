@@ -37,7 +37,7 @@ class Batch(Data):
         self.__num_graphs__ = None
 
     @classmethod
-    def from_data_list(cls, data_list, graph_fields, follow_batch=[], exclude_keys=[]):
+    def from_data_list(cls, data_list, graph_fields=set(), follow_batch=[], exclude_keys=[]):
         r"""Constructs a batch object from a python list holding
         :class:`torch_geometric.data.Data` objects.
         The assignment vector :obj:`batch` is created on the fly.

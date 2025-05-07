@@ -497,6 +497,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             graph_fields, fixed_fields = parse_attrs(
                 _attributes=self.graph_attributes,
                 _fields=graph_fields,
+                _fixed_fields=fixed_fields,
             )
 
             # check keys and ensure 1d arrays become 2d with shape (d, 1)
