@@ -69,7 +69,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         self.use_masking = use_masking
         self.fields_to_mask = fields_to_mask
         self._numerical_attrs = []
-        self._attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
+        self.attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
         for field, values in attributes.items():
 
@@ -89,7 +89,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
                 torch.nn.init.xavier_uniform_(emb_module.weight)
                 emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
 
-                self._attr_modules[field] = emb_module
+                self.attr_modules[field] = emb_module
 
         irreps_out = {self.out_field: Irreps([(output_embedding_dim, (0, 1))])} # output_embedding_dim scalars (l=0) with even parity
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
@@ -98,7 +98,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
     @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
-        for attribute_name, emb_layer in self._attr_modules.items():
+        for attribute_name, emb_layer in self.attr_modules.items():
             x = data[attribute_name].squeeze(-1)
 
             if self.use_masking and attribute_name in self.fields_to_mask:

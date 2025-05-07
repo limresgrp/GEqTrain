@@ -150,42 +150,74 @@ class LayerNorm(nn.Module):
 
 
 
+# class AdaLN(nn.Module):
+#     """Adaptive Layer Normalization: https://arxiv.org/pdf/2212.09748
+#     Rather than directly learn dimensionwise scale and shift parameters γ and β, we regress
+#     them from the sum of the embedding vectors of t and c.
+#     """
+
+#     def __init__(self, dim, cond_dim, activation='sigmoid'):
+#         """Initialize the adaptive layer normalization.
+
+#         Parameters
+#         ----------
+#         dim : int
+#             The input dimension.
+#         cond_dim : int
+#             The single condition dimension.
+
+#         """
+#         super().__init__()
+#         self.x_norm     = LayerNorm(dim, elementwise_affine=False, bias=False)
+#         self.cond_norm  = LayerNorm(cond_dim, bias=False)
+#         self.cond_lin_proj_with_bias = nn.Linear(cond_dim, dim)
+#         self.cond_lin_proj = nn.Linear(cond_dim, dim, bias=False)
+
+#         activations = {
+#             'sigmoid': (sigmoid, 0),
+#             'tanh':    (tanh,    1),
+#         }
+#         self.act, self.act_off = activations.get(activation)
+
+#     def forward(self, x, cond):
+#         # apply prenorms
+#         x     = self.x_norm(x)
+#         cond  = self.cond_norm(cond)
+
+#         # get gating coeffs and bias as func of cond
+#         scale = self.act(self.cond_lin_proj_with_bias(cond)) + self.act_off # cond_as_gating_coeffs
+#         shift = self.cond_lin_proj(cond) # cond_as_shift
+
+#         return scale * x + shift
+
+
+
+
 class AdaLN(nn.Module):
     """Adaptive Layer Normalization: https://arxiv.org/pdf/2212.09748
     Rather than directly learn dimensionwise scale and shift parameters γ and β, we regress
     them from the sum of the embedding vectors of t and c.
     """
 
-    def __init__(self, dim, cond_dim, activation='sigmoid'):
+    def __init__(self, dim, dim_single_cond):
         """Initialize the adaptive layer normalization.
 
         Parameters
         ----------
         dim : int
             The input dimension.
-        cond_dim : int
+        dim_single_cond : int
             The single condition dimension.
 
         """
         super().__init__()
-        self.x_norm     = LayerNorm(dim, elementwise_affine=False, bias=False)
-        self.cond_norm  = LayerNorm(cond_dim, bias=False)
-        self.cond_lin_proj_with_bias = nn.Linear(cond_dim, dim)
-        self.cond_lin_proj = nn.Linear(cond_dim, dim, bias=False)
+        self.a_norm = LayerNorm(dim, elementwise_affine=False, bias=False)
+        self.s_norm = LayerNorm(dim_single_cond, bias=False)
+        self.s_scale = nn.Linear(dim_single_cond, dim)
+        self.s_bias = nn.Linear(dim_single_cond, dim, bias=False)
 
-        activations = {
-            'sigmoid': (sigmoid, 0),
-            'tanh':    (tanh,    1),
-        }
-        self.act, self.act_off = activations.get(activation)
-
-    def forward(self, x, cond):
-        # apply prenorms
-        x     = self.x_norm(x)
-        cond  = self.cond_norm(cond)
-
-        # get gating coeffs and bias as func of cond
-        scale = self.act(self.cond_lin_proj_with_bias(cond)) + self.act_off # cond_as_gating_coeffs
-        shift = self.cond_lin_proj(cond) # cond_as_shift
-
-        return scale * x + shift
+    def forward(self, a, s):
+        a = self.a_norm(a)
+        s = self.s_norm(s)
+        a = sigmoid(self.s_scale(s)) * a + self.s_bias(s)
+        return a
