@@ -494,7 +494,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
 
             # graph fields
-            graph_fields, _ = parse_attrs(
+            graph_fields, fixed_fields = parse_attrs(
                 _attributes=self.graph_attributes,
                 _fields=graph_fields,
             )

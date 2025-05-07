@@ -1871,6 +1871,8 @@ class Trainer:
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
 
+        dl_kwargs['graph_fields'] = _GRAPH_FIELDS # needed for ddp
+
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
             dataset=self.dataset_train,
@@ -1889,6 +1891,7 @@ class Trainer:
                 batch_size=self.validation_batch_size,
                 shuffle=False,
             ))
+
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,

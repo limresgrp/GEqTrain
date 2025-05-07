@@ -132,6 +132,7 @@ def fresh_start(rank: int, world_size: int, config: dict, train_dataset, validat
         # Necessary for mp.spawn
         assert isinstance(config, dict), f"config must be of type Dict. It is of type {type(config)}"
         config = Config.from_dict(config)
+        _set_global_options(config) # need to update for each rank
 
         if config.use_dt:
             setup_distributed_training(rank, world_size)

@@ -340,14 +340,13 @@ class AtomicData(Data):
     def irreps(self):
         return self.__irreps__
 
-    def __cat_dim__(self, key, value):
+    def __cat_dim__(self, key, value, graph_fields):
         if key == AtomicDataDict.EDGE_INDEX_KEY:
             return 1  # always cat in the edge dimension
-        elif key in _GRAPH_FIELDS:
+        elif key in graph_fields:
             # graph-level properties and so need a new batch dimension
             return None
-        else:
-            return 0  # cat along node/edge dimension
+        return 0  # cat along node/edge dimension
 
 def neighbor_list(
     pos: torch.Tensor,
