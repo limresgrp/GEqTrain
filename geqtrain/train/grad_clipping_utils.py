@@ -29,16 +29,16 @@ class Queue():
         return np.std(self.items)
 
 @torch.no_grad()
-def gradient_clipping(model, gradnorm_queue, max_gradient_norm, is_master):
+def gradient_clipping(model, gradnorm_queue, max_gradient_norm, rank):
 
     if gradnorm_queue.is_empty():
+        # at first step max_norm=1.0 for smoothing out start of train
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2.0)
         gradnorm_queue.add(float(grad_norm))
-        return grad_norm, max_gradient_norm
+        return grad_norm, 1.0
 
-    # Allow gradient norm to be 150% + 2 * stdev of the recent history.
-    # max_grad_norm = 1.5 * gradnorm_queue.mean() + 2 * gradnorm_queue.std()
-    max_grad_norm = min(max_gradient_norm, gradnorm_queue.median()) # + gradnorm_queue.std() # this should be aroudn 83.85% acceptance (if assuming gradients ~Normal)
+    # clip at median on moving window: smoothest option robust to outliers
+    max_grad_norm = min(max_gradient_norm, gradnorm_queue.median())
 
     # Clips gradient and returns the norm
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm, norm_type=2.0)
@@ -48,7 +48,6 @@ def gradient_clipping(model, gradnorm_queue, max_gradient_norm, is_master):
     else:
         gradnorm_queue.add(float(grad_norm))
 
-    if is_master and float(grad_norm) > max_grad_norm:
-        print(f'Clipped gradient with value {grad_norm:.1f} '
-              f'while allowed {max_grad_norm:.1f}')
+    if float(grad_norm) > max_grad_norm:
+        print(f'Rank {rank} clipped gradient with value {grad_norm:.1f} while allowed {max_grad_norm:.1f}')
     return grad_norm, max_grad_norm
