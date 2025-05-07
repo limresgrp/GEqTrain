@@ -134,7 +134,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 elif mlp_nonlinearity == "silu":
                     nonlin_const = normalize2mom(nonlinearity).cst
                 elif mlp_nonlinearity == "swiglu":
-                    nonlin_const = 1.55
+                    nonlin_const = 1.26876575 #1.55 # this is important for swiglu
 
         if bias is not None:
             has_bias = True
@@ -160,12 +160,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"
                     modules.append((f"dropout_{layer_index}", torch.nn.Dropout(dropout)))
 
-            if layer_index == 0 and self.use_layer_norm:
-                modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
-
             if zero_init_last_layer_weights and is_last_layer:
                 # Scale the weights of the last layer by 1.e-1
                 norm_const *= 1.e-1
+
+            if self.use_layer_norm:
+                modules.insert(0, (f"norm_{layer_index}", torch.nn.LayerNorm(h_in)))
 
             # initialize weights
             with torch.no_grad():
