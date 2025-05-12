@@ -1,10 +1,10 @@
 # general
-root: /scratch/angiod/GEqTrain/qm9
+root: /capstor/scratch/cscs/dangiole/GEqTrain/qm9
 run_name: debug.alpha
 experiment_description: "Alpha - 100k train samples. 19.4k valid samples."
 
-seed: 0
-dataset_seed: 0
+seed: 42
+dataset_seed: 42
 append: true
 default_dtype: float32
 
@@ -18,7 +18,7 @@ use_weight_norm: false # Cannot jit compile when using this
 use_mace_product: true
 
 # - cutoffs - #
-r_max: 7.0
+r_max: 12.0
 
 # - radial basis - #
 edge_radial_attrs_basis: geqtrain.nn.BesselBasisVec
@@ -31,11 +31,11 @@ parity: o3_full
 
 # --- interaction layers --- #
 num_layers: 2
-latent_dim: 64
+latent_dim: 128
 env_embed_multiplicity: 8
 
 latent: geqtrain.nn.ScalarMLPFunction
-mlp_latent_dimensions: [256]
+mlp_latent_dimensions: [1024]
 mlp_nonlinearity: swiglu
 
 # - local attention - #
@@ -69,26 +69,28 @@ heads:
 
 # --- D A T A S E T --- #
 
-dataset_num_workers: 1
+dataset_num_workers: 32
 
 # - train - #
 dataset_list: # if you provide only training dataset, it will be split 80-20% in train and validation
   - dataset: npz
-    dataset_input: /my_path/to/qm9/processed/
+    inmemory: true
+    dataset_input: /capstor/scratch/cscs/dangiole/qm9/npz/train
     key_mapping:
-      pos: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
+      pos: pos
       x: node_input_features
       y: graph_output
       z: node_types
 
-# validation_dataset_list: # If you also provide the validation, this will be used as validation and the full training as training
-#   - validation_dataset: npz
-#     validation_dataset_input: /my_path/to/qm9/processed_valid
-#     key_mapping:
-#       pos: pos
-#       x: node_input_features
-#       y: graph_output
-#       z: node_types
+validation_dataset_list: # If you also provide the validation, this will be used as validation and the full training as training
+  - validation_dataset: npz
+    inmemory: true
+    validation_dataset_input: /capstor/scratch/cscs/dangiole/qm9/npz/valid
+    key_mapping:
+      pos: pos
+      x: node_input_features
+      y: graph_output
+      z: node_types
 
 # - register fields - #
 node_fields:
@@ -156,15 +158,15 @@ wandb_watch_kwargs:
 
 # --- T R A I N I N G --- #
 
-batch_size: 128
+batch_size: 64
 validation_batch_size: 128
-dataloader_num_workers: 4
+dataloader_num_workers: 16
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
 skip_chunking: true
 batch_max_atoms: 10000             # Limit the maximum number of nodes of a graph to be loaded on memory in a single batch
 
-max_epochs: 10000
+max_epochs: 500
 learning_rate: 1.e-4
 train_val_split: random
 shuffle: true
@@ -178,11 +180,13 @@ optimizer_params:
   - 0.9
   - 0.999
   eps: 1.0e-08
-  weight_decay: 1.e-4
+  weight_decay: 0.0
 max_gradient_norm: 10.
+# use_grokfast: true
+use_warmup: true
+warmup_epochs: 10
 
 lr_scheduler_name: CosineAnnealingLR
-
 # # lr scheduler, drop lr if no improvement for tot epochs
 # lr_scheduler_name: ReduceLROnPlateau
 # lr_scheduler_patience: 3

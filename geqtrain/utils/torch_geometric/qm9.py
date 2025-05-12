@@ -296,3 +296,15 @@ class QM9:
                 name=name,
                 idx=i,
             )
+    
+        print(f'''Update your GEqTrain config yaml file with the following:
+
+            dataset_list:
+                - dataset: npz
+                    dataset_input: {self.processed_dir}
+                    key_mapping:
+                        pos: pos
+                        x: node_input_features
+                        y: graph_output
+                        z: node_types
+        ''')

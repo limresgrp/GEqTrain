@@ -44,9 +44,9 @@ else
     choose_cuda_version
 
     # Install torch and torch-scatter with the selected CUDA version
-    pip3 install torch==2.5.1 --index-url https://download.pytorch.org/whl/$CUDA_VERSION
+    python3 -m pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/$CUDA_VERSION
     TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
-    pip3 install torch-scatter -f https://data.pyg.org/whl/torch-$TORCH_VERSION.html
+    python3 -m pip install torch-scatter -f https://data.pyg.org/whl/torch-$TORCH_VERSION.html
 fi
 
 # Install the current package
