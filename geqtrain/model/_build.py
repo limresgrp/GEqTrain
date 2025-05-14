@@ -122,11 +122,10 @@ def model_from_config(
         weights_prms.append(v.pop("weights", None))
         prms.append(v)
 
-    # checks
-    if 'progress' in config and model_for_fine_tuning:
+    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
+    if 'progress' in config and model_for_fine_tuning: # checks
         raise ValueError("cannot restart and fine-tune at the same time, if you want to fine-tune, do a fresh start")
 
-    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
     weights_prms_provided = any(flatten_list(weights_prms))
     if not model_for_fine_tuning and weights_prms_provided:
         raise ValueError("weights_params provided in model_builders but fine_tune model is not provided")
