@@ -703,7 +703,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
-            k: v for k, v in mapped.items()
+            k: fix_batch_dim(v) for k, v in mapped.items()
             if  self.node_attributes.get(k, {}).get('fixed', False)
             or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)

@@ -140,10 +140,9 @@ def _process_dict(kwargs, ignore_fields):
             # a data dimension to play nice with irreps
             kwargs[k] = v
 
+    num_frames = 1
     if AtomicDataDict.BATCH_KEY in kwargs:
         num_frames = kwargs[AtomicDataDict.BATCH_KEY].max() + 1
-    else:
-        num_frames = 1
 
     for k, v in kwargs.items():
         if k in ignore_fields: # check if k from red_kwords from yaml has to be ingnored

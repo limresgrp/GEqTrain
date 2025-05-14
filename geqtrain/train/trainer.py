@@ -204,8 +204,7 @@ def prepare_chunked_input_data(
     }
 
     if chunk:
-        batch_chunk_index = batch_chunk_index[:, ~torch.isin(
-            batch_chunk_index[0], already_computed_nodes)]
+        batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
     batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
     if len(batch_chunk_center_node_idcs) == 0:
         return None, None, None
@@ -223,12 +222,21 @@ def prepare_chunked_input_data(
                 unique_set.add(num.item())
 
                 if len(unique_set) >= batch_max_atoms:
-                    return batch_chunk_index[0, :i+1].unique()[:-offset]
-            return batch_chunk_index[0].unique()[:-offset]
+                    node_center_idcs = batch_chunk_index[0, :i+1].unique()
+                    if len(node_center_idcs) == 1:
+                        num_nodes = torch.isin(batch_chunk_index[0], node_center_idcs).sum()
+                        if num_nodes > batch_max_atoms:
+                            raise ValueError(
+                                f"At least one node in the graph has more neighbors ({num_nodes}) "
+                                f"than the maximum allowed number of atoms in a batch ({batch_max_atoms}). "
+                                "Please increase the value of 'batch_max_atoms' in the config file."
+                            )
+                        return node_center_idcs
+                    return node_center_idcs[:-offset]
+            return batch_chunk_index[0].unique()
 
         def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
-            node_center_idcs = get_node_center_idcs(
-                batch_chunk_index, batch_max_atoms, offset)
+            node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
             edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
             return edge_filter
 
@@ -250,8 +258,7 @@ def prepare_chunked_input_data(
             batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
         for per_node_output_key in per_node_outputs_keys:
             chunk_per_node_outputs_value = batch[per_node_output_key].clone()
-            mask = torch.ones_like(
-                chunk_per_node_outputs_value, dtype=torch.bool)
+            mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
             mask[batch_chunk_index[0].unique()] = False
             chunk_per_node_outputs_value[mask] = torch.nan
             batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
@@ -1866,6 +1873,7 @@ class Trainer:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
+                # timeout=0,
             ))
 
         if using_multiple_workers:

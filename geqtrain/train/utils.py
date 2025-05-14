@@ -2,7 +2,7 @@ import re
 import logging
 from typing import List
 import torch
-from typing import Dict, Optional, Tuple, Union
+from typing import Tuple, Union
 from geqtrain.data import dataset_from_config
 from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
 from geqtrain.utils import Config
