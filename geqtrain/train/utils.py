@@ -2,10 +2,12 @@ import re
 import logging
 from typing import List
 import torch
-from typing import Dict, Optional, Tuple, Union
+from typing import Tuple, Union
 from geqtrain.data import dataset_from_config
 from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
 from geqtrain.utils import Config
+from geqtrain.data import register_fields
+from geqtrain.utils.auto_init import instantiate
 
 def parse_loss_metrics_dict(components: dict):
     # parses loss and metric yaml blocks
@@ -104,5 +106,9 @@ def load_trainer_and_model(rank: int, world_size: int, config: Config, is_restar
         else:
             from geqtrain.train import Trainer
             trainer, model = Trainer.from_config(config)
+
+    # Register fields:
+    # DO NOT REMOVE since needed for ddp
+    instantiate(register_fields, all_args=config)
 
     return trainer, model

@@ -140,10 +140,9 @@ def _process_dict(kwargs, ignore_fields):
             # a data dimension to play nice with irreps
             kwargs[k] = v
 
+    num_frames = 1
     if AtomicDataDict.BATCH_KEY in kwargs:
         num_frames = kwargs[AtomicDataDict.BATCH_KEY].max() + 1
-    else:
-        num_frames = 1
 
     for k, v in kwargs.items():
         if k in ignore_fields: # check if k from red_kwords from yaml has to be ingnored
@@ -151,12 +150,12 @@ def _process_dict(kwargs, ignore_fields):
 
         # check if it must be added the batch size, nb: bs always = 1 when reading data
         if len(v.shape) == 0:
-            # kwargs[k] = v.unsqueeze(-1)
+            kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
         # check if it must be added the batch size, nb: bs always = 1 when reading data
         if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
-            # kwargs[k] = v.unsqueeze(-1)
+            kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 
         # consistency checks
@@ -290,7 +289,7 @@ class AtomicData(Data):
                 raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
             # Remove the '_mask' key from kwargs
             del kwargs[mask_key]
-        
+
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
 
@@ -340,14 +339,13 @@ class AtomicData(Data):
     def irreps(self):
         return self.__irreps__
 
-    def __cat_dim__(self, key, value):
+    def __cat_dim__(self, key, value, graph_fields):
         if key == AtomicDataDict.EDGE_INDEX_KEY:
             return 1  # always cat in the edge dimension
-        elif key in _GRAPH_FIELDS:
+        elif key in graph_fields.union(_GRAPH_FIELDS):
             # graph-level properties and so need a new batch dimension
             return None
-        else:
-            return 0  # cat along node/edge dimension
+        return 0  # cat along node/edge dimension
 
 def neighbor_list(
     pos: torch.Tensor,

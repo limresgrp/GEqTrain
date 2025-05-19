@@ -37,7 +37,7 @@ class Batch(Data):
         self.__num_graphs__ = None
 
     @classmethod
-    def from_data_list(cls, data_list, follow_batch=[], exclude_keys=[]):
+    def from_data_list(cls, data_list, graph_fields=set(), follow_batch=[], exclude_keys=[]):
         r"""Constructs a batch object from a python list holding
         :class:`torch_geometric.data.Data` objects.
         The assignment vector :obj:`batch` is created on the fly.
@@ -78,7 +78,7 @@ class Batch(Data):
 
                 # Gather the size of the `cat` dimension.
                 size = 1
-                cat_dim = data.__cat_dim__(key, data[key])
+                cat_dim = data.__cat_dim__(key, data[key], graph_fields)
                 # 0-dimensional tensors have no dimension along which to
                 # concatenate, so we set `cat_dim` to `None`.
                 if isinstance(item, Tensor) and item.dim() == 0:
@@ -141,7 +141,7 @@ class Batch(Data):
             if any(x is None for x in items):
                 raise ValueError(f"Found a `None` in the provided data objects for batching in key `{key}`")
             item = items[0]
-            cat_dim = ref_data.__cat_dim__(key, item)
+            cat_dim = ref_data.__cat_dim__(key, item, graph_fields)
             cat_dim = 0 if cat_dim is None else cat_dim
             if isinstance(item, Tensor):
                 try:

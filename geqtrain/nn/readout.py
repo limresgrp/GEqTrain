@@ -150,7 +150,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         assert self.n_scalars_in > 0
 
         self.n_scalars_out = out_irreps.ls.count(0)
-        scalar_attnt = False
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
@@ -208,12 +207,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # if self.use_l1_scalarizer:
         #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
-        # todo: if self.field == AtomicDataDict.GRAPH_FEATURES_KEY then use ensemble index if present in yaml
-        # todo: if self.field == AtomicDataDict.edge then use edge_centers
-        # todo: if self.field == AtomicDataDict.node features then use 'batch'
         if self.field in _NODE_FIELDS:
             idx_key = 'batch'
-        elif self.field in _EDGE_FIELDS: # edge cant attention; node/ensemble can
+        elif self.field in _EDGE_FIELDS: # edge can't attention; node/ensemble can
+            # todo: if self.field == AtomicDataDict.edge then use edge_centers
             scalar_attnt = False
         elif self.field in _GRAPH_FIELDS:
             if dataset_mode == 'ensemble':
@@ -223,8 +220,15 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         else:
             raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
 
+        if self.n_scalars_in == 0:
+            scalar_attnt = False
+
+        if not self.has_invariant_output and self.has_equivariant_output and self.eq_has_internal_weights:
+            scalar_attnt = False
+
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
+            assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
 
@@ -242,6 +246,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         else:
             active_nodes = torch.arange(len(features), device=features.device)
 
+        if self.scalar_attnt:
+            features = self._apply_scalar_attnt(features, data)
+
         if self.has_invariant_output:
             out_features = self._handle_invariant_output(features, data, active_nodes, out_features)
         if self.has_equivariant_output and self.reshape_in is not None:
@@ -251,7 +258,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         return data
-    
+
     def _initialize_features(self, data):
         # get features from input and create empty tensor to store output
         features = data[self.field]
@@ -261,23 +268,23 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             device=features.device
         )
         return features, out_features
-    
+
+    def _apply_scalar_attnt(self, features, data):
+        split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
+        scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
+        scalars = self.ensemble_attnt1(scalars, data)
+        scalars = self.ensemble_attnt2(scalars, data)
+        features = torch.cat((scalars, equiv), dim=-1)
+        return features
+
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         # invariant output may be present or not
         # scalarize norms and cos_similarity between l1s
         # if self.use_l1_scalarizer:
         #     data = self.l1_scalarizer(data)
-
-        if self.scalar_attnt:
-            split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
-            scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
-            scalars = self.ensemble_attnt1(scalars, data)
-            scalars = self.ensemble_attnt2(scalars, data)
-            features = torch.cat((scalars, equiv), dim=-1)
-
         out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
         return out_features
-    
+
     def _handle_vectorial_output(self, features, data, active_nodes, out_features):
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
@@ -288,7 +295,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             eq_features = self.eq_readout(eq_features, weights)
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features
-    
+
     def _apply_residual_update(self, out_features, data):
         assert self._resnet_update_coeff is not None
         old_features = data[self.out_field]
@@ -374,7 +381,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_output_dimension=self.n_scalars_out,
                 mlp_nonlinearity=None,
             )
-        
+
         if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.film_vectorial = FiLMFunction(
                 mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
@@ -382,7 +389,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_output_dimension=self.eq_readout.weight_numel,
                 mlp_nonlinearity=None,
             )
-    
+
     def _initialize_features(self, data):
         # get features from input and create empty tensor to store output
         features, out_features = super()._initialize_features(data)
@@ -391,7 +398,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         features = self.fc1(features)
         features = self.film2(features, conditioning)
         return features, out_features
-    
+
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)
         out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
@@ -399,7 +406,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
             data[self.conditioning_field],
         )
         return out_features
-    
+
     def _handle_vectorial_output(self, features, data, active_nodes, out_features):
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights

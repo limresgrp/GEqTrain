@@ -95,7 +95,6 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
         self._has_numericals = len(self._numerical_attrs) > 0
 
-
     @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []

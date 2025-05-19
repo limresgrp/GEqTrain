@@ -28,7 +28,7 @@ def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
                           name: my_interaction
                           weights: tune # load|tune|freeze
                           ...other params
-                    
+
                     Load single module class 'InteractionModule' (found by default inside geqtrain.nn)
                     and register in the SequentialGraphNetwork with name 'my_interaction'.
                     If weights are provided, try to load them into this module.
@@ -40,7 +40,7 @@ def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
                 """ Option 2
                     model_builders:
                         - Heads: tune # load|tune|freeze
-                    
+
                     Load packaged model function 'Heads' (found by default inside geqtrain.model)
                     If weights are provided, try to load them into this module.
                     Use specified 'fine_tune_lr' learning rate for weights of modules packaged into this model.
@@ -53,7 +53,7 @@ def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
             """ Option 3
                 model_builders:
                     - Heads
-                
+
                 Load packaged model function 'Heads' (found by default inside geqtrain.model)
                 Initialize weights from scratch
             """
@@ -123,10 +123,11 @@ def model_from_config(
         prms.append(v)
 
     # checks
+    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
+
     if 'progress' in config and model_for_fine_tuning:
         raise ValueError("cannot restart and fine-tune at the same time, if you want to fine-tune, do a fresh start")
 
-    model_for_fine_tuning = config.get("fine_tune", False) # if present, pointed .pth has been already validated
     weights_prms_provided = any(flatten_list(weights_prms))
     if not model_for_fine_tuning and weights_prms_provided:
         raise ValueError("weights_params provided in model_builders but fine_tune model is not provided")
@@ -146,7 +147,7 @@ def model_from_config(
             params["name"] = _prms.pop("name")
             for _p, _v in _prms.items():
                 config.update({f'{params["name"]}_{_p}': _v})
-        
+
         pnames = inspect.signature(builder).parameters # get kwargs of factory method signature
         if "initialize" in pnames:
             params["initialize"] = initialize

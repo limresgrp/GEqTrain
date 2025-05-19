@@ -101,6 +101,7 @@ def run_inference(
     ignore_chunk_keys: List[str] = [],
     dropout_edges: float = 0.,
     requires_grad: bool = False,
+    is_ddp: bool = False,
     **kwargs,
 ):
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
@@ -144,6 +145,19 @@ def run_inference(
     with cm, precision:
         out = model(input_data)
         del input_data
+
+    # if a module of model has ref_data_keys as attr
+    # then take the string associated to that field and
+    # write it into ref_data as {str}+_target
+    try: # TODO check this and make it compatible with all models
+        for (name, module) in (model.module if is_ddp else model):
+            if hasattr(module, 'ref_data_keys'):
+                for k in module.ref_data_keys:
+                    target = out[k]
+                    key_clean = k.replace("_target", "")
+                    ref_data[key_clean] = target
+    except:
+        pass
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
@@ -193,8 +207,7 @@ def prepare_chunked_input_data(
     }
 
     if chunk:
-        batch_chunk_index = batch_chunk_index[:, ~torch.isin(
-            batch_chunk_index[0], already_computed_nodes)]
+        batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
     batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
     if len(batch_chunk_center_node_idcs) == 0:
         return None, None, None
@@ -212,12 +225,21 @@ def prepare_chunked_input_data(
                 unique_set.add(num.item())
 
                 if len(unique_set) >= batch_max_atoms:
-                    return batch_chunk_index[0, :i+1].unique()[:-offset]
-            return batch_chunk_index[0].unique()[:-offset]
+                    node_center_idcs = batch_chunk_index[0, :i+1].unique()
+                    if len(node_center_idcs) == 1:
+                        num_nodes = torch.isin(batch_chunk_index[0], node_center_idcs).sum()
+                        if num_nodes > batch_max_atoms:
+                            raise ValueError(
+                                f"At least one node in the graph has more neighbors ({num_nodes}) "
+                                f"than the maximum allowed number of atoms in a batch ({batch_max_atoms}). "
+                                "Please increase the value of 'batch_max_atoms' in the config file."
+                            )
+                        return node_center_idcs
+                    return node_center_idcs[:-offset]
+            return batch_chunk_index[0].unique()
 
         def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
-            node_center_idcs = get_node_center_idcs(
-                batch_chunk_index, batch_max_atoms, offset)
+            node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
             edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
             return edge_filter
 
@@ -239,8 +261,7 @@ def prepare_chunked_input_data(
             batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
         for per_node_output_key in per_node_outputs_keys:
             chunk_per_node_outputs_value = batch[per_node_output_key].clone()
-            mask = torch.ones_like(
-                chunk_per_node_outputs_value, dtype=torch.bool)
+            mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
             mask[batch_chunk_index[0].unique()] = False
             chunk_per_node_outputs_value[mask] = torch.nan
             batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
@@ -449,7 +470,7 @@ class Trainer:
         # Initialize parameters and store them in self.kwargs
         # Deep copy the provided keyword arguments to avoid unintended modifications
         self.kwargs = deepcopy(kwargs)
-        
+
         # Iterate over all initialization keys (parameters of the constructor)
         # and set them as attributes of the instance
         self._local_kwargs = {}
@@ -473,7 +494,7 @@ class Trainer:
         # Call initialization methods in order
         for init_method in self.init_order:
             init_method()
-        
+
         self.logger.info(f"Torch device: {self.device}")
 
     def _initialize_parameters(self, kwargs):
@@ -498,7 +519,7 @@ class Trainer:
 
         if hasattr(self, 'rank'):
             assert self.device == self.rank
-        
+
         self.torch_device = torch.device(self.device)
 
     def _init_randomness(self):
@@ -701,7 +722,7 @@ class Trainer:
 
     def _init_optimizer(self):
         assert self.model is not None, "Model must not be None. Please ensure the model is properly initialized."
-        
+
         # get all params that require grad
         param_dict = {name: param for name, param in self.model.named_parameters() if param.requires_grad}
         # if you assign one or more tags to a parameter (e.g. param.tags = ['dampen']),
@@ -809,7 +830,7 @@ class Trainer:
                 self.warmup_epochs = int((self.max_epochs / 100) * float(match.group(1)))
             else:
                 raise ValueError(f"Invalid {match.string} format provided, it must be eg: '7.1%' in yaml, with ''")
-        
+
         if self.warmup_epochs > 0:
             import pytorch_warmup as warmup
             self.warmup_steps = self.num_optim_steps * self.warmup_epochs
@@ -891,7 +912,7 @@ class Trainer:
     @property
     def init_epoch_logger(self):
         return logging.getLogger(self.init_epoch_log)
-    
+
     @property
     def stop_cond(self):
         """kill the training early"""
@@ -1177,7 +1198,7 @@ class Trainer:
         model = kwargs.get("model")
         self._set_model(model=model)
         self._init_model_dependent_objects()
-    
+
     def _set_model(self, model):
         self.model = model
         self.model.to(self.torch_device)
@@ -1193,7 +1214,7 @@ class Trainer:
                     return grad
 
                 p.register_hook(sanitize_fn)
-        
+
         self.num_weights = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Number of weights: {self.num_weights}")
         self.logger.info(f"Number of trainable weights: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
@@ -1367,6 +1388,7 @@ class Trainer:
                 ignore_chunk_keys=self.ignore_chunk_keys,
                 dropout_edges=self.dropout_edges if not validation else 0.,
                 requires_grad=self.model_requires_grads,
+                is_ddp=self.is_ddp,
             )
 
             loss, loss_contrib = self.loss(pred=out, ref=ref_data, epoch=self.iepoch)
@@ -1393,6 +1415,8 @@ class Trainer:
             del ref_data
 
             if not validation:
+                # ref for how ddp works: https://pytorch.org/docs/stable/notes/ddp.html#internal-design;
+                # TLDR: every process must call gradfilter_ema (if grokfast), gradient_clipping, optim.step() ema.update(), lr_sched_step and accumulation_counter++
                 loss.backward()
                 self.accumulation_counter += 1
 
@@ -1852,10 +1876,13 @@ class Trainer:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
+                # timeout=0,
             ))
 
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
+
+        dl_kwargs['graph_fields'] = _GRAPH_FIELDS # needed for ddp
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
@@ -1875,6 +1902,7 @@ class Trainer:
                 batch_size=self.validation_batch_size,
                 shuffle=False,
             ))
+
         self.dl_val = DataLoader(
             num_workers=val_dloader_n_workers,
             dataset=self.dataset_val,

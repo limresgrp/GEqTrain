@@ -494,16 +494,17 @@ class AtomicInMemoryDataset(AtomicDataset):
             )
 
             # graph fields
-            graph_fields, _ = parse_attrs(
+            graph_fields, fixed_fields = parse_attrs(
                 _attributes=self.graph_attributes,
                 _fields=graph_fields,
+                _fixed_fields=fixed_fields,
             )
 
             # check keys and ensure 1d arrays become 2d with shape (d, 1)
-            node_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in node_fields.items()  if v is not None}
-            edge_fields  = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in edge_fields.items()  if v is not None}
-            graph_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in graph_fields.items() if v is not None}
-            extra_fields = {k: np.expand_dims(v, axis=-1) if v.ndim == 1 else v for k,v in extra_fields.items() if v is not None}
+            node_fields  = {k:v for k,v in node_fields.items()  if v is not None}
+            edge_fields  = {k:v for k,v in edge_fields.items()  if v is not None}
+            graph_fields = {k:v for k,v in graph_fields.items() if v is not None}
+            extra_fields = {k:v for k,v in extra_fields.items() if v is not None}
 
             all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
             assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
@@ -684,7 +685,7 @@ class NpzDataset(AtomicInMemoryDataset):
         _dir = self.raw_dir + "/" + self.raw_file_names[0]
         print(_dir)
         try:
-            data = np.load(_dir, allow_pickle=True)
+            data = np.load(_dir, allow_pickle=True, mmap_mode='r')
         except:
             logging.error(f"File {_dir} not found")
             raise FileNotFoundError(f"File {_dir} not found")
@@ -702,7 +703,7 @@ class NpzDataset(AtomicInMemoryDataset):
 
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
-            k: v for k, v in mapped.items()
+            k: fix_batch_dim(v) for k, v in mapped.items()
             if  self.node_attributes.get(k, {}).get('fixed', False)
             or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)

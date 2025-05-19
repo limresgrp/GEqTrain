@@ -48,7 +48,7 @@ def apply_residual_stream(skip_residual, latents, new_latents, this_layer_update
         # Normal (non-residual) update
         # index_copy replaces, unlike index_add
         return torch.index_copy(latents, 0, active_edges, new_latents)
-    
+
     assert this_layer_update_coeff is not None
     # At init, we assume new and old to be approximately uncorrelated
     # Thus their variances add
@@ -297,6 +297,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             if self.learn_cutoff_bias:
                 self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
 
+            self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
+
         # - End build modules - #
         out_feat_elems = (irr.ir.dim for irr in out_irreps)
         self.out_feat_elems = sum(out_feat_elems)
@@ -376,6 +378,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
                 new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
 
+            new_latents = self.post_norm(new_latents)
             latents = apply_residual_stream(False, latents, new_latents, layer_update_coefficients[layer_index], active_edges)
 
             # last update on residued features
@@ -577,7 +580,7 @@ class InteractionLayer(torch.nn.Module):
 
         if self.learn_cutoff_bias:
             self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
-        
+
         self.post_norm = torch.nn.LayerNorm(self.latent_dim)
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
