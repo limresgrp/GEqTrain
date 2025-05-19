@@ -149,12 +149,15 @@ def run_inference(
     # if a module of model has ref_data_keys as attr
     # then take the string associated to that field and
     # write it into ref_data as {str}+_target
-    for (name, module) in (model.module if is_ddp else model):
-        if hasattr(module, 'ref_data_keys'):
-            for k in module.ref_data_keys:
-                target = out[k]
-                key_clean = k.replace("_target", "")
-                ref_data[key_clean] = target
+    try: # TODO check this and make it compatible with all models
+        for (name, module) in (model.module if is_ddp else model):
+            if hasattr(module, 'ref_data_keys'):
+                for k in module.ref_data_keys:
+                    target = out[k]
+                    key_clean = k.replace("_target", "")
+                    ref_data[key_clean] = target
+    except:
+        pass
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
