@@ -668,7 +668,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 transforms=transforms,
             )
         except Exception as e:
-            logging.error(f"Error in file {self.raw_file_names}")
+            logging.error(f"Error initializing NpzDataset for file {self.raw_file_names}: {e}")
             raise e
 
     @property
@@ -695,7 +695,7 @@ class NpzDataset(AtomicInMemoryDataset):
         keys.update(list(self.extra_fixed_fields.keys()))
         keys = keys.intersection(set(list(data.keys())))
 
-        mapped = {self.key_mapping.get(k, k): data[k] for k in keys}
+        mapped = {self.key_mapping.get(k, k): data[k] for k in keys} # mapped is list of all keys mapped from npz in dset definition
         for structure_fields in [_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS]:
             for k in structure_fields:
                 if k not in mapped:

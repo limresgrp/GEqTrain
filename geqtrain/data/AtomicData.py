@@ -149,40 +149,44 @@ def _process_dict(kwargs, ignore_fields):
         if k in ignore_fields: # check if k from red_kwords from yaml has to be ingnored
             continue
 
-        # check if it must be added the batch size, nb: bs always = 1 when reading data
-        if len(v.shape) == 0:
-            kwargs[k] = v.unsqueeze(-1)
-            v = kwargs[k]
+        try:
+            # check if it must be added the batch size, nb: bs always = 1 when reading data
+            if len(v.shape) == 0:
+                kwargs[k] = v.unsqueeze(-1)
+                v = kwargs[k]
 
-        # check if it must be added the batch size, nb: bs always = 1 when reading data
-        if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
-            kwargs[k] = v.unsqueeze(-1)
-            v = kwargs[k]
+            # check if it must be added the batch size, nb: bs always = 1 when reading data
+            if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
+                kwargs[k] = v.unsqueeze(-1)
+                v = kwargs[k]
 
-        # consistency checks
-        if (
-            k in _NODE_FIELDS
-            and AtomicDataDict.POSITIONS_KEY in kwargs
-            and v.shape[0] != kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]
-        ):
+            # consistency checks
+            if (
+                k in _NODE_FIELDS
+                and AtomicDataDict.POSITIONS_KEY in kwargs
+                and v.shape[0] != kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]
+            ):
+                raise ValueError(
+                    f"{k} is a node field but has the wrong dimension {v.shape} (first dimension should be {kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]})"
+                )
+            elif (
+                k in _EDGE_FIELDS
+                and AtomicDataDict.EDGE_INDEX_KEY in kwargs
+                and v.shape[0] != kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
+            ):
+                raise ValueError(
+                    f"{k} is a edge field but has the wrong dimension {v.shape}, (first dimension should be {kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]})"
+                )
+            elif k in _GRAPH_FIELDS:
+                if num_frames > 1 and v.shape[0] != num_frames:
+                    str_msg = f"Wrong shape for graph property {k}"
+                    if num_frames > 1: str_msg += "num_frames is greater 1, while it should not"
+                    if v.shape[0] != num_frames: str_msg += f"{v.shape[0]} != {num_frames}, but they should be equal"
+                    raise ValueError(str_msg)
+        except Exception as e:
             raise ValueError(
-                f"{k} is a node field but has the wrong dimension {v.shape} (first dimension should be {kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]})"
-            )
-        elif (
-            k in _EDGE_FIELDS
-            and AtomicDataDict.EDGE_INDEX_KEY in kwargs
-            and v.shape[0] != kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
-        ):
-            raise ValueError(
-                f"{k} is a edge field but has the wrong dimension {v.shape}, (first dimension should be {kwargs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]})"
-            )
-        elif k in _GRAPH_FIELDS:
-            if num_frames > 1 and v.shape[0] != num_frames:
-                str_msg = f"Wrong shape for graph property {k}"
-                if num_frames > 1: str_msg += "num_frames is greater 1, while it should not"
-                if v.shape[0] != num_frames: str_msg += f"{v.shape[0]} != {num_frames}, but they should be equal"
-                raise ValueError(str_msg)
-
+                f"Error processing field {k} with value {v}: {e}"
+            ) from e
 
 class AtomicData(Data):
     """A neighbor graph for points in real space.
