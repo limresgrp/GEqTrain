@@ -57,7 +57,7 @@ class DataLoader(torch.utils.data.DataLoader):
         if "collate_fn" in kwargs:
             del kwargs["collate_fn"]
 
-        self.graph_fields = []
+        self.graph_fields = set()
         if "graph_fields" in kwargs:
             self.graph_fields = kwargs["graph_fields"]
             del kwargs["graph_fields"]
