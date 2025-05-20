@@ -126,7 +126,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.name = name
-        self.is_local = self.name == 'local_interaction'
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -322,7 +321,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        if self.is_local and AtomicDataDict.EDGE_FEATURES_KEY in data:
+        if AtomicDataDict.EDGE_FEATURES_KEY in data:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
         else:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
@@ -336,12 +335,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Vectorized precompute per layer cutoffs
         cutoff_coeffs_all = tanh_cutoff(edge_length, self.per_layer_cutoffs, n=self.tanh_cutoff_n)
 
+        residual_local_env_per_node = None
         for layer_index, layer in enumerate(self.interaction_layers):
 
             # Determine which edges are still in play
             cutoff_coeffs = cutoff_coeffs_all[layer_index]
 
-            latents, inv_latent_cat, eq_features = layer(
+            latents, inv_latent_cat, eq_features, residual_local_env_per_node = layer(
                 data=data,
                 active_edges=active_edges,
                 num_nodes=num_nodes,
@@ -355,6 +355,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 edge_center=edge_center,
                 edge_neighbor=edge_neighbor,
                 this_layer_update_coeff=layer_update_coefficients[layer_index - 1] if layer_index > 0 else None,
+                residual_local_env_per_node=residual_local_env_per_node,
             )
 
         # --- final layer --- #
@@ -480,6 +481,9 @@ class InteractionLayer(torch.nn.Module):
             has_weight=False,
             normalization='component', # 'norm' or 'component'
         )
+
+        self.pre_tp_norm = SO3_LayerNorm(env_embed_irreps)
+
         self.tp_norm = SO3_LayerNorm(o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in full_out_irreps]))
         self.rearrange_scalars = Rearrange('e m s -> e (m s)')
 
@@ -512,6 +516,8 @@ class InteractionLayer(torch.nn.Module):
         ) if len(set(linear_out_irreps.ls)) > 0 else None
         self.latest_linear_out_irreps = linear_out_irreps
 
+        edge_feature_dim = parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps if AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in else 0
+
         if self.layer_index == 0:
             assert previous_latent_dim is None
             # at the first layer, we have no invariants from previous TPs
@@ -521,11 +527,7 @@ class InteractionLayer(torch.nn.Module):
                         # Node invariants for center and neighbor (chemistry)
                         2 * parent.irreps_in[parent.node_invariant_field].num_irreps
                         # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
-                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps
-                            if parent.name == 'local_interaction' and AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
-                            else 0
-                        )
+                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + edge_feature_dim
                     )
                 ),
                 mlp_output_dimension=self.latent_dim,
@@ -631,6 +633,7 @@ class InteractionLayer(torch.nn.Module):
         edge_center,
         edge_neighbor,
         this_layer_update_coeff: Optional[torch.Tensor],
+        residual_local_env_per_node: Optional[torch.Tensor],
     ):
         new_latents = self.latent_mlp(inv_latent_cat)
         # Apply cutoff, which propagates through to everything else
@@ -667,11 +670,16 @@ class InteractionLayer(torch.nn.Module):
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
 
+        if self.layer_index != 0:
+            local_env_per_node += residual_local_env_per_node
+
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
 
         local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
+
+        local_env_per_active_atom = self.pre_tp_norm(local_env_per_active_atom)
 
         if self.use_mace_product:
             local_env_per_active_atom = self.apply_mace(local_env_per_active_atom, node_invariants, active_node_centers)
@@ -701,10 +709,10 @@ class InteractionLayer(torch.nn.Module):
             log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
-            return latents, inv_latent, None
+            return latents, inv_latent, None, None
 
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
         if self.debug and wandb.run is not None:
             log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
-        return latents, inv_latent, eq_features
+        return latents, inv_latent, eq_features, local_env_per_node
