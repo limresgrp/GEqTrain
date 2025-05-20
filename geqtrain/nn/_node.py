@@ -7,7 +7,8 @@ from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 import math
 from typing import Dict, Optional, List
-
+import pickle
+import os
 
 def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     """
@@ -63,6 +64,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         use_masking: bool = True,
         fields_to_mask: List[str] = [],
         irreps_in=None,
+        use_kano_embeddings: bool = True,
     ):
         super().__init__()
         self.out_field = out_field
@@ -71,6 +73,22 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         self._numerical_attrs = []
         self.attr_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer
         output_embedding_dim = 0
+        self.use_kano_embeddings = use_kano_embeddings
+
+        # node_types
+        kano_dims = 0
+        if self.use_kano_embeddings and out_field == AtomicDataDict.NODE_ATTRS_KEY:
+            # assert presence of atom number eg 6 for carbon
+            kano_emb_path = os.path.join(os.path.dirname(__file__), "kano_embeddings", "ele2emb.pkl")
+            with open(kano_emb_path, 'rb') as f:
+                self.kano_embeddings = pickle.load(f) # dict of atom_type: np.array
+                kano_dims = self.kano_embeddings[0].shape[0] # check if all embeddings have the same size
+                self.kano_embeddings = torch.nn.ParameterDict({str(k): torch.nn.Parameter(torch.tensor(v, dtype=torch.float32)) for k, v in self.kano_embeddings.items()})
+                self.kano_embeddings.requires_grad = True # can freeze the embeddings here if needed
+        else:
+            self.use_kano_embeddings = False
+
+        output_embedding_dim += kano_dims
         for field, values in attributes.items():
 
             if 'embedding_dimensionality' not in values: # if attr is not used as embedding
@@ -112,6 +130,12 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             for attribute_name in self._numerical_attrs:
                 x = data[attribute_name]
                 out.append(x)
+
+        if self.use_kano_embeddings:
+            # get kano embeddings for each atom type
+            atom_types = data[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+            kano_emb = torch.stack([self.kano_embeddings[str(atom_type.item())] for atom_type in atom_types], dim=0)
+            out.append(kano_emb)
 
         data[self.out_field] = torch.cat(out, dim=-1).float()
         return data
