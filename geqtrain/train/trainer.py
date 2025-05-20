@@ -3,6 +3,8 @@
 from collections import defaultdict
 from e3nn import o3
 
+import os
+import random
 import inspect
 import logging
 import wandb
@@ -64,10 +66,12 @@ def get_latest_lr(optimizer, model, param_name: str) -> float:
     raise ValueError(f"Parameter {param_name} not found in optimizer.")
 
 def set_seed(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = False # https://discuss.pytorch.org/t/what-does-torch-backends-cudnn-benchmark-do/5936/3
     torch.backends.cudnn.enabled = False
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
