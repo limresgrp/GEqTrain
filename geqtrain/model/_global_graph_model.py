@@ -25,14 +25,14 @@ def appendNGNNLayers(config):
     modules = {}
     logging.info(f"--- Number of GNN layers {N}")
 
-    # # attention on embeddings
+    # attention on embeddings
     modules.update({
         "update_emb": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
-            num_heads=8, # this number must be a 0 reminder of the sum of catted nn.embedded features (node and edges)
+            num_heads=11, #! this number must be a 0 reminder of the sum of catted nn.embedded node features
         ))
     })
 
