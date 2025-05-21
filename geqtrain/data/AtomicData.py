@@ -256,15 +256,15 @@ class AtomicData(Data):
         with padding values of -1 (and optionally NaN). The method masks out any padded indices in edge_index, and also masks out the corresponding
         parts of any edge features passed via kwargs (i.e., any feature with shape [num_edges, ...]).
         Parameters:
-            pos (torch.Tensor): Node positions for the current frame.
-            edge_index (torch.Tensor): Edge indices for a single frame, possibly padded with -1 or NaN, of shape (2, num_edges).
+            pos: Node positions for the current frame.
+            edge_index: Edge indices for a single frame, possibly padded with -1 or NaN, of shape (2, num_edges).
             **kwargs: Additional attributes, such as edge features. If an attribute has shape [num_edges, ...], it will be masked to remove padded edges.
         Returns:
             An instance of the class with masked edge_index and corresponding edge features.
         """
         
         num_edges = edge_index.shape[-1]
-        mask = (edge_index[0] != -1) & (~torch.isnan(edge_index[0]))
+        mask = (edge_index[0] != -1) & (~np.isnan(edge_index[0]))
         edge_index = edge_index[:, mask]
         for k, v in kwargs.items():
             try:
