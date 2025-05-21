@@ -243,9 +243,41 @@ class AtomicData(Data):
                     assert self[field].shape[-1] == irreps.dim
 
     @classmethod
+    def with_edge_index(
+        cls,
+        pos = None,
+        edge_index = None,
+        **kwargs,
+    ):
+        """
+        Constructs a new instance of the class using a provided edge_index and optional edge features, handling padding and masking.
+        This method is intended for cases where the edge_index is already present in the dataset, with shape (num_frames, 2, num_edges).
+        Here, only the edge_index of a single frame is passed to build the PyG-like Data object. The edge_index may be padded for some frames,
+        with padding values of -1 (and optionally NaN). The method masks out any padded indices in edge_index, and also masks out the corresponding
+        parts of any edge features passed via kwargs (i.e., any feature with shape [num_edges, ...]).
+        Parameters:
+            pos (torch.Tensor): Node positions for the current frame.
+            edge_index (torch.Tensor): Edge indices for a single frame, possibly padded with -1 or NaN, of shape (2, num_edges).
+            **kwargs: Additional attributes, such as edge features. If an attribute has shape [num_edges, ...], it will be masked to remove padded edges.
+        Returns:
+            An instance of the class with masked edge_index and corresponding edge features.
+        """
+        
+        num_edges = edge_index.shape[-1]
+        mask = (edge_index[0] != -1) & (~torch.isnan(edge_index[0]))
+        edge_index = edge_index[:, mask]
+        for k, v in kwargs.items():
+            try:
+                if v.shape[0] == num_edges:
+                    kwargs[k] = v[mask]
+            except: pass
+
+        return cls(pos=pos, edge_index=edge_index, **kwargs)
+
+    @classmethod
     def from_points(
         cls,
-        pos=None,
+        pos = None,
         r_max: float = None,
         cell = None,
         pbc = None,
