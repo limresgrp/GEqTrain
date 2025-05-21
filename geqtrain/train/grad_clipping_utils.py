@@ -43,10 +43,11 @@ def gradient_clipping(model, gradnorm_queue, max_gradient_norm, is_master):
     # Clips gradient and returns the norm
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm, norm_type=2.0)
 
-    if float(grad_norm) > max_grad_norm:
-        gradnorm_queue.add(float(max_grad_norm))
-    else:
-        gradnorm_queue.add(float(grad_norm))
+    # if float(grad_norm) > max_grad_norm:
+    #     gradnorm_queue.add(float(max_grad_norm))
+    # else:
+    #     gradnorm_queue.add(float(grad_norm))
+    gradnorm_queue.add(float(grad_norm))
 
     if is_master and float(grad_norm) > max_grad_norm:
         print(f'Clipped gradient with value {grad_norm:.1f} '
