@@ -41,3 +41,9 @@ After submitting the job, you can check its status using the following commands:
     ```bash  
     cat slurm-<job_id>.out
     cat slurm-<job_id>.err
+
+5. **Canceling a Job**: 
+    To cancel a running job, use the following command with your job ID:  
+    ```bash
+    scancel <job_id>
+    ```
