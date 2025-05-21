@@ -43,7 +43,7 @@ def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
                 print(f"[WandB log error] Skipped logging {name}: {e}")
 
 
-def apply_residual_stream(skip_residual, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
+def apply_residual_stream(skip_residual: bool, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
     if skip_residual:
         # Normal (non-residual) update
         # index_copy replaces, unlike index_add
@@ -279,7 +279,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Equivariant out features
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
-        self.has_scalar_output, self.final_latent_mlp, self.final_readout_mlp = False, None, None
+        self.has_scalar_output = False
+        self.final_latent_mlp, self.final_readout_mlp, self.learn_cutoff_bias, self.post_norm = None, None, None, None
         self.out_n_scalars = out_irreps.count(SCALAR) // self.out_multiplicity
         if self.out_n_scalars > 0:
             self.has_scalar_output = True

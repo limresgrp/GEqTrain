@@ -1,4 +1,4 @@
-from typing import Optional, Union, List
+from typing import Optional, Tuple, Union, List
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -150,6 +150,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         assert self.n_scalars_in > 0
 
         self.n_scalars_out = out_irreps.ls.count(0)
+        self.inv_readout = None
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
@@ -160,18 +161,31 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
         # if the out irreps requested has more elements then the request number of scalars to be provided in output
         self.reshape_in: Optional[reshape_irreps] = None
+        self.eq_readout = None
         if out_irreps.dim > self.n_scalars_out:
             self.has_equivariant_output = True
             eq_linear_input_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
             eq_linear_output_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l>0])
             self.reshape_in = reshape_irreps(eq_linear_input_irreps)
-            self.eq_readout = Linear( # equivariant MLP acting on l>0 ONLY
-                    eq_linear_input_irreps,
-                    eq_linear_output_irreps,
-                    shared_weights=self.eq_has_internal_weights,
-                    internal_weights=self.eq_has_internal_weights,
-                    pad_to_alignment=1,
-            )
+            self.eq_readout_iw, self.eq_readout = None, None
+            if self.eq_has_internal_weights:
+                self.eq_readout_iw = Linear( # equivariant MLP acting on l>0 ONLY
+                        eq_linear_input_irreps,
+                        eq_linear_output_irreps,
+                        shared_weights=self.eq_has_internal_weights,
+                        internal_weights=self.eq_has_internal_weights,
+                        pad_to_alignment=1,
+                )
+                w_embs = self.eq_readout_iw.weight_numel
+            else:
+                self.eq_readout = Linear( # equivariant MLP acting on l>0 ONLY
+                        eq_linear_input_irreps,
+                        eq_linear_output_irreps,
+                        shared_weights=self.eq_has_internal_weights,
+                        internal_weights=self.eq_has_internal_weights,
+                        pad_to_alignment=1,
+                )
+                w_embs = self.eq_readout.weight_numel
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         elif strict_irreps:
             assert in_irreps.dim == self.n_scalars_in, (
@@ -185,7 +199,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
                 mlp_input_dimension=self.n_scalars_in,
-                mlp_output_dimension=self.eq_readout.weight_numel,
+                mlp_output_dimension=w_embs,
                 **readout_latent_kwargs,
             )
 
@@ -227,15 +241,18 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             scalar_attnt = False
 
         self.scalar_attnt = scalar_attnt
+        self.split_index = [mul for mul, _ in irreps_in[self.field]][0]
         if self.scalar_attnt:
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        #! ----------- COMMENT TO JIT COMPILE --------------- #
         if self.ignore_amp:
             with torch.amp.autocast('cuda', enabled=False):
                 return self._forward_impl(data)
+        # --------------------------------------------------- #
         return self._forward_impl(data)
 
     def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -259,7 +276,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         data[self.out_field] = out_features
         return data
 
-    def _initialize_features(self, data):
+    def _initialize_features(self, data: AtomicDataDict.Type) -> Tuple[torch.Tensor, torch.Tensor]:
         # get features from input and create empty tensor to store output
         features = data[self.field]
         out_features = torch.zeros(
@@ -269,34 +286,37 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         )
         return features, out_features
 
-    def _apply_scalar_attnt(self, features, data):
-        split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
-        scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
+    def _apply_scalar_attnt(self, features, data: AtomicDataDict.Type):
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
         scalars = self.ensemble_attnt1(scalars, data)
         scalars = self.ensemble_attnt2(scalars, data)
         features = torch.cat((scalars, equiv), dim=-1)
         return features
 
-    def _handle_invariant_output(self, features, data, active_nodes, out_features):
+    def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features) -> torch.Tensor:
         # invariant output may be present or not
         # scalarize norms and cos_similarity between l1s
         # if self.use_l1_scalarizer:
         #     data = self.l1_scalarizer(data)
+        assert self.inv_readout is not None
         out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
         return out_features
 
-    def _handle_vectorial_output(self, features, data, active_nodes, out_features):
+    def _handle_vectorial_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features) -> torch.Tensor:
+        assert self.eq_readout is not None
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
-            eq_features = self.eq_readout(eq_features)
+            assert self.eq_readout_iw is not None
+            eq_features = self.eq_readout_iw(eq_features)
         else:
             # else the weights are computed via mlp using scalars
             weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
+            assert self.eq_readout is not None
             eq_features = self.eq_readout(eq_features, weights)
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features
 
-    def _apply_residual_update(self, out_features, data):
+    def _apply_residual_update(self, out_features, data: AtomicDataDict.Type) -> torch.Tensor:
         assert self._resnet_update_coeff is not None
         old_features = data[self.out_field]
         _coeff = self._resnet_update_coeff.sigmoid()
@@ -390,7 +410,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_nonlinearity=None,
             )
 
-    def _initialize_features(self, data):
+    def _initialize_features(self, data: AtomicDataDict.Type):
         # get features from input and create empty tensor to store output
         features, out_features = super()._initialize_features(data)
         conditioning = data[self.conditioning_field]
@@ -399,7 +419,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         features = self.film2(features, conditioning)
         return features, out_features
 
-    def _handle_invariant_output(self, features, data, active_nodes, out_features):
+    def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)
         out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
             out_features[active_nodes, :self.n_scalars_out],
@@ -407,7 +427,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         )
         return out_features
 
-    def _handle_vectorial_output(self, features, data, active_nodes, out_features):
+    def _handle_vectorial_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
             eq_features = self.eq_readout(eq_features)
