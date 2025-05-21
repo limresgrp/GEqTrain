@@ -209,7 +209,7 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
             optional_args=config,
         )
     except RuntimeError as e:
-        logging.warning(e)
+        logging.warning(f"{e}. Nested exception: {e.__cause__}")
         return None
     if instance.data is None:
         return None

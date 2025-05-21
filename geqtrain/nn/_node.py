@@ -47,7 +47,7 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     # step3b: apply random token
     random_indices = mask & mask_or_random # Apply random where mask is True AND mask_or_random is True
     num_categories = mask_token_index - 1 # Exclude mask token from random sampling
-    random_tokens = torch.randint(0, num_categories, (random_indices.sum(),), device=x.device, dtype=x.dtype)
+    random_tokens = torch.randint(0, num_categories, random_indices.sum().item(), device=x.device, dtype=x.dtype)
     x[random_indices] = random_tokens
 
     return x
@@ -55,6 +55,9 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
 
 @compile_mode("script")
 class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
+    
+    fields_to_mask: List[str]
+
     def __init__(
         self,
         out_field: str,
@@ -95,14 +98,16 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
         self._has_numericals = len(self._numerical_attrs) > 0
 
+    #! ----------- COMMENT TO JIT COMPILE --------------- #
     @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
+    # --------------------------------------------------- #
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
         for attribute_name, emb_layer in self._attr_modules.items():
             x = data[attribute_name].squeeze(-1)
 
             if self.use_masking and attribute_name in self.fields_to_mask:
-                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] -1) # last index is reserved for masking, make sure to match this in yaml
+                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] - 1) # last index is reserved for masking, make sure to match this in yaml
 
             x_emb = emb_layer(x)
             out.append(x_emb)

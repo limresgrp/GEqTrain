@@ -152,6 +152,7 @@ def main(args=None):
         "-o",
         "--out-file",
         help="Output file for deployed model.",
+        default="deployed_model.pth",
         type=pathlib.Path,
     )
     parser.add_argument(
@@ -207,7 +208,9 @@ def main(args=None):
         metadata[key] = value
 
     metadata = {k: v.encode("ascii") for k, v in metadata.items()}
-    os.makedirs(dirname(args.out_file), exist_ok=True)
+    out_dir = dirname(args.out_file)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     torch.jit.save(model, args.out_file, _extra_files=metadata)
 
     return

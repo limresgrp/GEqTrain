@@ -5,7 +5,7 @@ from e3nn import o3
 import math
 # !pip install geometric-vector-perceptron
 import torch
-from einops import rearrange
+from einops.layers.torch import Rearrange
 from torch import nn
 # from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
@@ -249,6 +249,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 nn.Linear(rbf_emb_dim, num_heads)
             )
 
+        self.mlp = None
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
                 mlp_input_dimension=self.n_inpt_scalars,
@@ -256,13 +257,15 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 mlp_output_dimension=self.n_inpt_scalars,
                 mlp_nonlinearity = "swiglu",
             )
+        
+        self.rearrange = Rearrange('batch source target heads -> batch heads source target')
 
-    def _add_edge_based_bias(self, data):
+    def _add_edge_based_bias(self, data: AtomicDataDict.Type):
         edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
         edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY] # (2, E)
         batch_map         = data[AtomicDataDict.BATCH_KEY] # assings each node to a given mol
         unique_idx, counts = torch.unique(batch_map, return_counts=True) # num_of mols, num of atoms per mol
-        max_count = counts.max() # max num of nodes in atoms in batch
+        max_count = int(counts.max().item()) # max num of nodes in atoms in batch
         num_uniques = unique_idx.shape[0] # num of mols in batch
 
         num_total_edges, num_edge_features = edge_radial_attrs.shape
@@ -293,7 +296,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # --- Initialize the padded output tensor ---
         padding_value = 0.0
         padded_edge_attrs = torch.full(
-            (num_uniques, max_count, max_count, self.n_heads),
+            [num_uniques, max_count, max_count, self.n_heads],
             padding_value,
             dtype=edge_radial_attrs.dtype,
             device=device
@@ -308,12 +311,12 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # place the edge attributes into the correct locations in the padded tensor.
         padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
 
-        padded_edge_attrs = rearrange(padded_edge_attrs, 'batch source target heads -> batch heads source target')
+        padded_edge_attrs = self.rearrange(padded_edge_attrs)
         return padded_edge_attrs
 
 
-    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
-    def forward(self, features, data):
+    # @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
+    def forward(self, features, data: AtomicDataDict.Type):
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
         attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
@@ -382,7 +385,8 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         out+=residual
 
         if self.update_mlp:
-            out = out+self.mlp(out)
+            assert self.mlp is not None
+            out = out + self.mlp(out)
 
         return out
 
