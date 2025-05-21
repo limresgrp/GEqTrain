@@ -226,7 +226,7 @@ def check_for_config_updates(config):
     if old_config.get("fine_tune", False):
         raise ValueError("Cannot restart training of a fine-tuning run")
 
-    modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
+    modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components", "log_batch_freq",
                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads",
                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
                         "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds"
