@@ -135,7 +135,7 @@ def run_inference(
 
     if hasattr(data, "__slices__"):
         for slices_key, slices in data.__slices__.items():
-            val = torch.tensor(slices, dtype=int, device=device)
+            val = torch.tensor(slices, dtype=torch.long, device=device)
             input_data[f"{slices_key}_slices"] = val
             ref_data[f"{slices_key}_slices"] = val
 
