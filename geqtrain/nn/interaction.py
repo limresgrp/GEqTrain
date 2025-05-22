@@ -43,7 +43,7 @@ def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
                 print(f"[WandB log error] Skipped logging {name}: {e}")
 
 
-def apply_residual_stream(skip_residual, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
+def apply_residual_stream(skip_residual: bool, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
     if skip_residual:
         # Normal (non-residual) update
         # index_copy replaces, unlike index_add
@@ -119,14 +119,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Graph conditioning
         graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
         # Other:
-        irreps_in=None,
+        irreps_in = None,
         debug: bool = False,
         name:str = "",
         learn_cutoff_bias: bool = True,
+        use_post_norm: bool = True,
     ):
         super().__init__()
         self.name = name
-        self.is_local = self.name == 'local_interaction'
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -141,6 +141,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.isqrtd                 = math.isqrt(head_dim)
         self.tanh_cutoff_n          = float(TanhCutoff_n)
         self.learn_cutoff_bias      = learn_cutoff_bias
+        self.use_post_norm          = use_post_norm
         # architectural choices
         self.use_attention          = use_attention
         self.use_mace_product       = use_mace_product
@@ -278,7 +279,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Equivariant out features
         self.reshape_back_features = inverse_reshape_irreps(out_irreps)
-        self.has_scalar_output, self.final_latent_mlp, self.final_readout_mlp = False, None, None
+        self.has_scalar_output, self.learn_cutoff_bias = False, False
+        self.final_latent_mlp, self.final_readout_mlp, self.post_norm = None, None, None
         self.out_n_scalars = out_irreps.count(SCALAR) // self.out_multiplicity
         if self.out_n_scalars > 0:
             self.has_scalar_output = True
@@ -294,10 +296,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
             )
 
+            self.rbf_embedder = None
             if self.learn_cutoff_bias:
                 self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
-
-            self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
+            self.post_norm = None
+            if self.use_post_norm:
+                self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
         # - End build modules - #
         out_feat_elems = (irr.ir.dim for irr in out_irreps)
@@ -322,7 +326,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        if self.is_local and AtomicDataDict.EDGE_FEATURES_KEY in data:
+        if AtomicDataDict.EDGE_FEATURES_KEY in data:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
         else:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
@@ -373,12 +377,15 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             # apply cutoff bias
             if self.learn_cutoff_bias:
+                assert self.rbf_embedder is not None
                 new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
             else:
                 cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
                 new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
 
-            new_latents = self.post_norm(new_latents)
+            if self.use_post_norm:
+                assert self.post_norm is not None
+                new_latents = self.post_norm(new_latents)
             latents = apply_residual_stream(False, latents, new_latents, layer_update_coefficients[layer_index], active_edges)
 
             # last update on residued features
@@ -412,18 +419,19 @@ class InteractionLayer(torch.nn.Module):
     ) -> None:
         super().__init__()
         #! cannot store self.parent = parent due to nn recursive loops
-        self.parent_name = parent.name
-        self.debug = parent.debug
-        self.layer_index = layer_index
-        self.is_last_layer = is_last_layer
+        self.parent_name            = parent.name
+        self.debug                  = parent.debug
+        self.layer_index            = layer_index
+        self.is_last_layer          = is_last_layer
         self.env_embed_multiplicity = parent.env_embed_multiplicity
-        self.latent_dim = parent.latent_dim
-        self.head_dim = parent.head_dim
-        self.isqrtd = math.isqrt(self.head_dim)
-        self.use_attention = parent.use_attention
-        self.use_mace_product = parent.use_mace_product
-        self.learn_cutoff_bias = parent.learn_cutoff_bias
-        self.edge_invariant_dim = parent.edge_invariant_dim
+        self.latent_dim             = parent.latent_dim
+        self.head_dim               = parent.head_dim
+        self.isqrtd                 = math.isqrt(self.head_dim)
+        self.use_attention          = parent.use_attention
+        self.use_mace_product       = parent.use_mace_product
+        self.learn_cutoff_bias      = parent.learn_cutoff_bias
+        self.use_post_norm          = parent.use_post_norm
+        self.edge_invariant_dim     = parent.edge_invariant_dim
 
         # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
         self.env_norm = SO3_LayerNorm(env_embed_irreps)
@@ -523,7 +531,7 @@ class InteractionLayer(torch.nn.Module):
                         # Plus edge invariants for the edge (radius).
                         + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
                             parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps
-                            if parent.name == 'local_interaction' and AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
+                            if AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
                             else 0
                         )
                     )
@@ -578,10 +586,12 @@ class InteractionLayer(torch.nn.Module):
         self._env_weighter = env_weighter
         self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
 
+        self.rbf_embedder = None
         if self.learn_cutoff_bias:
             self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
-
-        self.post_norm = torch.nn.LayerNorm(self.latent_dim)
+        self.post_norm = None
+        if self.use_post_norm:
+            self.post_norm = torch.nn.LayerNorm(self.latent_dim)
 
     def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
         edge_full_attr = torch.cat([
@@ -635,10 +645,13 @@ class InteractionLayer(torch.nn.Module):
         new_latents = self.latent_mlp(inv_latent_cat)
         # Apply cutoff, which propagates through to everything else
         if self.learn_cutoff_bias:
+            assert self.rbf_embedder is not None
             new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
         else:
             new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
-        new_latents = self.post_norm(new_latents)
+        if self.use_post_norm:
+            assert self.post_norm is not None
+            new_latents = self.post_norm(new_latents)
 
         latents = apply_residual_stream(self.layer_index==0, latents, new_latents, this_layer_update_coeff, active_edges)
 

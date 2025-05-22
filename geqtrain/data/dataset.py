@@ -109,7 +109,7 @@ def parse_attrs(
                     mask = np.isnan(val)
                     if np.any(mask) and not can_be_undefined:
                         raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
-                    _input_type = val
+                    _input_type = val.astype(np.int64)
                     _input_type[mask] = num_types
                     # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
             if key in _fields:
@@ -529,7 +529,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             # Make AtomicData from it:
             if AtomicDataDict.EDGE_INDEX_KEY in all_keys:
                 # This is already a graph, just build it
-                constructor = AtomicData
+                constructor = AtomicData.with_edge_index
             else:
                 # do neighborlist from points
                 constructor = AtomicData.from_points

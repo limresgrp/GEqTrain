@@ -58,11 +58,67 @@ def _sanity_checks(config):
                         This is a lose-lose situation.""")
 
 
+def debug(sequential_module_to_test):
+
+    print(f"Found {len(sequential_module_to_test)} modules in model.func.")
+    print("Attempting to script and freeze each submodule individually...")
+    print("-----------------------------------------------------------")
+
+    culprit_found = False
+    for i, _submodule in enumerate(sequential_module_to_test):
+        submodule_name, submodule = _submodule
+        print(f"\n[Submodule {i+1}/{len(sequential_module_to_test)}] Testing: {submodule_name} ({type(submodule).__name__})")
+
+        try:
+            # Ensure the submodule is in eval mode.
+            # This is crucial as freezing is for inference.
+            submodule.eval()
+
+            # Step 1: Try to script the submodule
+            print(f"  Attempting torch.jit.script(submodule)...")
+            scripted_submodule = torch.jit.script(submodule)
+            print(f"  torch.jit.script SUCCEEDED.")
+
+            # Step 2: Try to freeze the scripted submodule
+            print(f"  Attempting torch.jit.freeze(scripted_submodule)...")
+            frozen_submodule = torch.jit.freeze(scripted_submodule)
+            print(f"  torch.jit.freeze SUCCEEDED for {submodule_name}.")
+
+        except RuntimeError as e:
+            print(f"  RuntimeError for submodule {i+1} ({submodule_name}):")
+            print(f"  Error: {e}")
+            # traceback.print_exc() # Uncomment for full Python traceback for this specific error
+
+            if "isInt() INTERNAL ASSERT FAILED" in str(e):
+                print(f"  **********************************************************************")
+                print(f"  >>> CULPRIT LIKELY FOUND: Submodule {i+1} ({submodule_name}) <<<")
+                print(f"  >>> This module triggered the 'isInt() INTERNAL ASSERT FAILED' error.")
+                print(f"  **********************************************************************")
+                culprit_found = True
+                # You might want to stop here to focus on this module, or continue to see if others also fail
+                # break
+            else:
+                print(f"  This submodule failed scripting or freezing for a different reason.")
+        except Exception as e:
+            print(f"  An UNEXPECTED error occurred for submodule {i+1} ({submodule_name}):")
+            print(f"  Error: {e}")
+            # traceback.print_exc() # Uncomment for full Python traceback
+            # break
+        print("-----------------------------------------------------------")
+
+    if culprit_found:
+        print("\nFocus your investigation on the submodule(s) marked as CULPRIT.")
+
 def _compile_for_deploy(model):
     model.eval()
 
+    debug(model.func)
+
     if not isinstance(model, torch.jit.ScriptModule):
         model = script(model)
+    
+    model = torch.jit.freeze(model)    
+    # print(model.graph)
 
     return model
 
@@ -152,6 +208,7 @@ def main(args=None):
         "-o",
         "--out-file",
         help="Output file for deployed model.",
+        default="deployed_model.pth",
         type=pathlib.Path,
     )
     parser.add_argument(
@@ -161,6 +218,13 @@ def main(args=None):
         nargs='*',
         default=[]
     )
+    build_parser.add_argument(
+        "-d",
+        "--debug-submodules",
+        help="Debug submodules before compiling. If issues are found, compilation will not proceed.",
+        action="store_true",
+    )
+
 
     args = parser.parse_args(args=args)
 
@@ -187,6 +251,23 @@ def main(args=None):
 
     _sanity_checks(model_config)
 
+    # -- debug submodules if requested --
+    if hasattr(args, "debug_submodules") and args.debug_submodules:
+        print("\n[DEBUG] Running submodule debug before compilation...")
+        culprit_found = False
+        # Run debug and capture output
+        import io
+        import contextlib
+        debug_output = io.StringIO()
+        with contextlib.redirect_stdout(debug_output):
+            debug(model.func)
+        output = debug_output.getvalue()
+        print(output)
+        if ">>> CULPRIT LIKELY FOUND" in output:
+            print("\n[DEBUG] Compilation aborted: culprit submodule(s) found during debug. See output above.")
+            return
+        print("[DEBUG] No culprit submodules found. Proceeding to compilation.\n")
+
     # -- compile --
     model = _compile_for_deploy(model)
     logging.info("Compiled & optimized model.")
@@ -207,7 +288,9 @@ def main(args=None):
         metadata[key] = value
 
     metadata = {k: v.encode("ascii") for k, v in metadata.items()}
-    os.makedirs(dirname(args.out_file), exist_ok=True)
+    out_dir = dirname(args.out_file)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     torch.jit.save(model, args.out_file, _extra_files=metadata)
 
     return
