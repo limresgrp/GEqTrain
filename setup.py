@@ -36,6 +36,7 @@ setup(
         "torch_ema",
         "pyyaml",
         "torch-runstats>=0.2.0",
+        "pytorch_warmup",
     ],
     zip_safe=True,
 )
