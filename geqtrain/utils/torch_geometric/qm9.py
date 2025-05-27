@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from functools import partial
 import os
 import os.path as osp
 import ssl
@@ -142,37 +143,47 @@ def furthest_point_sampling(data, num_samples):
             indices.extend(extra.tolist())
     return indices
 
+def load_and_flatten(fname, key):
+    arr = np.load(fname, allow_pickle=True)[key]
+    return arr.flatten()
+
 def split_npz_by_fps(folder, key, num_train_samples=None, num_valid_samples=None):
     print(f"Scanning folder: {folder}")
     # Gather all .npz files and their key values
-    npz_files = [f for f in os.listdir(folder)]
+    npz_files = [os.path.join(folder, f) for f in os.listdir(folder)]
     print(f"Found {len(npz_files)} files.")
     values = []
     print(f"Reading files.")
-    for fname in npz_files:
-        arr = np.load(os.path.join(folder, fname))[key]
-        values.append(arr.flatten())
+
+    import multiprocessing as mp
+    func = partial(load_and_flatten, key=key)
+    with mp.Pool(mp.cpu_count()) as pool:
+        values = pool.map(func, npz_files)
     values = np.stack(values)
     print(f"Loaded key '{key}' from all files. Shape: {values.shape}")
     
     N = len(npz_files)
+    npz_files = np.array(npz_files)
     print("Performing furthest point sampling for train split...")
     idx_train = furthest_point_sampling(values, num_train_samples or int(0.8 * N))
-    print(f"Selected {len(idx_train)} samples for training.")
-    remaining = list(set(range(N)) - set(idx_train))
+    filenames_train = npz_files[idx_train]
+    print(f"Selected {len(filenames_train)} samples for training.")
+    remaining = list(set(range(N)) - set(filenames_train))
     print("Performing furthest point sampling for validation split...")
     idx_val = furthest_point_sampling(values[remaining], num_valid_samples or len(remaining) // 2)
     idx_val = [remaining[i] for i in idx_val]
-    print(f"Selected {len(idx_val)} samples for validation.")
-    idx_test = list(set(range(N)) - set(idx_train) - set(idx_val))
-    print(f"Selected {len(idx_test)} samples for test.")
+    filenames_val = npz_files[idx_val]
+    print(f"Selected {len(filenames_val)} samples for validation.")
+    idx_test = list(set(range(N)) - set(filenames_train) - set(filenames_val))
+    filenames_test = npz_files[idx_test]
+    print(f"Selected {len(filenames_test)} samples for test.")
     
     # Move files
-    for idx, sub in zip([idx_train, idx_val, idx_test], ['train', 'val', 'test']):
+    for filenames, sub in zip([filenames_train, filenames_val, filenames_test], ['train', 'val', 'test']):
         # Write indices to txt file
         split_file = os.path.join(os.path.dirname(folder), f"{key}.{sub}.txt")
-        np.savetxt(split_file, np.array(idx, dtype=int), fmt='%d')
-        print(f"Saved {len(idx)} indices to {split_file}")
+        np.savetxt(split_file, filenames, fmt='%s')
+        print(f"Saved {len(filenames)} dataset filenames to {split_file}")
 
 class QM9:
     r"""The QM9 dataset from the `"MoleculeNet: A Benchmark for Molecular
@@ -400,4 +411,4 @@ class QM9:
             )
     
     def split(self, split_on_key: str, num_train_samples=None, num_valid_samples=None):
-        split_npz_by_fps(self.raw_dir, split_on_key, num_train_samples=num_train_samples, num_valid_samples=num_valid_samples)
+        split_npz_by_fps(self.processed_dir, split_on_key, num_train_samples=num_train_samples, num_valid_samples=num_valid_samples)

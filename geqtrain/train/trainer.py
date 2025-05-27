@@ -72,11 +72,6 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def parse_idcs_file(filename):
-    with open(filename, "r") as f:
-        lines = f.readlines()
-    return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
-
 def get_output_keys(loss_func: Loss):
     '''
     returns fields/keys that have to be predicted (i.e. for which we need to compute a loss)
@@ -354,8 +349,8 @@ class Trainer:
         n_val (int): # of frames for validation
         exclude_keys (list):  fields from dataset to ignore.
         dataloader_num_workers (int): `num_workers` for the `DataLoader`s
-        train_idcs (optional, list|str):  list of frames to use for training, or path to a txt file with indices (1 per row)
-        val_idcs (list):  list of frames to use for validation
+        train_idcs (optional, list):  list of frames to use for training, or path to a txt file with indices (1 per row)
+        val_idcs   (optional, list):  list of frames to use for validation
         train_val_split (str):  "random" or "sequential"
 
         init_callbacks (list): list of callback function at the begining of the training
@@ -439,8 +434,8 @@ class Trainer:
         n_train: Optional[Union[List[int], int]] = None,
         n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[Union[str, List, List[List]]] = None,
-        val_idcs: Optional[Union[str, List, List[List]]] = None,
+        train_idcs: Optional[Union[List, List[List]]] = None,
+        val_idcs:   Optional[Union[List, List[List]]] = None,
         train_val_split: str = "random",  # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
@@ -1725,14 +1720,6 @@ class Trainer:
         validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset]
     ) -> None: # TODO rename method
 
-        if isinstance(self.train_idcs, str):
-            self.train_idcs = parse_idcs_file(self.train_idcs)
-            self.n_train = dataset.n_observations[self.train_idcs]
-        if isinstance(self.val_idcs, str):
-            self.val_idcs = parse_idcs_file(self.val_idcs)
-            _validation_dataset = validation_dataset if validation_dataset is not None else dataset
-            self.n_val = _validation_dataset.n_observations[self.val_idcs]
-
         if self.train_idcs is None or self.val_idcs is None:
             # split_dataset to be done before eventual validation_dataset = dataset executed below
             self.train_idcs, self.val_idcs = self.split_dataset(dataset, validation_dataset)
@@ -1742,9 +1729,9 @@ class Trainer:
             validation_dataset = dataset
 
         # --- initialize n_train and n_val
-        assert isinstance(self.n_train, (list, int, type(None))), "n_train must be of type list, int, or None"
+        assert isinstance(self.n_train, (list, int, type(None))), f"n_train must be of type list, int, or None. It is of type {type(self.n_train)}"
         self.n_train = self.n_train if isinstance(self.n_train, list) or self.n_train is None else [self.n_train]
-        assert isinstance(self.n_val, (list, int, type(None))), "n_val must be of type list, int, or None"
+        assert isinstance(self.n_val, (list, int, type(None))), f"n_val must be of type list, int, or None. It is of type {type(self.n_val)}"
         self.n_val = self.n_val if isinstance(self.n_val, list) or self.n_val is None else [self.n_val]
 
         assert len(self.n_train) == len(dataset.n_observations)
@@ -1808,14 +1795,14 @@ class Trainer:
                 return n_observations.tolist()
 
             if self.n_train: return self.n_train # if already defined, return
-            if val_dset_provided_in_yaml: return train_dset.n_observations # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
+            if val_dset_provided_in_yaml: return train_dset.n_observations.tolist() # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
             # build n_train as "complmement" of n_val: from each_train_npz[i] drop a self.n_val[i]:int observations out of it
             if self.n_val: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_val)]
             return split_80_20(train_dset)
 
         def n_val_obs_for_each_npz():
             if self.n_val: return self.n_val
-            if val_dset_provided_in_yaml: return val_dset.n_observations # val can be itself since it is an indipendent dset
+            if val_dset_provided_in_yaml: return val_dset.n_observations.tolist() # val can be itself since it is an indipendent dset
             return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
 
         self.n_train = list(n_train_obs_for_each_npz())
