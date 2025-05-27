@@ -68,11 +68,11 @@ def download_url(
     path = osp.join(folder, filename)
 
     if osp.isfile(path):  # pragma: no cover
-        if log and 'pytest' not in sys.modules:
+        if log:
             print(f'Using existing file {filename}', file=sys.stderr)
         return path
 
-    if log and 'pytest' not in sys.modules:
+    if log:
         print(f'Downloading {url}', file=sys.stderr)
 
     os.makedirs(folder, exist_ok=True)
@@ -112,6 +112,67 @@ def to_list(value: Any) -> Sequence:
     else:
         return [value]
 
+def furthest_point_sampling(data, num_samples):
+    """
+    Furthest Point Sampling (FPS) on a set of points.
+    Args:
+        data (np.ndarray): Array of shape (N, D)
+        num_samples (int): Number of samples to select
+    Returns:
+        indices (list): Indices of selected samples
+    """
+    N = data.shape[0]
+    indices = [0]
+    distances = np.full(N, np.inf)
+    for _ in range(1, num_samples):
+        last = data[indices[-1]]
+        dist = np.linalg.norm(data - last, axis=-1)
+        distances = np.minimum(distances, dist)
+        if np.all(distances == 0):
+            break
+        next_idx = np.argmax(distances)
+        indices.append(next_idx.item())
+    num_sampled = len(indices)
+    if num_sampled < num_samples:
+        remaining = list(set(range(N)) - set(indices))
+        num_needed = num_samples - num_sampled
+        print(f"Sampled all unique values after {num_sampled} samples. Sampling the remaining {num_needed} indices using random uniform sampling.")
+        if num_needed > 0 and remaining:
+            extra = np.random.choice(remaining, size=min(num_needed, len(remaining)), replace=False)
+            indices.extend(extra.tolist())
+    return indices
+
+def split_npz_by_fps(folder, key, num_train_samples=None, num_valid_samples=None):
+    print(f"Scanning folder: {folder}")
+    # Gather all .npz files and their key values
+    npz_files = [f for f in os.listdir(folder)]
+    print(f"Found {len(npz_files)} files.")
+    values = []
+    print(f"Reading files.")
+    for fname in npz_files:
+        arr = np.load(os.path.join(folder, fname))[key]
+        values.append(arr.flatten())
+    values = np.stack(values)
+    print(f"Loaded key '{key}' from all files. Shape: {values.shape}")
+    
+    N = len(npz_files)
+    print("Performing furthest point sampling for train split...")
+    idx_train = furthest_point_sampling(values, num_train_samples or int(0.8 * N))
+    print(f"Selected {len(idx_train)} samples for training.")
+    remaining = list(set(range(N)) - set(idx_train))
+    print("Performing furthest point sampling for validation split...")
+    idx_val = furthest_point_sampling(values[remaining], num_valid_samples or len(remaining) // 2)
+    idx_val = [remaining[i] for i in idx_val]
+    print(f"Selected {len(idx_val)} samples for validation.")
+    idx_test = list(set(range(N)) - set(idx_train) - set(idx_val))
+    print(f"Selected {len(idx_test)} samples for test.")
+    
+    # Move files
+    for idx, sub in zip([idx_train, idx_val, idx_test], ['train', 'val', 'test']):
+        # Write indices to txt file
+        split_file = os.path.join(os.path.dirname(folder), f"{key}.{sub}.txt")
+        np.savetxt(split_file, np.array(idx, dtype=int), fmt='%d')
+        print(f"Saved {len(idx)} indices to {split_file}")
 
 class QM9:
     r"""The QM9 dataset from the `"MoleculeNet: A Benchmark for Molecular
@@ -213,6 +274,7 @@ class QM9:
 
         types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
         bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
+        hybridizations = {HybridizationType.UNSPECIFIED: 0, HybridizationType.SP: 1, HybridizationType.SP2: 2, HybridizationType.SP3: 3}
 
         with open(self.raw_paths[1]) as f:
             target = [[float(x) for x in line.split(',')[1:20]]
@@ -237,62 +299,105 @@ class QM9:
             pos = conf.GetPositions()
             pos = torch.tensor(pos, dtype=torch.float).unsqueeze(dim=0)
 
-            type_idx = []
             atomic_number = []
+            atom_type = []
             aromatic = []
-            sp = []
-            sp2 = []
-            sp3 = []
-            num_hs = []
+            hybridization = []
             for atom in mol.GetAtoms():
-                type_idx.append(types[atom.GetSymbol()])
                 atomic_number.append(atom.GetAtomicNum())
+                atom_type.append(types[atom.GetSymbol()])
                 aromatic.append(1 if atom.GetIsAromatic() else 0)
-                hybridization = atom.GetHybridization()
-                sp.append(1 if hybridization == HybridizationType.SP else 0)
-                sp2.append(1 if hybridization == HybridizationType.SP2 else 0)
-                sp3.append(1 if hybridization == HybridizationType.SP3 else 0)
+                hybridization.append(hybridizations[atom.GetHybridization()])
 
-            z = torch.tensor(atomic_number, dtype=torch.long)
+            atomic_number = torch.tensor(atomic_number, dtype=torch.long)
+            atom_type = torch.tensor(atom_type)
+            aromatic = torch.tensor(aromatic)
+            hybridization = torch.tensor(hybridization)
 
+            # Create bond edges and types
             rows, cols, edge_types = [], [], []
             for bond in mol.GetBonds():
                 start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
                 rows += [start, end]
                 cols += [end, start]
-                edge_types += 2 * [bonds[bond.GetBondType()]]
+                edge_types += 2 * [bonds[bond.GetBondType()] + 1] # Add 1 to keep 0 for non-bonded
 
             edge_bond = torch.tensor([rows, cols], dtype=torch.long)
-            edge_type = torch.tensor(edge_types, dtype=torch.long)
-            edge_attr = one_hot(edge_type, num_classes=len(bonds))
-
-            perm = (edge_bond[0] * N + edge_bond[1]).argsort()
-            edge_bond = edge_bond[:, perm]
-            edge_type = edge_type[perm]
-            edge_attr = edge_attr[perm].unsqueeze(dim=0)
+            edge_bond_type = torch.tensor(edge_types, dtype=torch.long)
 
             row, col = edge_bond
-            hs = (z == 1).to(torch.float)
-            num_hs = scatter(hs[row], col, dim_size=N, reduce='sum').tolist()
+            hs = (atomic_number == 1).to(torch.float)
+            num_hs = scatter(hs[row], col, dim_size=N, reduce='sum').int()
 
-            x1 = one_hot(torch.tensor(type_idx), num_classes=len(types))
-            x2 = torch.tensor([atomic_number, aromatic, sp, sp2, sp3, num_hs],
-                              dtype=torch.float).t().contiguous()
-            x = torch.cat([x1, x2], dim=-1).unsqueeze(dim=0)
+            # Create all2all edge_index (including self-loops)
+            N = mol.GetNumAtoms()
+            edge_index = torch.cartesian_prod(torch.arange(N), torch.arange(N)).t().unsqueeze(0)
+
+            # Assign bond type to all2all edges (0 for non-bonded)
+            bond_dict = {(u.item(), v.item()): t.item() for u, v, t in zip(edge_bond[0], edge_bond[1], edge_bond_type)}
+            edge_type = []
+            for u, v in edge_index[0].t():
+                edge_type.append(bond_dict.get((u.item(), v.item()), 0))
+            edge_type = torch.tensor(edge_type, dtype=torch.long).unsqueeze(0)
 
             name = mol.GetProp('_Name')
             smiles = Chem.MolToSmiles(mol, isomericSmiles=True)
 
+            _y = y[i].unsqueeze(0)
+            mu = _y[:,  :1]
+            alpha = _y[:, 1:2]
+            homo = _y[:, 2:3]
+            lumo = _y[:, 3:4]
+            gap = _y[:, 4:5]
+            r2 = _y[:, 5:6]
+            zpve = _y[:, 6:7]
+            u0 = _y[:, 7:8]
+            u298 = _y[:, 8:9]
+            h298 = _y[:, 9:10]
+            g298 = _y[:, 10:11]
+            cv = _y[:, 11:12]
+            u0_atom = _y[:, 12:13]
+            u298_atom = _y[:, 13:14]
+            h298_atom = _y[:, 14:15]
+            g298_atom = _y[:, 15:16]
+            A = _y[:, 16:17]
+            B = _y[:, 17:18]
+            C = _y[:, 18:19]
+
             # Save data as .npz file
             np.savez_compressed(
                 osp.join(self.processed_dir, f"data_{i}.npz"),
-                x=x.numpy(),
-                z=z.numpy(),
                 pos=pos.numpy(),
-                edge_bond=edge_bond.numpy(),
-                edge_attr=edge_attr.numpy(),
-                y=y[i].unsqueeze(0).numpy(),
+                atom_type=atom_type.numpy(),
+                edge_index=edge_index.numpy(),
+                edge_type=edge_type.numpy(),
+                atomic_number=atomic_number.numpy(),
+                aromatic=aromatic.numpy(),
+                hybridization=hybridization.numpy(),
+                num_hs=num_hs.numpy(),
+                mu=mu.numpy(),
+                alpha=alpha.numpy(),
+                homo=homo.numpy(),
+                lumo=lumo.numpy(),
+                gap=gap.numpy(),
+                r2=r2.numpy(),
+                zpve=zpve.numpy(),
+                u0=u0.numpy(),
+                u298=u298.numpy(),
+                h298=h298.numpy(),
+                g298=g298.numpy(),
+                cv=cv.numpy(),
+                u0_atom=u0_atom.numpy(),
+                u298_atom=u298_atom.numpy(),
+                h298_atom=h298_atom.numpy(),
+                g298_atom=g298_atom.numpy(),
+                A=A.numpy(),
+                B=B.numpy(),
+                C=C.numpy(),
                 smiles=smiles,
                 name=name,
                 idx=i,
             )
+    
+    def split(self, split_on_key: str, num_train_samples=None, num_valid_samples=None):
+        split_npz_by_fps(self.raw_dir, split_on_key, num_train_samples=num_train_samples, num_valid_samples=num_valid_samples)
