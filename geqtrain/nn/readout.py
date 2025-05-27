@@ -415,9 +415,9 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         features, out_features = super()._initialize_features(data)
         conditioning = data[self.conditioning_field]
         scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
-        features = self.film1(scalars, conditioning)
-        features = self.fc1(scalars)
-        features = self.film2(scalars, conditioning)
+        scalars = self.film1(scalars, conditioning)
+        scalars = self.fc1(scalars)
+        scalars = self.film2(scalars, conditioning)
         return torch.cat((scalars, equiv), dim=-1), out_features
 
     def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
