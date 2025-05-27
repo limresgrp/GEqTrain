@@ -10,12 +10,20 @@ default_dtype: float32
 
 # --- M O D E L --- #
 model_builders:
-  - HeadlessGlobalGraphModel
+  - HeadlessGlobalNodeModel
   - Heads
+  - cls: NodewiseReduce
+    name: node_pooling
+    field: node_mu
+    out_field: mu
+  - cls: Norm
+    name: vector_norm
+    field: mu
 
 # - general - #
 use_weight_norm: false # Cannot jit compile when using this
 use_mace_product: true
+use_post_norm: false
 
 # - cutoffs - #
 r_max: 32.0
@@ -32,36 +40,36 @@ parity: o3_full
 # --- interaction layers --- #
 num_layers: 2
 latent_dim: 128
-env_embed_multiplicity: 8
+env_embed_multiplicity: 16
 
 latent: geqtrain.nn.ScalarMLPFunction
-mlp_latent_dimensions: [1024]
+mlp_latent_dimensions: [512, 512]
 mlp_nonlinearity: swiglu
 
-# - local attention - #
-local_interaction_use_attention: true
-local_interaction_head_dim: 64
-
-# - context aware attention - #
-context_aware_interaction_use_attention: true
-context_aware_interaction_head_dim: 64
+# - attention - #
+use_attention: true
+head_dim: 64
 
 # - products - #
-local_interaction_use_mace_product: true
+use_mace_product: true
 
-context_aware_interaction: [0, 1] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
+context_aware_interaction_output_ls: [0, 1] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
 # ---  END interaction layers  --- #
 
 # --- START pooling layer --- #
-pooling_use_attention: false
-pooling_use_gating: true
+pooling_use_attention: true
 # ---  END pooling layer  --- #
 
 # --- START HEADS --- #
 head_wds: 0.001
 head_node_output_wd: true
 heads:
-  - [graph_features, graph_output, 1x0e]
+  head_mu:
+    field: node_features
+    out_field: node_mu
+    out_irreps: 1x1o
+    model: geqtrain.nn.ReadoutModuleWithConditioning
+    conditioning_field: node_attrs
 
 # ---  END HEADS  --- #
 
