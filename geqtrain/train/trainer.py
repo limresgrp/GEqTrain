@@ -72,6 +72,11 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+def parse_idcs_file(filename):
+    with open(filename, "r") as f:
+        lines = f.readlines()
+    return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
+
 def get_output_keys(loss_func: Loss):
     '''
     returns fields/keys that have to be predicted (i.e. for which we need to compute a loss)
@@ -349,7 +354,7 @@ class Trainer:
         n_val (int): # of frames for validation
         exclude_keys (list):  fields from dataset to ignore.
         dataloader_num_workers (int): `num_workers` for the `DataLoader`s
-        train_idcs (optional, list):  list of frames to use for training
+        train_idcs (optional, list|str):  list of frames to use for training, or path to a txt file with indices (1 per row)
         val_idcs (list):  list of frames to use for validation
         train_val_split (str):  "random" or "sequential"
 
@@ -434,8 +439,8 @@ class Trainer:
         n_train: Optional[Union[List[int], int]] = None,
         n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[Union[List, List[List]]] = None,
-        val_idcs: Optional[Union[List, List[List]]] = None,
+        train_idcs: Optional[Union[str, List, List[List]]] = None,
+        val_idcs: Optional[Union[str, List, List[List]]] = None,
         train_val_split: str = "random",  # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
@@ -526,8 +531,8 @@ class Trainer:
         """Initialize randomness for reproducibility."""
         if hasattr(self, "seed") and self.seed:
             set_seed(self.seed)
+        self.dataset_rng = torch.Generator()
         if hasattr(self, "dataset_seed") and self.dataset_seed:
-            self.dataset_rng = torch.Generator()
             self.dataset_rng.manual_seed(self.dataset_seed)
 
     def _init_output_paths(self):
@@ -1719,6 +1724,14 @@ class Trainer:
         dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset],
         validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset]
     ) -> None: # TODO rename method
+
+        if isinstance(self.train_idcs, str):
+            self.train_idcs = parse_idcs_file(self.train_idcs)
+            self.n_train = dataset.n_observations[self.train_idcs]
+        if isinstance(self.val_idcs, str):
+            self.val_idcs = parse_idcs_file(self.val_idcs)
+            _validation_dataset = validation_dataset if validation_dataset is not None else dataset
+            self.n_val = _validation_dataset.n_observations[self.val_idcs]
 
         if self.train_idcs is None or self.val_idcs is None:
             # split_dataset to be done before eventual validation_dataset = dataset executed below
