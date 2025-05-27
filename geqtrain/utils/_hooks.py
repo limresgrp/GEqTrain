@@ -2,7 +2,6 @@ import torch.nn as nn
 from functools import partial
 import warnings
 from typing import List, Dict
-import wandb
 
 
 def get_all_modules(model):
@@ -46,6 +45,8 @@ def get_all_hookable_modules(model):
 
 
 def print_stats(hook_handler, module_id, module_name, module, input, output):
+    import wandb
+    
     #! this can also be a class with a __call__ method with the signature as above
     #! this can also be applied to model using self.apply from nn.Module
 

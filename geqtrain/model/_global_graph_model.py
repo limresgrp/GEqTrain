@@ -1,10 +1,6 @@
 import logging
-from typing import Optional
-
 from geqtrain.data import AtomicDataDict
-from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
-from geqtrain.nn.EnsembleLayer import EnsembleAggregator, WeightedEnsembleAggregator
 from geqtrain.utils import Config
 
 from geqtrain.nn import (
@@ -17,26 +13,16 @@ from geqtrain.nn import (
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
     ReadoutModule,
+    ReadoutModuleWithConditioning,
 )
 
 
 
-def HeadlessGlobalGraphModel(
-    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None,
-) -> SequentialGraphNetwork:
+def HeadlessGlobalGraphModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
-    layers = buildGlobalGraphModelLayers(config) # moreGNNLayers(config)
-
-    # # todo extract
-    # layers.update({
-    #     "ensemble_aggregator": (EnsembleAggregator, dict(
-    #         field=AtomicDataDict.GRAPH_FEATURES_KEY,
-    #         out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
-    #         aggregation_method= "max",
-    #     )),
-    # })
+    layers = buildGlobalGraphModelLayers(config)
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
@@ -48,22 +34,16 @@ def buildGlobalGraphModelLayers(config:Config):
 
     update_config(config)
 
-    if 'node_attributes' in config:
-        node_embedder = (EmbeddingAttrs, dict(
+    if 'node_attributes' not in config:
+        raise ValueError('Missing node_attributes in yaml')
+    
+    layers = {
+        "node_attrs": (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
-        ))
-    else:
-        raise ValueError('Missing node_attributes in yaml')
-
-    layers = {
-        # -- Encode -- #
-        "node_attrs":         node_embedder,
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        "graph_attrs":        EmbeddingGraphAttrs,
+        )),
     }
-
+    
     if 'edge_attributes' in config:
         edge_embedder = (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -72,12 +52,8 @@ def buildGlobalGraphModelLayers(config:Config):
         layers["edge_attrs"] = edge_embedder
 
     layers.update({
-        "update": (ReadoutModule, dict(
-            field=AtomicDataDict.NODE_ATTRS_KEY,
-            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
-            out_irreps=None, # outs tensor of same o3.irreps of out_field
-            resnet=True,
-        )),
+        "edge_radial_attrs":  BasisEdgeRadialAttrs,
+        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "local_interaction": (InteractionModule, dict(
             name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
@@ -92,13 +68,13 @@ def buildGlobalGraphModelLayers(config:Config):
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
             reduce=config.get("edge_reduce", "sum"),
         )),
-        "update": (ReadoutModule, dict(
+        "update": (ReadoutModuleWithConditioning, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
+            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
         )),
-        #TODO: if one wants to play with updated scalars, you can create a module to be added here
         "context_aware_interaction": (InteractionModule, dict(
             name = "context_aware_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
@@ -111,8 +87,9 @@ def buildGlobalGraphModelLayers(config:Config):
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "update": (ReadoutModule, dict(
+        "update": (ReadoutModuleWithConditioning, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
+            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
@@ -120,7 +97,6 @@ def buildGlobalGraphModelLayers(config:Config):
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
-            # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
     })
 
