@@ -198,10 +198,10 @@ optimizer_params:
   - 0.999
   eps: 1.0e-08
   weight_decay: 0.0
-max_gradient_norm: 10.
+# max_gradient_norm: 10.
 # use_grokfast: true
 use_warmup: true
-warmup_epochs: 10
+warmup_epochs: 1
 
 lr_scheduler_name: CosineAnnealingLR
 lr_scheduler_min_lr: 1.e-6
