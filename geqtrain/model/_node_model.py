@@ -37,17 +37,22 @@ def buildNodeModelLayers(config:Config):
     update_config(config)
 
     layers = {
-        # -- Encode -- #
         "node_attrs": (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
         )),
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        "graph_attrs":        EmbeddingGraphAttrs,
     }
 
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+        layers["edge_attrs"] = edge_embedder
+
     layers.update({
+        "edge_radial_attrs":  BasisEdgeRadialAttrs,
+        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "interaction": (InteractionModule, dict(
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,

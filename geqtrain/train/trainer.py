@@ -135,7 +135,7 @@ def run_inference(
 
     if hasattr(data, "__slices__"):
         for slices_key, slices in data.__slices__.items():
-            val = torch.tensor(slices, dtype=int, device=device)
+            val = torch.tensor(slices, dtype=torch.long, device=device)
             input_data[f"{slices_key}_slices"] = val
             ref_data[f"{slices_key}_slices"] = val
 
@@ -349,8 +349,8 @@ class Trainer:
         n_val (int): # of frames for validation
         exclude_keys (list):  fields from dataset to ignore.
         dataloader_num_workers (int): `num_workers` for the `DataLoader`s
-        train_idcs (optional, list):  list of frames to use for training
-        val_idcs (list):  list of frames to use for validation
+        train_idcs (optional, list):  list of frames to use for training, or path to a txt file with indices (1 per row)
+        val_idcs   (optional, list):  list of frames to use for validation
         train_val_split (str):  "random" or "sequential"
 
         init_callbacks (list): list of callback function at the begining of the training
@@ -435,7 +435,7 @@ class Trainer:
         n_val: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
         train_idcs: Optional[Union[List, List[List]]] = None,
-        val_idcs: Optional[Union[List, List[List]]] = None,
+        val_idcs:   Optional[Union[List, List[List]]] = None,
         train_val_split: str = "random",  # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
@@ -526,8 +526,8 @@ class Trainer:
         """Initialize randomness for reproducibility."""
         if hasattr(self, "seed") and self.seed:
             set_seed(self.seed)
+        self.dataset_rng = torch.Generator()
         if hasattr(self, "dataset_seed") and self.dataset_seed:
-            self.dataset_rng = torch.Generator()
             self.dataset_rng.manual_seed(self.dataset_seed)
 
     def _init_output_paths(self):
@@ -1729,9 +1729,9 @@ class Trainer:
             validation_dataset = dataset
 
         # --- initialize n_train and n_val
-        assert isinstance(self.n_train, (list, int, type(None))), "n_train must be of type list, int, or None"
+        assert isinstance(self.n_train, (list, int, type(None))), f"n_train must be of type list, int, or None. It is of type {type(self.n_train)}"
         self.n_train = self.n_train if isinstance(self.n_train, list) or self.n_train is None else [self.n_train]
-        assert isinstance(self.n_val, (list, int, type(None))), "n_val must be of type list, int, or None"
+        assert isinstance(self.n_val, (list, int, type(None))), f"n_val must be of type list, int, or None. It is of type {type(self.n_val)}"
         self.n_val = self.n_val if isinstance(self.n_val, list) or self.n_val is None else [self.n_val]
 
         assert len(self.n_train) == len(dataset.n_observations)
@@ -1795,14 +1795,14 @@ class Trainer:
                 return n_observations.tolist()
 
             if self.n_train: return self.n_train # if already defined, return
-            if val_dset_provided_in_yaml: return train_dset.n_observations # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
+            if val_dset_provided_in_yaml: return train_dset.n_observations.tolist() # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
             # build n_train as "complmement" of n_val: from each_train_npz[i] drop a self.n_val[i]:int observations out of it
             if self.n_val: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_val)]
             return split_80_20(train_dset)
 
         def n_val_obs_for_each_npz():
             if self.n_val: return self.n_val
-            if val_dset_provided_in_yaml: return val_dset.n_observations # val can be itself since it is an indipendent dset
+            if val_dset_provided_in_yaml: return val_dset.n_observations.tolist() # val can be itself since it is an indipendent dset
             return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
 
         self.n_train = list(n_train_obs_for_each_npz())

@@ -1,8 +1,5 @@
 import logging
-from typing import Optional
-
 from geqtrain.data import AtomicDataDict
-from torch.utils.data import ConcatDataset
 from geqtrain.model import update_config
 from geqtrain.utils import Config
 
@@ -13,14 +10,14 @@ from geqtrain.nn import (
     EmbeddingAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
-    EmbeddingGraphAttrs,
-    ReadoutModule,
+    ReadoutModuleWithConditioning,
 )
 
 
-def HeadlessGlobalNodeModel(config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+
+def HeadlessGlobalNodeModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
-    callable builder
+
     """
     layers = buildHeadlessGlobalNodeModelLayers(config)
 
@@ -34,18 +31,26 @@ def buildHeadlessGlobalNodeModelLayers(config:Config):
 
     update_config(config)
 
+    if 'node_attributes' not in config:
+        raise ValueError('Missing node_attributes in yaml')
+    
     layers = {
-        # -- Encode -- #
         "node_attrs": (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
         )),
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-        "graph_attrs":        EmbeddingGraphAttrs,
     }
+    
+    if 'edge_attributes' in config:
+        edge_embedder = (EmbeddingAttrs, dict(
+            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+            attributes=config.get('edge_attributes'),
+        ))
+        layers["edge_attrs"] = edge_embedder
 
     layers.update({
+        "edge_radial_attrs":  BasisEdgeRadialAttrs,
+        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "local_interaction": (InteractionModule, dict(
             name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
@@ -55,14 +60,16 @@ def buildHeadlessGlobalNodeModelLayers(config:Config):
             out_irreps=None,
             output_ls=[0],
         )),
-        "local_edge_pooling": (EdgewiseReduce, dict(
+        "local_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
+            reduce=config.get("edge_reduce", "sum"),
         )),
-        "update": (ReadoutModule, dict(
+        "update": (ReadoutModuleWithConditioning, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            out_irreps=None,
+            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
+            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+            out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
         )),
         "context_aware_interaction": (InteractionModule, dict(

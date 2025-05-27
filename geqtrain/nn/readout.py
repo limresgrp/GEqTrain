@@ -414,10 +414,11 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         # get features from input and create empty tensor to store output
         features, out_features = super()._initialize_features(data)
         conditioning = data[self.conditioning_field]
-        features = self.film1(features, conditioning)
-        features = self.fc1(features)
-        features = self.film2(features, conditioning)
-        return features, out_features
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+        scalars = self.film1(scalars, conditioning)
+        scalars = self.fc1(scalars)
+        scalars = self.film2(scalars, conditioning)
+        return torch.cat((scalars, equiv), dim=-1), out_features
 
     def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)

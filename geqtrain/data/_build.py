@@ -86,22 +86,29 @@ def update_config(config, _config_dataset, prefix):
     )
     return _config
 
+def parse_dataset_file(filename):
+    with open(filename, "r") as f:
+        lines = f.readlines()
+    return [line.strip() for line in lines if line.strip()]
+
 def get_dataset_file_names_and_ensemble_indices(prefix, _config_dataset):
     inpup_key = f"{prefix}_input"  # get input path
     assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
     f_name = _config_dataset.get(inpup_key)
     ensemble_idx = 0
 
-    if isdir(f_name):  # can be dir
+    if f_name.endswith(".txt") or isdir(f_name):
         out = []
-        # Efficiently pre-filter entries using os.scandir
-        with os.scandir(f_name) as entries:
-            # Filter non-hidden files using entry.is_file() and entry.name
-            for entry in entries:
-                if entry.is_file() and not entry.name.startswith('.'):
-                    out.append((ensemble_idx, os.path.join(f_name, entry.name)))
-                    ensemble_idx += 1
-            return out
+        if f_name.endswith(".txt"):  # can be a .txt with a list of files
+            files = parse_dataset_file(f_name)
+        if isdir(f_name):  # can be dir
+            # Efficiently pre-filter entries using os.scandir
+            with os.scandir(f_name) as entries:
+                files = [os.path.join(f_name, entry.name) for entry in entries if entry.is_file() and not entry.name.startswith('.')]
+        for file in files:
+            out.append((ensemble_idx, file))
+            ensemble_idx += 1
+        return out
     return [(ensemble_idx, f_name)]  # can be 1 file
 
 def node_types_to_keep(config):
