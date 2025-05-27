@@ -10,7 +10,7 @@ default_dtype: float32
 
 # --- M O D E L --- #
 model_builders:
-  - HeadlessGlobalGraphModel
+  - HeadlessGlobalNodeModel
   - Heads
   - cls: NodewiseReduce
     name: node_pooling
@@ -23,6 +23,7 @@ model_builders:
 # - general - #
 use_weight_norm: false # Cannot jit compile when using this
 use_mace_product: true
+use_post_norm: false
 
 # - cutoffs - #
 r_max: 16.0
