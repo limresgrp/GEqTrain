@@ -82,7 +82,7 @@ dataset_num_workers: 32
 # - train - #
 dataset_list: # if you provide only training dataset, it will be split 80-20% in train and validation
   - dataset: npz
-    dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.train.txt
+    dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.debug.train.txt
     inmemory: false
     key_mapping:
       pos: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
@@ -96,7 +96,7 @@ dataset_list: # if you provide only training dataset, it will be split 80-20% in
 
 validation_dataset_list: # If you also provide the validation, this will be used as validation and the full training as training
   - validation_dataset: npz
-    validation_dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.val.txt
+    validation_dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.debug.val.txt
     inmemory: false
     key_mapping:
       pos: pos
@@ -142,9 +142,8 @@ type_names:
   - O
   - F
 
-target_names: ['alpha'] # 'mu', 'alpha', 'homo', 'lumo', 'gap', 'r2', 'zpve', 'U0', 'U', 'H', 'G', 'Cv']
-target_indices: [1]
-target_key: graph_output
+target_names: ['mu']
+target_key: mu
 
 # --- R E G U L A R I Z A T I O N --- #
 
@@ -154,18 +153,15 @@ dropout_edges: 0.01
 # --- L O S S --- #
 
 loss_coeffs:
-  - graph_output: # target -? key taken from dat dict of batch
+  - mu: # target -? key taken from dat dict of batch
     - 1. # scalar that can be used to weight/rescale impact of this loss onto gradients
     - MSELoss # loss function
 
 # --- M E T R I C S --- #
 
 metrics_components:
-  - graph_output:
+  - mu:
     - L1Loss
-  - graph_output:
-    - L1Loss
-    - PerTarget: true
 
 # --- L O G G I N G --- #
 
