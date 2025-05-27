@@ -1,7 +1,7 @@
 # general
-root: /capstor/scratch/cscs/dangiole/GEqTrain/qm9
-run_name: debug.alpha
-experiment_description: "Alpha - 100k train samples. 19.4k valid samples."
+root: /capstor/scratch/cscs/dangiole/GEqTrain/results/qm9
+run_name: prod.mu
+experiment_description: "Mu - 110k train samples. 10k valid samples."
 
 seed: 42
 dataset_seed: 42
@@ -18,7 +18,7 @@ use_weight_norm: false # Cannot jit compile when using this
 use_mace_product: true
 
 # - cutoffs - #
-r_max: 12.0
+r_max: 32.0
 
 # - radial basis - #
 edge_radial_attrs_basis: geqtrain.nn.BesselBasisVec
@@ -49,7 +49,7 @@ context_aware_interaction_head_dim: 64
 # - products - #
 local_interaction_use_mace_product: true
 
-interaction_output_ls: [0] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
+context_aware_interaction: [0, 1] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
 # ---  END interaction layers  --- #
 
 # --- START pooling layer --- #
@@ -74,23 +74,31 @@ dataset_num_workers: 32
 # - train - #
 dataset_list: # if you provide only training dataset, it will be split 80-20% in train and validation
   - dataset: npz
-    inmemory: true
-    dataset_input: /capstor/scratch/cscs/dangiole/qm9/npz/train
+    dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.train.txt
+    inmemory: false
     key_mapping:
-      pos: pos
-      x: node_input_features
-      y: graph_output
-      z: node_types
+      pos: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
+      atom_type: node_types
+      edge_index: edge_index
+      edge_type: edge_type
+      aromatic: aromatic
+      hybridization: hybridization
+      num_hs: num_hs
+      mu: mu
 
 validation_dataset_list: # If you also provide the validation, this will be used as validation and the full training as training
   - validation_dataset: npz
-    inmemory: true
-    validation_dataset_input: /capstor/scratch/cscs/dangiole/qm9/npz/valid
+    validation_dataset_input: /capstor/scratch/cscs/dangiole/qm9/mu.val.txt
+    inmemory: false
     key_mapping:
       pos: pos
-      x: node_input_features
-      y: graph_output
-      z: node_types
+      atom_type: node_types
+      edge_index: edge_index
+      edge_type: edge_type
+      aromatic: aromatic
+      hybridization: hybridization
+      num_hs: num_hs
+      mu: mu
 
 # - register fields - #
 node_fields:
@@ -99,11 +107,20 @@ node_fields:
 # - define node attributes - #
 node_attributes:
   node_types: # this kword must match the red kword in key_mapping
-    embedding_dimensionality: 32
+    embedding_dimensionality: 8
     fixed: true
-  node_input_features:
-    attribute_type: numerical
-    embedding_dimensionality: 11
+  aromatic:
+    embedding_dimensionality: 8
+    num_types: 2
+    fixed: true
+  hybridization:
+    embedding_dimensionality: 8
+    num_types: 4
+    fixed: true
+  num_hs:
+    embedding_dimensionality: 8
+    num_types: 8
+    fixed: true
 
 type_names:
   - X
@@ -124,7 +141,7 @@ target_key: graph_output
 # --- R E G U L A R I Z A T I O N --- #
 
 # dropout: 0.001
-dropout_edges: 0.005
+dropout_edges: 0.01
 
 # --- L O S S --- #
 
@@ -158,16 +175,16 @@ wandb_watch_kwargs:
 
 # --- T R A I N I N G --- #
 
-batch_size: 64
-validation_batch_size: 128
-dataloader_num_workers: 16
+batch_size: 128
+validation_batch_size: 256
+dataloader_num_workers: 8
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
 skip_chunking: true
 batch_max_atoms: 10000             # Limit the maximum number of nodes of a graph to be loaded on memory in a single batch
 
-max_epochs: 500
-learning_rate: 1.e-4
+max_epochs: 100
+learning_rate: 1.e-3
 train_val_split: random
 shuffle: true
 metrics_key: validation_loss
@@ -187,6 +204,7 @@ use_warmup: true
 warmup_epochs: 10
 
 lr_scheduler_name: CosineAnnealingLR
+lr_scheduler_min_lr: 1.e-6
 # # lr scheduler, drop lr if no improvement for tot epochs
 # lr_scheduler_name: ReduceLROnPlateau
 # lr_scheduler_patience: 3
@@ -196,7 +214,7 @@ early_stopping_lower_bounds:
   LR: 1.0e-7
 
 early_stopping_patiences:
-  validation_loss: 50
+  validation_loss: 10
 
 sanitize_gradients:   false # If true, zero out NaN gradients. Activate only if you are training on a dataset which can have bad behaving graphs
 model_requires_grads: false # If true, run validation step without using torch.no_grads(). Use if your model uses automatic differentiation internally
