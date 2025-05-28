@@ -110,7 +110,16 @@ validation_dataset_list: # If you also provide the validation, this will be used
 
 # - register fields - #
 node_fields:
-  - node_input_features
+  - node_types
+  - aromatic
+  - hybridization
+  - num_hs
+
+edge_fields:
+  - edge_type
+
+graph_fields:
+  - mu
 
 # - define node attributes - #
 node_attributes:
