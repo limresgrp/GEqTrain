@@ -168,13 +168,13 @@ def split_npz_by_fps(folder, key, num_train_samples=None, num_valid_samples=None
     idx_train = furthest_point_sampling(values, num_train_samples or int(0.8 * N))
     filenames_train = npz_files[idx_train]
     print(f"Selected {len(filenames_train)} samples for training.")
-    remaining = list(set(range(N)) - set(filenames_train))
+    remaining = list(set(range(N)) - set(idx_train))
     print("Performing furthest point sampling for validation split...")
     idx_val = furthest_point_sampling(values[remaining], num_valid_samples or len(remaining) // 2)
     idx_val = [remaining[i] for i in idx_val]
     filenames_val = npz_files[idx_val]
     print(f"Selected {len(filenames_val)} samples for validation.")
-    idx_test = list(set(range(N)) - set(filenames_train) - set(filenames_val))
+    idx_test = list(set(range(N)) - set(idx_train) - set(idx_val))
     filenames_test = npz_files[idx_test]
     print(f"Selected {len(filenames_test)} samples for test.")
     
