@@ -342,7 +342,8 @@ class QM9:
 
             # Create all2all edge_index (including self-loops)
             N = mol.GetNumAtoms()
-            edge_index = torch.cartesian_prod(torch.arange(N), torch.arange(N)).t().unsqueeze(0)
+            edge_index = torch.cartesian_prod(torch.arange(N), torch.arange(N)).t()
+            edge_index = edge_index[:, edge_index[0] != edge_index[1]].unsqueeze(0)
 
             # Assign bond type to all2all edges (0 for non-bonded)
             bond_dict = {(u.item(), v.item()): t.item() for u, v, t in zip(edge_bond[0], edge_bond[1], edge_bond_type)}
