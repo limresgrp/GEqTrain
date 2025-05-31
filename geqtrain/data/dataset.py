@@ -1,6 +1,7 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
+import traceback
 from typing import (
     List,
     Optional,
@@ -668,7 +669,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 transforms=transforms,
             )
         except Exception as e:
-            logging.error(f"Error in file {self.raw_file_names}")
+            logging.error(f"Error in file {self.raw_file_names}. Traceback: {traceback.format_exc()}")
             raise e
 
     @property
