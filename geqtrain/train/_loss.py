@@ -82,8 +82,8 @@ class SimpleLoss:
                 ref_key = torch.full_like(pred_key, fill_value)
             except ValueError:
                 raise ValueError(f"Invalid fill value for ref: {self.ref}. It must be convertible to a float.")
-
-        ref_key = ref.get(key, None)
+        else:
+            ref_key = ref.get(key, None)
         assert isinstance(ref_key,  torch.Tensor), f"Expected prediction tensor for ref key {key}, found {type(ref_key)}"
 
         return pred_key, ref_key
