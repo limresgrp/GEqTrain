@@ -1,9 +1,8 @@
 import math
 import functools
 import torch
-import wandb
 
-from typing import Optional, List, Tuple, Union
+from typing import Optional, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 from einops.layers.torch import Rearrange
@@ -23,39 +22,29 @@ from geqtrain.nn.allegro import (
     Contracter,
     MakeWeightedChannels,
 )
-from geqtrain.utils.tp_utils import SCALAR, tp_path_exists
+from geqtrain.utils.tp_utils import SCALAR
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
 
-from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
-from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-from geqtrain.nn.AdaLN import AdaLN
+from geqtrain.nn.mace.irreps_tools import inverse_reshape_irreps
 
 
-def apply_residual_stream(skip_residual: bool, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
-    if skip_residual:
-        # Normal (non-residual) update
-        # index_copy replaces, unlike index_add
-        return torch.index_copy(latents, 0, active_edges, new_latents)
-
-    assert this_layer_update_coeff is not None
+def apply_residual_stream(x, x_new, update_coeff):
     # At init, we assume new and old to be approximately uncorrelated
     # Thus their variances add
     # we always want the latent space to be normalized to variance = 1.0,
     # because it is critical for learnability. Still, we want to preserve
     # the _relative_ magnitudes of the current latent and the residual update
-    # to be controled by `this_layer_update_coeff`
+    # to be controled by `update_coeff`
     # Solving the simple system for the two coefficients:
-    #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+    #   a^2 + b^2 = 1  (variances add)   &    a * update_coeff = b
     # gives
-    #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+    #   a = 1 / sqrt(1 + update_coeff^2)  &  b = update_coeff / sqrt(1 + update_coeff^2)
     # rsqrt is reciprocal sqrt
-    coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
-    coefficient_new = this_layer_update_coeff * coefficient_old
+    coefficient_old = torch.rsqrt(update_coeff.square() + 1)
+    coefficient_new = update_coeff * coefficient_old
     # Residual update
-    # Note that it only runs when there are latents to resnet with, so not at the first layer
-    # index_add adds only to the edges for which we have something to contribute
-    return torch.index_add(coefficient_old * latents, 0, active_edges, coefficient_new * new_latents)
+    return coefficient_old * x + coefficient_new * x_new
 
 
 @compile_mode("script")
@@ -72,15 +61,13 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         # optional params
         out_irreps_node: Optional[Union[o3.Irreps, str]] = None,
         out_irreps_edge: Optional[Union[o3.Irreps, str]] = None,
-        # cutoff
-        # cutoff=TanhCutoff,
-        # cutoff_kwargs={},
         # alias:
         out_field_node        = AtomicDataDict.NODE_FEATURES_KEY,
         out_field_edge        = AtomicDataDict.EDGE_FEATURES_KEY,
         # hyperparams:
         latent_dim:           int = 64,
         eq_multiplicity:      int = 8,
+        use_attention:       bool = False,
         head_dim:             int = 16,
         product_correlation:  int  = 2,
         # MLP parameters:
@@ -173,6 +160,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
                 GotenInteractionLayer(
                     spharms_irreps,
                     eq_multiplicity,
+                    use_attention,
                     head_dim,
                     latent_dim,
                     latent,
@@ -191,12 +179,15 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=final_generate_n_weights,
         )
 
-        self.t_ij_emb = latent(
-            mlp_input_dimension=self.latent_dim,
-            mlp_output_dimension=out_irreps_edge.dim,
-        )
+        # self.t_ij_emb = latent(
+        #     mlp_input_dimension=self.latent_dim,
+        #     mlp_output_dimension=out_irreps_edge.dim,
+        # )
 
         self.reshape_node = inverse_reshape_irreps(out_irreps_node)
+
+        # update
+        self.update_coeffs = torch.nn.Parameter(torch.zeros(num_layers, dtype=torch.get_default_dtype()))
 
         # - End build modules - #
         
@@ -236,19 +227,19 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center, edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY]
-        edge_length       = data[AtomicDataDict.EDGE_LENGTH_KEY]
         phi_ij            = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY]
         spharms           = data[AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY]
 
         num_nodes, h, X, t_ij = self.init_features(data, edge_center, edge_neighbor, phi_ij, spharms)
+        update_coeffs = torch.sigmoid(self.update_coeffs)
 
-        for layer in self.layers:
-            h, X, t_ij = layer(h, X, t_ij, edge_center, edge_neighbor, phi_ij, spharms, num_nodes)
+        for layer, update_coeff in zip(self.layers, update_coeffs):
+            h, X, t_ij = layer(h, X, t_ij, edge_center, edge_neighbor, phi_ij, spharms, update_coeff, num_nodes)
 
         # --- final layer --- #
         w = self.h_emb(h)
         data[self.out_field_node] = self.reshape_node(self.linear(X, w))
-        data[self.out_field_edge] = self.t_ij_emb(t_ij)
+        # data[self.out_field_edge] = self.t_ij_emb(t_ij)
 
         return data
 
@@ -259,11 +250,13 @@ class GotenInteractionLayer(torch.nn.Module):
         self,
         spharms_irreps: o3.Irreps,
         eq_multiplicity: int,
+        use_attention: bool,
         head_dim: int,
         latent_dim: int,
         latent,
     ) -> None:
         super().__init__()
+        self.use_attention = use_attention
         self.latent_dim = latent_dim
 
         # irreps
@@ -293,13 +286,70 @@ class GotenInteractionLayer(torch.nn.Module):
         )
         self.node_norm = torch.nn.LayerNorm(self.latent_dim)
 
+        # tensor refinement
+        self.W_to_query = Linear(
+            irreps_in=eq_irreps,
+            irreps_out=eq_irreps,
+            internal_weights=True,
+            shared_weights=True,
+        )
+
+        self.W_to_key = Linear(
+            irreps_in=eq_irreps,
+            irreps_out=eq_irreps,
+            internal_weights=True,
+            shared_weights=True,
+        )
+
+        # tp
+        tmp_i_out: int = 0
+        instr, full_out_irreps = [], []
+        for i_1, (_, ir_1) in enumerate(eq_irreps):
+            for i_2, (_, ir_2) in enumerate(eq_irreps):
+                if SCALAR in ir_1 * ir_2: # checks if this L can be obtained via tp between the 2 considered irreps
+                    instr.append((i_1, i_2, tmp_i_out))
+                    full_out_irreps.append((eq_multiplicity, SCALAR))
+                    tmp_i_out += 1
+        full_out_irreps = o3.Irreps(full_out_irreps)
+
+        tp_out_irreps = o3.Irreps([(eq_multiplicity, ir) for _, ir in full_out_irreps])
+        self.tp = Contracter(
+            irreps_in1=eq_irreps,
+            irreps_in2=eq_irreps,
+            irreps_out=tp_out_irreps,
+            instructions=instr,
+            connection_mode=("uuu"),
+            has_weight=False,
+            normalization='component', # 'norm' or 'component'
+        )
+        self.tp_norm = SO3_LayerNorm(tp_out_irreps)
+
+        self.gamma_w = latent(
+            mlp_input_dimension=full_out_irreps.dim,
+            mlp_output_dimension=latent_dim,
+        )
+
+        self.gamma_t = latent(
+            mlp_input_dimension=latent_dim,
+            mlp_output_dimension=latent_dim,
+        )
+
         # attention
-        self.W_query      = torch.nn.Parameter(torch.randn(latent_dim, eq_multiplicity * head_dim))
-        self.W_key        = torch.nn.Parameter(torch.randn(latent_dim, eq_multiplicity * head_dim))
-        self.rearrange_qk = Rearrange('e (m h) -> e m h', m=eq_multiplicity, h=head_dim)
-        self.isqrtd       = math.isqrt(head_dim)
+        if self.use_attention:
+            self.W_query      = torch.nn.Parameter(torch.randn(latent_dim, eq_multiplicity * head_dim))
+            self.W_key        = torch.nn.Parameter(torch.randn(latent_dim, eq_multiplicity * head_dim))
+            self.rearrange_qk = Rearrange('e (m h) -> e m h', m=eq_multiplicity, h=head_dim)
+            self.isqrtd       = math.isqrt(head_dim)
+        else:
+            self.W_query, self.W_key, self.rearrange_qk, self.isqrtd = None, None, None, None
 
     def apply_attention(self, x, h_j, t_ij, edge_center) -> torch.Tensor:
+        # Asserts needed for JIT
+        assert self.W_query      is not None
+        assert self.W_key        is not None
+        assert self.rearrange_qk is not None
+        assert self.isqrtd       is not None
+
         Q = torch.einsum('ed,dw -> ew', t_ij, self.W_query)
         Q = self.rearrange_qk(Q)
 
@@ -320,20 +370,30 @@ class GotenInteractionLayer(torch.nn.Module):
         # updated local_env_per_active_atom
         return self.reshape_in_module(expanded_features_per_active_atom)
 
-    def forward(self, h, X, t_ij, edge_center, edge_neighbor, phi_ij, spharms, num_nodes):
+    def forward(self, h, X, t_ij, edge_center, edge_neighbor, phi_ij, spharms, update_coeff, num_nodes):
         h_j = h[edge_neighbor]
 
         env_ij_scalar = torch.einsum('ed,dw -> ew', t_ij, self.W_rs)
         env_j_scalar  = self.h_j_emb(h_j)
         env_ij_w      = env_ij_scalar * env_j_scalar
 
-        # ...
-        w_index = 0
+        # h
+        w_index   = 0
         delta_h_j = env_ij_w.narrow(-1, w_index, self.latent_dim) # (dim, start, length)
         delta_h   = scatter(delta_h_j, edge_center, dim=0, dim_size=num_nodes)
         h         = self.node_norm(h + delta_h)
         # h_j = h[edge_neighbor] ? Optional. Check if it works better
 
+        # t_ij
+        X_i, X_j = X[edge_center], X[edge_neighbor]
+        X_i = self.W_to_query(X_i)
+        X_j = self.W_to_key(X_j)
+        w_ij = self.tp_norm(self.tp(X_i, X_j))
+        w_ij = w_ij.view(len(w_ij), -1)
+        delta_t_ij = self.gamma_w(w_ij) * self.gamma_t(t_ij)
+        t_ij = apply_residual_stream(t_ij, delta_t_ij, update_coeff)
+        
+        # X
         delta_spharm_ij_w = env_ij_w.narrow(-1, w_index, self.env_weighter.weight_numel) # (dim, start, length)
         w_index += self.env_weighter.weight_numel
         delta_spharm_ij = self.env_weighter(spharms, delta_spharm_ij_w)
@@ -343,8 +403,10 @@ class GotenInteractionLayer(torch.nn.Module):
         X_ij = X[edge_neighbor]
         delta_eq_ij = self.linear(X_ij, delta_X_ij_w)
 
-        delta_X_ij = self.apply_attention(delta_spharm_ij + delta_eq_ij, h_j, t_ij, edge_center)
+        delta_X_ij = delta_spharm_ij + delta_eq_ij
+        if self.use_attention:
+            delta_X_ij = self.apply_attention(delta_X_ij, h_j, t_ij, edge_center)
         delta_X = scatter(delta_X_ij, edge_center, dim=0, dim_size=num_nodes)
-        X = self.node_eq_norm(X + delta_X)
+        X = self.node_eq_norm(apply_residual_stream(X, delta_X, update_coeff))
 
-        return h, X, t_ij # + delta_t_ij
+        return h, X, t_ij
