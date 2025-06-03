@@ -13,7 +13,7 @@ from ._weight_init import (
 )
 from ._grads import GradOutput
 from ._module import Module
-
+from ._goten_model import GotenModel
 from ._build import model_from_config
 
 __all__ = [
@@ -33,4 +33,5 @@ __all__ = [
     GradOutput,
     Combine,
     Module,
+    GotenModel,
 ]

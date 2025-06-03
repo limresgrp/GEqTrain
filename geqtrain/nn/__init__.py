@@ -11,6 +11,7 @@ from ._edgewise import (  # noqa: F401
     # EdgewiseLinear,
 )  # noqa: F401
 from .interaction import InteractionModule
+from .goten import GotenInteractionModule
 from .readout import ReadoutModule, ReadoutModuleWithConditioning
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
@@ -55,4 +56,5 @@ __all__ = [
     DDP,
     SetRequireGradsOutput,
     GradientOutput,
+    GotenInteractionModule,
 ]
