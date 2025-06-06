@@ -83,8 +83,15 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             with open(kano_emb_path, 'rb') as f:
                 self.kano_embeddings = pickle.load(f) # dict of atom_type: np.array
                 kano_dims = self.kano_embeddings[0].shape[0] # check if all embeddings have the same size
-                self.kano_embeddings = torch.nn.ParameterDict({str(k): torch.nn.Parameter(torch.tensor(v, dtype=torch.float32)) for k, v in self.kano_embeddings.items()})
-                self.kano_embeddings.requires_grad = True # can freeze the embeddings here if needed
+                # self.kano_embeddings = torch.nn.ParameterDict({str(k): torch.nn.Parameter(torch.tensor(v, dtype=torch.float32)) for k, v in self.kano_embeddings.items()})
+                self.kano_embeddings = torch.nn.ParameterDict({
+                    str(k): torch.nn.Parameter(
+                            torch.tensor(v, dtype=torch.float32)/torch.std(torch.tensor(v, dtype=torch.float32)),
+                            requires_grad=False,
+                        )
+                    for k, v in self.kano_embeddings.items()
+                })
+
         else:
             self.use_kano_embeddings = False
 
@@ -100,12 +107,13 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
                 self._numerical_attrs.append(field)
             else:
                 n_types = values.get('actual_num_types', num_types) # ! IMPO should be + 1 for masking category but handled via cfg.yaml s.t. round emb_module.weight.shape[0] to be set to the closest power of 2 possible
-                emb_module = torch.nn.Embedding(n_types, embedding_dim)
+                emb_module = torch.nn.Embedding(n_types, embedding_dim, max_norm=math.sqrt(embedding_dim))
 
                 # TODO explore these different options
                 # torch.nn.init.normal_(emb_module.weight, mean=0, std=1.0) # options: 1) std=1 2) math.isqrt(embedding_dim) 3) 0.3333*math.isqrt(embedding_dim) as in https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/chronicles.md
-                torch.nn.init.xavier_uniform_(emb_module.weight)
-                emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
+                # torch.nn.init.xavier_uniform_(emb_module.weight)
+                # emb_module.weight.data *= 0.3333 * math.isqrt(embedding_dim)
+                torch.nn.init.normal_(emb_module.weight, mean=0.0, std=1.0) # Large Initial Magnitudes -> Large Initial Outputs -> Large Initial Gradients
 
                 self.attr_modules[field] = emb_module
 

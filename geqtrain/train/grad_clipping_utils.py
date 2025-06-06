@@ -40,13 +40,17 @@ def gradient_clipping(model, gradnorm_queue, max_gradient_norm, rank):
     # clip at median on moving window: smoothest option robust to outliers
     max_grad_norm = min(max_gradient_norm, gradnorm_queue.median())
 
+    if max_grad_norm < 1.0:
+        max_grad_norm = 1.0
+
     # Clips gradient and returns the norm
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm, norm_type=2.0)
 
-    if float(grad_norm) > max_grad_norm:
-        gradnorm_queue.add(float(max_grad_norm))
-    else:
-        gradnorm_queue.add(float(grad_norm))
+    # if float(grad_norm) > max_grad_norm:
+    #     gradnorm_queue.add(float(max_grad_norm))
+    # else:
+    #     gradnorm_queue.add(float(grad_norm))
+    gradnorm_queue.add(float(grad_norm))
 
     if float(grad_norm) > max_grad_norm:
         print(f'Rank {rank} clipped gradient with value {grad_norm:.1f} while allowed {max_grad_norm:.1f}')

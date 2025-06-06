@@ -17,6 +17,7 @@ from geqtrain.nn import (
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
     ReadoutModule,
+    ReadoutModuleWithConditioning
 )
 
 def appendNGNNLayers(config):
@@ -25,16 +26,16 @@ def appendNGNNLayers(config):
     modules = {}
     logging.info(f"--- Number of GNN layers {N}")
 
-    # attention on embeddings
-    modules.update({
-        "update_emb": (ReadoutModule, dict(
-            field=AtomicDataDict.NODE_ATTRS_KEY,
-            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
-            out_irreps=None, # outs tensor of same o3.irreps of out_field
-            resnet=True,
-            num_heads=11, #! this number must be a 0 reminder of the sum of catted nn.embedded node features
-        ))
-    })
+    # # attention on embeddings
+    # modules.update({
+    #     "update_emb": (ReadoutModule, dict(
+    #         field=AtomicDataDict.NODE_ATTRS_KEY,
+    #         out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+    #         out_irreps=None, # outs tensor of same o3.irreps of out_field
+    #         resnet=True,
+    #         num_heads=11, #8, #! this number must be a 0 reminder of the sum of catted nn.embedded node features
+    #     ))
+    # })
 
     for layer_idx in range(N-1):
         layer_name:str = 'local_interaction' if layer_idx == 0 else f"interaction_{layer_idx}"
@@ -58,7 +59,16 @@ def appendNGNNLayers(config):
                 out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
                 out_irreps=None, # outs tensor of same o3.irreps of out_field
                 resnet=True,
+                normalize_l1=True,
             )),
+            # f"update_{layer_idx}": (ReadoutModuleWithConditioning, dict(
+            #     field=AtomicDataDict.NODE_FEATURES_KEY,
+            #     conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
+            #     out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
+            #     out_irreps=None, # outs tensor of same o3.irreps of out_field
+            #     resnet=True,
+            #     scalar_attnt=True,
+            # )),
         })
 
     modules.update({
@@ -79,7 +89,16 @@ def appendNGNNLayers(config):
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
+            normalize_l1=True,
         )),
+        # f"update": (ReadoutModuleWithConditioning, dict(
+        #         field=AtomicDataDict.NODE_FEATURES_KEY,
+        #         conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
+        #         out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
+        #         out_irreps=None, # outs tensor of same o3.irreps of out_field
+        #         resnet=True,
+        #         scalar_attnt=True,
+        # )),
         "global_node_pooling": (NodewiseReduce, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
@@ -97,6 +116,7 @@ def moreGNNLayers(config:Config):
         node_embedder = (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
+            use_kano_embeddings=config.get('use_kano_embeddings'),
         ))
     else:
         raise ValueError('Missing node_attributes in yaml')

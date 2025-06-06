@@ -62,6 +62,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         scalar_attnt: bool = True,
         num_heads: int = 32,
         dataset_mode: str = 'single', # single|ensemble
+        normalize_l1:bool=True,
     ):
         super().__init__()
 
@@ -207,6 +208,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         # if self.use_l1_scalarizer:
         #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
+        # to split l0 and l>1
+        self.split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
+
+
         if self.field in _NODE_FIELDS:
             idx_key = 'batch'
         elif self.field in _EDGE_FIELDS: # edge can't attention; node/ensemble can
@@ -231,6 +236,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
+
+        self.normalize_l1=normalize_l1
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         if self.ignore_amp:
@@ -270,8 +277,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         return features, out_features
 
     def _apply_scalar_attnt(self, features, data):
-        split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
-        scalars, equiv = torch.split(features, [split_index, features.shape[-1] - split_index], dim=-1)
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
         scalars = self.ensemble_attnt1(scalars, data)
         scalars = self.ensemble_attnt2(scalars, data)
         features = torch.cat((scalars, equiv), dim=-1)
@@ -292,6 +298,10 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         else:
             # else the weights are computed via mlp using scalars
             weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
+
+            if self.normalize_l1:
+                eq_features = eq_features/torch.norm(eq_features, dim=-1, keepdim=True)
+
             eq_features = self.eq_readout(eq_features, weights)
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features
@@ -330,6 +340,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         ignore_amp: bool = False, # wheter to adopt amp or not
         scalar_attnt: bool = True,
         num_heads: int = 32,
+        normalize_l1:bool=False,
     ):
         super().__init__(
             field,
@@ -349,6 +360,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
             ignore_amp,
             scalar_attnt,
             num_heads,
+            normalize_l1,
         )
 
         self.conditioning_field = conditioning_field
@@ -390,14 +402,15 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 mlp_nonlinearity=None,
             )
 
-    def _initialize_features(self, data):
+    def _initialize_features(self, data: AtomicDataDict.Type):
         # get features from input and create empty tensor to store output
         features, out_features = super()._initialize_features(data)
         conditioning = data[self.conditioning_field]
-        features = self.film1(features, conditioning)
-        features = self.fc1(features)
-        features = self.film2(features, conditioning)
-        return features, out_features
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+        scalars = self.film1(scalars, conditioning)
+        scalars = self.fc1(scalars)
+        scalars = self.film2(scalars, conditioning)
+        return torch.cat((scalars, equiv), dim=-1), out_features
 
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)
@@ -413,6 +426,9 @@ class ReadoutModuleWithConditioning(ReadoutModule):
             eq_features = self.eq_readout(eq_features)
         else:
             # else the weights are computed via mlp using scalars
+            if self.normalize_l1:
+                eq_features = eq_features/torch.norm(eq_features, dim=-1, keepdim=True)
+
             weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
             weights = self.film_vectorial(weights, data[self.conditioning_field])
             eq_features = self.eq_readout(eq_features, weights)

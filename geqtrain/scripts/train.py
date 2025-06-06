@@ -154,6 +154,8 @@ def fresh_start(rank: int, world_size: int, config: dict, train_dataset, validat
             logging.info("Successfully built the network!")
 
         trainer.init_model(model=model)
+        if hasattr(trainer, "init") and callable(trainer.init):
+            trainer.init()
         trainer.update_kwargs(config)
 
         # Equivar test
@@ -229,7 +231,8 @@ def check_for_config_updates(config):
     modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components",
                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads",
                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
-                        "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds"
+                        "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds",
+                        'end_of_epoch_callbacks', 'fine_tune'
                     ] # todo: "num_types" should be added here after moving binning functionality away from dataset creation
 
     for k,v in config.items():

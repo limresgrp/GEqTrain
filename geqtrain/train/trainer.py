@@ -844,7 +844,7 @@ class Trainer:
             from torch_ema import ExponentialMovingAverage  # External library for EMA: https://pypi.org/project/torch-ema/
             self.ema = ExponentialMovingAverage(
             self.model.parameters(),
-            decay=0.999,  # Decay rate for EMA (adjustable)
+            decay=0.9999,  # Decay rate for EMA (adjustable)
             use_num_updates=True,  # Dynamically adjust decay based on updates
             )
 
@@ -1177,7 +1177,6 @@ class Trainer:
         # drop weights that must be initialized from scratch (if any)
         model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
         strict = config.get('load_model_state_strict', True) and not ('fine_tune' in config)
-        strict=False
         out = model.load_state_dict(model_state_dict, strict=strict)
         print(f"Model loading message: {out}")
         return model, config
@@ -1424,6 +1423,8 @@ class Trainer:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
                     grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, 0 if not self.is_ddp else self.rank)
+                    model = self.model.module if self.is_ddp else self.model
+                    torch.nn.utils.clip_grad_norm_(model.node_attrs.parameters(), max_norm=1.0)  # Aggressive clip for embeddings
                     if self.is_master:
                         self.gradnorms.append(grad_norm.item())
                         self.gradnorms_clip.append(float(max_grad_norm))
@@ -1908,8 +1909,10 @@ class Trainer:
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
+    def __init__(self, *args, **kwargs):
+        super(TrainerWandB, self).__init__(*args, **kwargs)
+
     def init(self, **kwargs):
-        super(TrainerWandB, self).init(**kwargs)
 
         if not self.is_master:
             return
@@ -1952,7 +1955,6 @@ class DistributedTrainer(Trainer):
     def init(self, **kwargs):
         # Set the device for this process
         torch.cuda.set_device(self.rank)
-        super(DistributedTrainer, self).init(**kwargs)
 
     def init_dataloader(
         self,

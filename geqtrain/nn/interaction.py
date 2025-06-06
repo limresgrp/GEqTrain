@@ -35,8 +35,9 @@ def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
         with torch.no_grad():  # optional, but just in case
             s = "train" if train else "eval"
             try:
+                norm_mean = t.mean().item() / t.numel()
                 wandb.log({
-                    f"activations_dists/{s}/{name}.mean": t.mean().item(),
+                    f"activations_dists/{s}/{name}.mean": norm_mean,
                     f"activations_dists/{s}/{name}.std":  t.std().item(),
                 })
             except RuntimeError as e:
@@ -295,6 +296,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             if self.learn_cutoff_bias:
                 self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
+                self.rbg_gating = torch.nn.Linear(self.edge_invariant_dim, self.latent_dim, bias=False)
 
             self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
 
@@ -380,6 +382,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 new_latents[:, :new_latents.size(1)//2] = cutoff_coeffs.unsqueeze(-1) * new_latents[:, :new_latents.size(1)//2]
 
             new_latents = self.post_norm(new_latents)
+
+            #! add gating
+            if self.learn_cutoff_bias:
+                # closing the AdaLn conditioning
+                new_latents = new_latents * torch.sigmoid(self.rbg_gating(data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY]))
+
             latents = apply_residual_stream(False, latents, new_latents, layer_update_coefficients[layer_index], active_edges)
 
             # last update on residued features
@@ -388,8 +396,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.name}.out_features.scalar", latents, self.training)
-          if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.vectorial", eq_features, self.training)
+            log_feature_on_wandb(f"{self.name}.out_features.scalar", latents, self.training)
+            if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.vectorial", eq_features, self.training)
         return data
 
 
@@ -582,6 +590,7 @@ class InteractionLayer(torch.nn.Module):
 
         if self.learn_cutoff_bias:
             self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
+            self.rbg_gating = torch.nn.Linear(self.edge_invariant_dim, self.latent_dim+self.tp_n_scalar_out* self.env_embed_multiplicity, bias=False)
 
         self.post_norm = torch.nn.LayerNorm(self.latent_dim)
 
@@ -703,6 +712,10 @@ class InteractionLayer(torch.nn.Module):
         scalars = self.rearrange_scalars(scalars)
 
         inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
+
+        if self.learn_cutoff_bias:
+            # closing the AdaLn conditioning
+            inv_latent = inv_latent * torch.sigmoid(self.rbg_gating(data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY]))
 
         if self.debug and wandb.run is not None:
             log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
