@@ -1,8 +1,5 @@
-from typing import Optional
 import logging
-
 from geqtrain.data import AtomicDataDict
-from torch.utils.data import ConcatDataset
 from geqtrain.utils import Config
 
 from geqtrain.model import update_config
@@ -13,14 +10,11 @@ from geqtrain.nn import (
     EmbeddingAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
-    EmbeddingGraphAttrs,
 )
 
 
 
-def HeadlessNodeModel(
-    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
-) -> SequentialGraphNetwork:
+def HeadlessNodeModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
@@ -39,16 +33,17 @@ def buildNodeModelLayers(config:Config):
     layers = {
         "node_attrs": (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
+            eq_out_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
             attributes=config.get('node_attributes'),
+            eq_attributes=config.get('eq_node_attributes'),
         )),
     }
 
     if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
+        layers["edge_attrs"] = (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             attributes=config.get('edge_attributes'),
         ))
-        layers["edge_attrs"] = edge_embedder
 
     layers.update({
         "edge_radial_attrs":  BasisEdgeRadialAttrs,

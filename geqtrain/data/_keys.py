@@ -45,8 +45,10 @@ INPUT_STRUCTURE_KEYS: Final[List[str]] = [
     EDGE_TYPE_KEY,
 ]
 
-# [n_nodes, dim] (possibly equivariant) node input attributes
-NODE_ATTRS_KEY: Final[str] = "node_attrs" # usually one-hot encoded input category
+# [n_nodes, dim]
+NODE_ATTRS_KEY:    Final[str] = "node_attrs"    # scalar input features
+# [n_nodes, dim]
+NODE_EQ_ATTRS_KEY: Final[str] = "node_eq_attrs" # equivariant iput features
 # [n_nodes, dim] (possibly equivariant) features of each node
 NODE_FEATURES_KEY: Final[str] = "node_features" # the processed version of NODE_ATTRS_KEY, used to do not overwrite NODE_ATTRS_KEY
 # [n_nodes, dim] (possibly equivariant) output features of each node

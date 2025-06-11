@@ -82,6 +82,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     '''
     num_layers: int
     node_invariant_field: str
+    node_equivariant_field: str
     edge_invariant_field: str
     edge_equivariant_field: str
     env_embed_multiplicity: int
@@ -99,6 +100,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         TanhCutoff_n: float = 6.,
         # alias:
         node_invariant_field   = AtomicDataDict.NODE_ATTRS_KEY,
+        node_equivariant_field = AtomicDataDict.NODE_EQ_ATTRS_KEY,
         edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
         edge_equivariant_field = AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
         out_field              = AtomicDataDict.EDGE_FEATURES_KEY,
@@ -132,6 +134,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # save parameters
         self.num_layers             = num_layers
         self.node_invariant_field   = node_invariant_field
+        self.node_equivariant_field = node_equivariant_field
         self.edge_invariant_field   = edge_invariant_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
@@ -156,14 +159,21 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Embed to the spharm * it as mul
         input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
-        assert all(mul == 1 for mul, _ in input_edge_eq_irreps)
-
         env_embed_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
+
+        if AtomicDataDict.NODE_EQ_ATTRS_KEY in self.irreps_in:
+            # Update edge equivariant attrs with equivariant input features
+            node_eq_irreps = self.irreps_in[AtomicDataDict.NODE_EQ_ATTRS_KEY]
+            self.node_eq_irreps_slices = node_eq_irreps.slices()
+            self.node_eq_irreps_ls     = node_eq_irreps.ls
+            input_edge_eq_irreps      += 2 * node_eq_irreps
+            input_edge_eq_irreps       = input_edge_eq_irreps.sort().irreps
+
         assert (env_embed_irreps[0].ir == SCALAR), "env_embed_irreps must start with scalars"
 
         # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
         if out_irreps is None:
-            out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in input_edge_eq_irreps])
+            out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in env_embed_irreps])
         else:
             out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
 
@@ -174,8 +184,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         if output_ls is None:
             output_ls = out_irreps.ls + [0]
         assert isinstance(output_ls, List)
-        assert all([(l in input_edge_eq_irreps.ls) for l in output_ls]), \
-            f"Required output ls {output_ls} cannot be computed using l_max={max(input_edge_eq_irreps.ls)}"
+        assert all([(l in env_embed_irreps.ls) for l in output_ls]), \
+            f"Required output ls {output_ls} cannot be computed using l_max={max(env_embed_irreps.ls)}"
 
         # [optional] set out_irreps multiplicity
         if output_mul is None:
@@ -185,7 +195,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 output_mul = self.latent_dim
 
         #! the interaction layer always keeps l=0, even if requested out is: l>0
-        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in input_edge_eq_irreps if ir.l in output_ls])
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in env_embed_irreps if ir.l in output_ls])
         self.out_multiplicity = output_mul
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges (possibly embedded)
@@ -251,7 +261,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         for layer_index, tps_irreps in enumerate(zip(tps_irreps_in, tps_irreps_out)):
             is_last_layer = layer_index == self.num_layers - 1
-
             self.linear_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0]) if is_last_layer else env_embed_irreps
 
             self.interaction_layers.append(
@@ -261,6 +270,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                     parent=self,
                     env_embed_irreps=env_embed_irreps,
                     tps_irreps=tps_irreps,
+                    input_edge_eq_irreps=input_edge_eq_irreps,
                     linear_out_irreps=self.linear_out_irreps,
                     product_correlation=product_correlation,
                     previous_latent_dim=self.interaction_layers[-1].latent_mlp.out_features if layer_index > 0 else None,
@@ -331,7 +341,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         else:
             inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
 
-        # The nonscalar features. Initially, the edge data.
+        # The nonscalar features
+        if AtomicDataDict.NODE_EQ_ATTRS_KEY in data:
+            node_equivariants = data[AtomicDataDict.NODE_EQ_ATTRS_KEY]
+            edge_attr = torch.cat([edge_attr, node_equivariants[edge_center], node_equivariants[edge_neighbor]], dim=-1)
         eq_features = edge_attr
 
         # Compute the sigmoids vectorized instead of each loop
@@ -408,6 +421,7 @@ class InteractionLayer(torch.nn.Module):
         parent: InteractionModule,
         env_embed_irreps: o3.Irreps,
         tps_irreps: Tuple[o3.Irreps],
+        input_edge_eq_irreps: o3.Irreps,
         linear_out_irreps: o3.Irreps,
         product_correlation: int,
         previous_latent_dim: Optional[int],
@@ -475,11 +489,11 @@ class InteractionLayer(torch.nn.Module):
         assert all(ir == SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
 
         # Build tensor product between env-aware node feats and edge attrs
-        self.eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in l_arg_irreps])
-        self.eq_features_irreps_norm = SO3_LayerNorm(self.eq_features_irreps)
+        eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in l_arg_irreps])
+        self.eq_features_irreps_norm = SO3_LayerNorm(eq_features_irreps)
 
         self.tp = Contracter(
-            irreps_in1=self.eq_features_irreps,
+            irreps_in1=eq_features_irreps,
             irreps_in2=o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in env_embed_irreps]),
             irreps_out=o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in full_out_irreps]),
             instructions=instr,
@@ -521,6 +535,12 @@ class InteractionLayer(torch.nn.Module):
         self.latest_linear_out_irreps = linear_out_irreps
 
         if self.layer_index == 0:
+            self.eq_features_linear = Linear(
+                irreps_in=o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps]),
+                irreps_out=env_embed_irreps,
+                internal_weights=True,
+                shared_weights=True,
+            )
             assert previous_latent_dim is None
             # at the first layer, we have no invariants from previous TPs
             self.latent_mlp = two_body_latent(
@@ -539,6 +559,7 @@ class InteractionLayer(torch.nn.Module):
                 mlp_output_dimension=self.latent_dim,
             )
         else:
+            self.eq_features_linear = None
             assert previous_latent_dim is not None
             self.latent_dim = previous_latent_dim
             self.latent_mlp = latent(
@@ -550,6 +571,12 @@ class InteractionLayer(torch.nn.Module):
                 ),
                 mlp_output_dimension=self.latent_dim,
             )
+        self.emb_latent_linear = Linear(
+            irreps_in=o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps]),
+            irreps_out=env_embed_irreps,
+            internal_weights=True,
+            shared_weights=True,
+        )
 
         # the env embed MLP takes the last latent's output as input and outputs enough weights for the env embedder
         self.env_embed_mlp = env_embed(
@@ -667,12 +694,16 @@ class InteractionLayer(torch.nn.Module):
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
             eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
+            if self.eq_features_linear is not None:
+                eq_features = self.eq_features_linear(eq_features)
         eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs
         env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
         w_index += self._env_weighter.weight_numel
         emb_latent = self._env_weighter(edge_attr, env_w) # emb_latent is normalized below
+        if self.emb_latent_linear is not None:
+            emb_latent = self.emb_latent_linear(emb_latent)
 
         if self.use_attention:
             emb_latent = self.apply_attention(node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent)
