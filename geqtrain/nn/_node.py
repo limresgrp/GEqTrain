@@ -64,7 +64,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         out_field: str,
         attributes: Dict[str, Dict] = {}, # key to parse from yaml
         eq_out_field: Optional[str] = None,
-        eq_attributes: Dict[str, Dict] = {},
+        eq_attributes: Optional[Dict[str, Dict]] = None,
         num_types: Optional[int] = None,
         use_masking: bool = True,
         fields_to_mask: List[str] = [],
@@ -101,6 +101,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         
         eq_output_embedding_dim = 0
         eq_irreps = None
+        if eq_attributes is None: eq_attributes = {}
         for field, values in eq_attributes.items():
             if 'embedding_dimensionality' not in values: # if attr is not used as embedding
                 logging.warning(f"Field {field} is missing 'embedding_dimensionality'. Not using as equivariant input")

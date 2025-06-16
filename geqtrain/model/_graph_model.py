@@ -18,9 +18,7 @@ from geqtrain.nn import (
     ReadoutModule,
 )
 
-def HeadlessGraphModel(
-    config:Config, initialize: bool, dataset: Optional[ConcatDataset] = None
-) -> SequentialGraphNetwork:
+def HeadlessGraphModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
