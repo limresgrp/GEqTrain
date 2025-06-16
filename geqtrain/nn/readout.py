@@ -62,7 +62,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         scalar_attnt: bool = True,
         num_heads: int = 32,
         dataset_mode: str = 'single', # single|ensemble
-        normalize_l1:bool=True,
+        normalize_l1:bool=False, # this must be false
     ):
         super().__init__()
 

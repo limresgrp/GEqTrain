@@ -64,7 +64,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         use_masking: bool = True,
         fields_to_mask: List[str] = [],
         irreps_in=None,
-        use_kano_embeddings: bool = True,
+        use_kano_embeddings: bool = False,
     ):
         super().__init__()
         self.out_field = out_field
