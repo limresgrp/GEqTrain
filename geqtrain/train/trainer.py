@@ -149,15 +149,15 @@ def run_inference(
     # if a module of model has ref_data_keys as attr
     # then take the string associated to that field and
     # write it into ref_data as {str}+_target
-    try: # TODO check this and make it compatible with all models
-        for (name, module) in (model.module if is_ddp else model):
-            if hasattr(module, 'ref_data_keys'):
-                for k in module.ref_data_keys:
-                    target = out[k]
-                    key_clean = k.replace("_target", "")
-                    ref_data[key_clean] = target
-    except:
-        pass
+    # try: # TODO check this and make it compatible with all models
+    #     for (name, module) in (model.module if is_ddp else model):
+    #         if hasattr(module, 'ref_data_keys'):
+    #             for k in module.ref_data_keys:
+    #                 target = out[k]
+    #                 key_clean = k.replace("_target", "")
+    #                 ref_data[key_clean] = target
+    # except:
+    #     pass
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
@@ -1397,14 +1397,13 @@ class Trainer:
                 with torch.no_grad():
                     # only master logs its features
                     model = self.model.module if self.is_ddp else self.model
-                    irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
-                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
-                    split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+                    irreps = model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]
                     reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
-                    reprs = torch.split(node_reprs, split_sizes, dim=1)
-                    for l, repr in enumerate(reprs):
-                        norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                        self.node_features_norms[f'node_repr_l_{l}_mean'].append(norm)
+                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
+                    reprs = [node_reprs[:, slice] for slice in irreps.slices()]
+                    for (_, ir), repr, reshaper in zip(irreps, reprs, reshapers):
+                        norm = torch.mean(torch.norm(reshaper(repr).squeeze(), dim=-1)) / math.sqrt(repr.shape[-1])
+                        self.node_features_norms[f'node_repr_{ir}_mean'].append(norm)
 
             # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
             # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
@@ -1506,7 +1505,7 @@ class Trainer:
                 TRAIN:      self._end_of_train_callbacks,
             }
             for callback in _end_of_category_callbacks.get(category, []):
-                    callback(self)
+                callback(self)
 
         self.iepoch += 1
         self.end_of_epoch_log()

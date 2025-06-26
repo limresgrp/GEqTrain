@@ -18,6 +18,8 @@ from geqtrain.nn._heads import L0IndexedAttention, L1Scalarizer
 
 import re
 
+from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+
 def is_valid_irreps_string(irrep_string):
     r'''
     Examples:
@@ -120,8 +122,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in output_ls])
 
         # --- end out_irreps ls --- #
-
-        self.out_irreps = out_irreps
         self.out_irreps_muls = [ir.mul for ir in out_irreps]
 
         # check and init irreps dict
@@ -210,7 +210,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         if self.resnet:
             assert irreps_in[self.out_field] == out_irreps
             self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
-        self.out_irreps_dim = self.out_irreps.dim
+        self.out_irreps_dim = out_irreps.dim
 
         self.act_on_nodes = self.field in _NODE_FIELDS
         self.ignore_amp = ignore_amp
@@ -241,7 +241,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             scalar_attnt = False
 
         self.scalar_attnt = scalar_attnt
-        self.split_index = [mul for mul, _ in irreps_in[self.field]][0]
+        irps = irreps_in[self.field]
+        self.split_index = sum([mul for mul, ir in irps if ir in [SCALAR, PSEUDO_SCALAR]])
         if self.scalar_attnt:
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
