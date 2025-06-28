@@ -232,7 +232,7 @@ def check_for_config_updates(config):
                         "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads",
                         "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
                         "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds",
-                        'end_of_epoch_callbacks', 'fine_tune'
+                        'end_of_epoch_callbacks', 'fine_tune', 'mixed_precision', 'accumulation_steps'
                     ] # todo: "num_types" should be added here after moving binning functionality away from dataset creation
 
     for k,v in config.items():

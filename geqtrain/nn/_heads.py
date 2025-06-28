@@ -15,6 +15,8 @@ from torch.nn import GroupNorm
 from torch.nn import functional as F
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.data import AtomicDataDict
+from einops import repeat
+# from entmax import sparsemax, entmax15, entmax_bisect, normmax_bisect, budget_bisect
 
 class FFBlock(torch.nn.Module):
     def __init__(self, inp_size, out_size:int|None=None, residual:bool=True, group_norm:bool=False):
@@ -213,6 +215,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         num_heads: int = 8,
         dropout: float = 0.0,
         update_mlp:bool=False,
+        learn_query:bool=False,
     ):
         super().__init__()
         self.field = field
@@ -232,10 +235,9 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # assert len(irreps_as_dict) == 1, f'Head to predict {field} has equivariant out: {str(self.irreps_in[self.out_field])}'
         self.n_inpt_scalars = irreps_as_dict[0]
         self.kqv_norm = nn.LayerNorm(self.n_inpt_scalars)
-        self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars, bias=False)
         self.out_proj = nn.Linear(self.n_inpt_scalars, self.n_inpt_scalars)
 
-        self.head_dim =  self.n_inpt_scalars//self.n_heads
+        self.head_dim = self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
         self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
@@ -256,6 +258,12 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 mlp_output_dimension=self.n_inpt_scalars,
                 mlp_nonlinearity = "swiglu",
             )
+
+        self.kqv_proj_output_size_multiplier = 2 if self.idx_key == 'ensemble_index' else 3
+        self.kqv_proj = nn.Linear(self.n_inpt_scalars, self.kqv_proj_output_size_multiplier*self.n_inpt_scalars, bias=False)
+        if self.kqv_proj_output_size_multiplier == 2:
+            self.query_embedding = nn.Parameter(torch.randn(self.n_inpt_scalars))
+
 
     def _add_edge_based_bias(self, data):
         edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
@@ -318,32 +326,39 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
 
-        N, emb_dim = features.shape # N = num nodes or N ensemble confs; depends on self.field
+        N, emb_dim = features.shape # N = num nodes or N ensemble confs
         _dtype = features.dtype
         _device = features.device
         residual = features
 
         # fetch and preprocess attnt idxs
         unique_idx, counts = torch.unique(attention_idxs, return_counts=True)
-        max_count = counts.max()
-        num_uniques = unique_idx.shape[0] # bs
+        max_count = counts.max() # max number of atoms or conformers in batch
+        num_uniques = unique_idx.shape[0] # number of unique mols in batch, regardless of self.idx_key
+
+        # mask to select how many atoms or conformers are there in/for that mol
+        mask = torch.arange(max_count, device=_device)[None, :] < counts[:, None] # for each mol select what is NOT padding
+        assert torch.all(mask.sum(-1) == counts) == True
 
         # map features to kqv
         features = self.kqv_norm(features)
         kvq = self.kqv_proj(features)
-        _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
 
-        k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k
+        if self.kqv_proj_output_size_multiplier == 2:
+            _k, _v = torch.chunk(kvq, 2, dim=-1)
+            _q = repeat(self.query_embedding, 'd -> b d', b=_k.shape[0])
+        else:
+            _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
+
         q = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_q
+        k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k; in LLMs this is S,T,K
         v = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_v
 
-        mask = torch.arange(max_count, device=_device)[None, :] < counts[:, None]
-
-        k[mask] = _k
+        k[mask] = _k # set data into padded tensors
         q[mask] = _q
         v[mask] = _v
 
-        k = k.view(num_uniques, max_count, self.n_heads, self.head_dim)
+        k = k.view(num_uniques, max_count, self.n_heads, self.head_dim) # split emb in nhead chunks for MHA
         q = q.view(num_uniques, max_count, self.n_heads, self.head_dim)
         v = v.view(num_uniques, max_count, self.n_heads, self.head_dim)
 
@@ -352,19 +367,23 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         v = v.transpose(1,2)
 
         qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
-        qvt /= self.scale
+        qvt /= self.scale # scale by sqrt of head_dim
 
-        bidirectional_mask = qvt == 0.0
-        row_all_true_mask = bidirectional_mask.all(dim=-1, keepdim=True).expand_as(bidirectional_mask) # to select rows that have only -inf values (s.t. exclude them from softmax otherwise autograd breaks)
+        bidirectional_mask = qvt == 0.0 # select all elements that come out the prod of rows/cols of zeros
+        row_all_true_mask = bidirectional_mask.all(dim=-1, keepdim=True).expand_as(bidirectional_mask) # select rows that have only zeros (s.t. exclude them from softmax otherwise autograd breaks)
 
         if self.use_radial_bias:
             qvt += self._add_edge_based_bias(data)
 
         fill_value = -torch.inf # Or a large negative number like -1e9
-        qvt.masked_fill_(bidirectional_mask, fill_value)
-        qvt[row_all_true_mask] = 0.0 # replace rows of all -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output.
+        qvt.masked_fill_(bidirectional_mask, fill_value) # set all zeros to -inf
+        qvt[row_all_true_mask] = 0.0 # replace rows of ALL -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output; (but keep -inf if other vals in row are populated)
+
+        # all the above has been done to set -inf maksing in in rows populated, and zeros in rows that are completely empty (due to padding)
+
+        # attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
         attnt_coeffs = F.softmax(qvt, dim=-1)
-        attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all spurious rows
+        attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all "padding only" rows
 
         # assert torch.allclose(
         #     attnt_coeffs.sum(-1).sum(-1)[:, 0],

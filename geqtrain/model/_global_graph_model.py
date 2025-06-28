@@ -104,6 +104,11 @@ def appendNGNNLayers(config):
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
             # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
+        # "global_ensemble_pooling": (WeightedEnsembleAggregator, dict(
+        #     field=AtomicDataDict.GRAPH_FEATURES_KEY,
+        #     out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+        #     input_dim=config.get('latent_dim'),
+        # )),
     })
     return modules
 
@@ -116,7 +121,7 @@ def moreGNNLayers(config:Config):
         node_embedder = (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
-            use_kano_embeddings=config.get('use_kano_embeddings'),
+            use_kano_embeddings=False, #config.get('use_kano_embeddings'),
         ))
     else:
         raise ValueError('Missing node_attributes in yaml')

@@ -827,6 +827,7 @@ class Trainer:
 
         if self.warmup_epochs > 0:
             import pytorch_warmup as warmup
+            assert self.lr_scheduler_name is not None, f"lr_scheduler_name not present in yaml"
             self.warmup_steps = self.num_optim_steps * self.warmup_epochs
             self.warmup_scheduler = warmup.LinearWarmup(self.optim, self.warmup_steps) #! lrs updated inplace at this call: lr*=1/warmup_period
 
@@ -1124,9 +1125,12 @@ class Trainer:
         elif "fine_tune" in dictionary:
             model_pth_path = Path(dictionary["fine_tune"])
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
+            print(f"Reload the model from {model_pth_path}")
+
         elif "progress" in dictionary:
             model_pth_path = Path(dictionary["progress"]["last_model_path"])
             assert isfile(model_pth_path), f"model weights & bias are not saved, {model_pth_path} provided is not a file"
+            print(f"Reload the model from {model_pth_path}")
 
         if "progress" in dictionary or "fine_tune" in dictionary:
             model, _ = cls.load_model_from_training_session(
@@ -1177,6 +1181,21 @@ class Trainer:
         # drop weights that must be initialized from scratch (if any)
         model_state_dict = {k: v for k, v in model_state_dict.items() if k not in weights_to_train_from_scratch}
         strict = config.get('load_model_state_strict', True) and not ('fine_tune' in config)
+
+
+        # todo: make stuff poppable from yaml
+        #! Remove specified keys from model_state_dict before loading if needed
+        # keys_to_pop = [
+        #     'formal_charge.inv_readout.sequential.linear_1.bias',
+        #     'formal_charge.inv_readout.sequential.linear_1.weight_g',
+        #     'formal_charge.inv_readout.sequential.linear_1.weight_v',
+        #     'formal_charge.inv_readout.sequential.linear_0.weight_g',
+        #     'formal_charge.inv_readout.sequential.linear_0.weight_v',
+        # ]
+        # for k in keys_to_pop:
+        #     model_state_dict.pop(k, None)
+
+
         out = model.load_state_dict(model_state_dict, strict=strict)
         print(f"Model loading message: {out}")
         return model, config
@@ -1894,7 +1913,7 @@ class Trainer:
         else:
             dl_kwargs.update(dict(
                 batch_size=self.validation_batch_size,
-                shuffle=False,
+                shuffle=(sampler is None) and self.shuffle,
             ))
 
         self.dl_val = DataLoader(
