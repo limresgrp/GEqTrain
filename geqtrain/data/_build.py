@@ -86,23 +86,22 @@ def update_config(config, _config_dataset, prefix):
     )
     return _config
 
-def get_dataset_file_names_and_ensemble_indices(prefix, _config_dataset):
-    inpup_key = f"{prefix}_input"  # get input path
-    assert inpup_key in _config_dataset, f"Missing {inpup_key} key in dataset config file."
-    f_name = _config_dataset.get(inpup_key)
+def get_dataset_file_names_and_ensemble_indices(prefix, _config_dataset) -> List[tuple[int,str]]: # [(ensemble idx, path_to_npz)]
+    input_key = f"{prefix}_input"  # get input path (where to find .npzs)
+    assert input_key in _config_dataset, f"Missing {input_key} key in dataset config file."
+    f_name = _config_dataset.get(input_key)
     ensemble_idx = 0
 
-    if isdir(f_name):  # can be dir
-        out = []
-        # Efficiently pre-filter entries using os.scandir
-        with os.scandir(f_name) as entries:
-            # Filter non-hidden files using entry.is_file() and entry.name
-            for entry in entries:
-                if entry.is_file() and not entry.name.startswith('.'):
-                    out.append((ensemble_idx, os.path.join(f_name, entry.name)))
-                    ensemble_idx += 1
-            return out
-    return [(ensemble_idx, f_name)]  # can be 1 file
+    if not isdir(f_name): # if it is a single npz
+        return [(ensemble_idx, f_name)]
+
+    out = []
+    with os.scandir(f_name) as entries:
+        for entry in entries:
+            if entry.is_file() and not entry.name.startswith('.'): # Filter non-hidden files using entry.is_file() and entry.name
+                out.append((ensemble_idx, os.path.join(f_name, entry.name))) # assign an unique, increasing ensemble_idx to each npz
+                ensemble_idx += 1
+    return out
 
 def node_types_to_keep(config):
     # --- filter node target to train on based on node type or type name

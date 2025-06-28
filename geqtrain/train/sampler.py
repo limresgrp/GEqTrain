@@ -2,26 +2,25 @@ from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
 import numpy as np
 import math
+from collections import defaultdict
 
 
 def _group_by_ensemble(n_observations, ensemble_indices):
     """
     Groups dataset indices by their ensemble index.
     """
-    ensemble_dict = {}
+    ensemble_dict = defaultdict(list)
     offset = 0
-    for n_observations, ensemble_index in zip(n_observations, ensemble_indices):
-        if ensemble_index not in ensemble_dict:
-            ensemble_dict[ensemble_index] = []
-        ensemble_dict[ensemble_index].extend(list(range(offset, offset + n_observations)))  # Store all conformations
-        offset += n_observations
+    for n_obs, ensemble_index in zip(n_observations, ensemble_indices): # zip(n_confs in npz, npz_idx)
+        ensemble_dict[ensemble_index].extend(list(range(offset, offset + n_obs)))  # Store all conformations
+        offset += n_obs
 
-    return list(ensemble_dict.values())
+    return list(ensemble_dict.values()) # list of lists, each list is idx of that conformer in that npz
 
 class EnsembleSampler(Sampler):
     """
     Ensures that all conformations of a molecule (from the same npz file)
-    appear in the same batch.
+    appear in the same batch (up to batch size).
     The ensembled batch is created following the order of batch['dataset_raw_file_name']
     """
     def __init__(self, dataset, batch_size):

@@ -27,13 +27,9 @@ class Collater(object):
         """Collate a list of data"""
         # Allow to merge ensemble graphs into a batch.
         # Groups graphs by ensemble and adds a mapping tensor for tracking.
-        batch_ensemble_index = []  # Tracks which molecule each graph belongs to
-        for graph in batch:
-            batch_ensemble_index.append(graph.ensemble_index)
-
+        batch_ensemble_index = [graph.ensemble_index for graph in batch]  # Tracks which molecule each graph belongs to
         batch_graphs = Batch.from_data_list(batch, graph_fields=self.graph_fields, exclude_keys=self._exclude_keys.union(["ensemble_index"]))
         _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
-
         return batch_graphs
 
     def __call__(self, batch: List[Data]) -> Batch:
