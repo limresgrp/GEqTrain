@@ -15,6 +15,7 @@ from ._grads import GradOutput
 from ._module import Module
 from ._goten_model import GotenModel
 from ._build import model_from_config
+from ._mace_model import MACEModel
 
 __all__ = [
     update_config,
@@ -34,4 +35,5 @@ __all__ = [
     Combine,
     Module,
     GotenModel,
+    MACEModel,
 ]

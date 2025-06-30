@@ -1,16 +1,16 @@
 # general
 root: results/qm9
-run_name: debug.mu
+run_name: del.mu
 experiment_description: "Mu - 100k train samples. 19.4k valid samples."
 
-seed: 0
-dataset_seed: 0
+seed: 1
+dataset_seed: 1
 append: true
 default_dtype: float32
 
 # --- M O D E L --- #
 model_builders:
-  - HeadlessGlobalNodeModel
+  - HeadlessNodeModel
   - Heads
   - cls: NodewiseReduce
     name: node_pooling
@@ -21,48 +21,39 @@ model_builders:
     field: mu
 
 # - general - #
-use_weight_norm: false # Cannot jit compile when using this
-use_mace_product: true
-use_post_norm: false
+use_weight_norm: true # Cannot jit compile when using this
+strict_irreps: false
+scalar_attnt: false
+use_attention: false
+head_dim: 32
+latent_zero_init_last_layer_weights: true
+readout_latent_zero_init_last_layer_weights: true
 
 # - cutoffs - #
-r_max: 16.0
+r_max: 7.0
 
 # - radial basis - #
 edge_radial_attrs_basis: geqtrain.nn.BesselBasisVec
 TanhCutoff_n: 6
-num_basis: 16
+num_basis: 8
 
 # - symmetry - #
-l_max: 2
+# l_max: 2
+irreps_edge_sh: 1x0e+1x1o+1x3o+1x5o
 parity: o3_full
 
 # --- interaction layers --- #
 num_layers: 2
-latent_dim: 128
+latent_dim: 64
 env_embed_multiplicity: 16
 
 latent: geqtrain.nn.ScalarMLPFunction
-mlp_latent_dimensions: [512, 512]
+mlp_latent_dimensions: [128]
 mlp_nonlinearity: swiglu
 
-# - attention - #
-use_attention: true
-head_dim: 64
-
-# - products - #
-local_interaction_use_mace_product: true
-
-interaction_output_ls: [0] # [Optional] used to avoid to compute l>1 as output of interaction, as I know I am not going to use l>1 later
-# ---  END interaction layers  --- #
-
-# --- START pooling layer --- #
-pooling_use_attention: true
-# ---  END pooling layer  --- #
-
 # --- START HEADS --- #
-head_wds: 0.001
-head_node_output_wd: true
+head_wds: 0.0
+head_node_output_wd: false
 heads:
   head_mu:
     field: node_features
@@ -70,7 +61,6 @@ heads:
     out_irreps: 1x1o
     model: geqtrain.nn.ReadoutModuleWithConditioning
     conditioning_field: node_attrs
-
 # ---  END HEADS  --- #
 
 # --- E N D   M O D E L --- #
@@ -82,7 +72,7 @@ dataset_num_workers: 1
 # - train - #
 dataset_list: # if you provide only training dataset, it will be split 80-20% in train and validation
   - dataset: npz
-    dataset_input: /scratch/angiod/qm9/processed/
+    dataset_input: /scratch/angiod/qm9/debug/
     key_mapping:
       pos: pos # the blue keywords are the kwords present in the npz, they are mapped to the red kwords that are present/used in code
       atom_type: node_types
@@ -92,6 +82,7 @@ dataset_list: # if you provide only training dataset, it will be split 80-20% in
       hybridization: hybridization
       num_hs: num_hs
       mu: mu
+      eq_attrs: eq_attrs
 
 # train_idcs: /scratch/angiod/qm9/mu.debug.txt
 
@@ -110,6 +101,8 @@ node_fields:
   - aromatic
   - hybridization
   - num_hs
+  - node_mu
+  # - eq_attrs
 
 edge_fields:
   - edge_type
@@ -123,17 +116,28 @@ node_attributes:
     embedding_dimensionality: 8
     fixed: true
   aromatic:
-    embedding_dimensionality: 4
+    embedding_dimensionality: 8
     num_types: 2
     fixed: true
   hybridization:
-    embedding_dimensionality: 4
+    embedding_dimensionality: 8
     num_types: 4
     fixed: true
   num_hs:
-    embedding_dimensionality: 4
+    embedding_dimensionality: 8
     num_types: 8
     fixed: true
+
+# eq_node_attributes:
+#   eq_attrs:
+#     embedding_dimensionality: 3
+#     irreps: 1x1o
+
+edge_attributes:
+  edge_type:
+    embedding_dimensionality: 8
+    num_types: 4
+  
 
 type_names:
   - X
@@ -184,15 +188,15 @@ wandb_watch_kwargs:
 
 # --- T R A I N I N G --- #
 
-batch_size: 64
-validation_batch_size: 128
-dataloader_num_workers: 8
+batch_size: 32
+validation_batch_size: 32
+dataloader_num_workers: 1
 
 # Configure maximum batch sizes to avoid GPU memory errors. These parameters have to be configured according to your GPU RAM #
 skip_chunking: true
 batch_max_atoms: 10000             # Limit the maximum number of nodes of a graph to be loaded on memory in a single batch
 
-max_epochs: 100
+max_epochs: 150
 learning_rate: 1.e-4
 train_val_split: random
 shuffle: true
@@ -206,10 +210,11 @@ optimizer_params:
   - 0.9
   - 0.999
   eps: 1.0e-08
-  weight_decay: 0.0
+  weight_decay: 0.1
 # max_gradient_norm: 10.
 
 lr_scheduler_name: CosineAnnealingLR
+lr_scheduler_min_lr: 1.e-8
 
 # # lr scheduler, drop lr if no improvement for tot epochs
 # lr_scheduler_name: ReduceLROnPlateau
@@ -217,7 +222,7 @@ lr_scheduler_name: CosineAnnealingLR
 # lr_scheduler_factor: 0.7
 
 early_stopping_lower_bounds:
-  LR: 1.0e-7
+  LR: 1.0e-10
 
 early_stopping_patiences:
   validation_loss: 50

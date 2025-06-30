@@ -22,6 +22,7 @@ from ._norm import Norm
 from ._combine import CombineModule
 from ._ddp import DDP
 from ._grad_output import SetRequireGradsOutput, GradientOutput
+from .mace import MACEModule
 
 __all__ = [
     GraphModuleMixin,
@@ -57,4 +58,5 @@ __all__ = [
     SetRequireGradsOutput,
     GradientOutput,
     GotenInteractionModule,
+    MACEModule,
 ]
