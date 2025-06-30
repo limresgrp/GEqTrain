@@ -222,10 +222,10 @@ def main(args=None, running_as_script: bool = True):
     args = parser.parse_args(args=args)
 
     # Logging
+    logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
     if args.log is not None and args.batch_size > 1:
         logger.warning("Logging with batch_size > 1 does not support storing 'out.csv' and 'out.xyz' logs."
                        "\nIf you want to log that information, use the default batch_size of 1.")
-    logger, metricslogger, csvlogger, xyzlogger = init_logger(args.log)
 
     # Do the defaults:
     trainer = None
@@ -388,14 +388,13 @@ def main(args=None, running_as_script: bool = True):
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
 
-        def format_xyz(data, ref_data):
+        def format_xyz(data, ref_data, dataset_raw_file_name):
             return ''
             try:
                 # Extract fields from data
                 pos = data[AtomicDataDict.POSITIONS_KEY]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
                 atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
-                dataset_raw_file_name = data[AtomicDataDict.DATASET_RAW_FILE_NAME]
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
@@ -412,7 +411,7 @@ def main(args=None, running_as_script: bool = True):
                 lines.append(f"{n_atoms}")
 
                 # Line 2: Header line (dataset_id)
-                lines.append(f"DatasetID={dataset_id}")
+                lines.append(f"DatasetID={dataset_raw_file_name}")
 
                 # Lines 3+: Atom lines with node_type, x, y, z, node_output
                 for i in range(n_atoms):
@@ -422,13 +421,14 @@ def main(args=None, running_as_script: bool = True):
                     output = node_output[i].item() if node_output is not None else ''  # Extract scalar from tensor
                     ref_output = ref_node_output[i].item() if ref_node_output is not None else 0  # Extract scalar from tensor
                     lines.append(f"{atom_name:2} {x:10.4f} {y:10.4f} {z:10.4f} {output:10.4f} {ref_output:10.4f} {atom_type:6}")
-            except:
+            except Exception as e:
+                logger.warning(e)
                 return ''
             # Join all lines into a single string for XYZ format
             return "\n".join(lines)
 
         csvlogger.info(format_csv(out, ref_data, batch_index, chunk_index, data[AtomicDataDict.DATASET_RAW_FILE_NAME][0]))
-        xyzlogger.info(format_xyz(out, ref_data))
+        xyzlogger.info(format_xyz(out, ref_data, data[AtomicDataDict.DATASET_RAW_FILE_NAME][0]))
 
         del out, ref_data
 

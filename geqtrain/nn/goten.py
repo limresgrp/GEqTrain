@@ -2,7 +2,7 @@ import math
 import functools
 import torch
 
-from typing import Optional, Union
+from typing import Callable, Optional, Tuple, Union
 from torch_scatter import scatter
 from torch_scatter.composite import scatter_softmax
 from einops.layers.torch import Rearrange
@@ -10,7 +10,6 @@ from einops.layers.torch import Rearrange
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from .cutoffs import TanhCutoff
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
     GraphModuleMixin,
@@ -23,9 +22,6 @@ from geqtrain.nn.allegro import (
     MakeWeightedChannels,
 )
 from geqtrain.utils.tp_utils import SCALAR
-from geqtrain.nn.cutoffs import tanh_cutoff
-from geqtrain.nn._film import FiLMFunction
-
 from geqtrain.nn.mace.irreps_tools import inverse_reshape_irreps
 
 
@@ -78,6 +74,9 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         assert (num_layers >= 1)
+
+        eq_multiplicity = latent_dim # !!!
+
         # save parameters
         self.out_field_node       = out_field_node
         self.out_field_edge       = out_field_edge
@@ -132,6 +131,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_norm = torch.nn.LayerNorm(self.latent_dim)
 
         # init t_ij
+        self.radial_scale = torch.nn.Parameter(torch.tensor(10.))
         self.t_ij_cat_to_t_ij = latent(
             mlp_input_dimension=2*self.latent_dim + input_edge_irreps.dim,
             mlp_output_dimension=self.latent_dim,
@@ -151,6 +151,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             mlp_output_dimension=generate_n_weights,
         )
 
+        self.env_ij_w0_norm = torch.nn.LayerNorm(generate_n_weights)
         self.node_eq_norm = SO3_LayerNorm(node_eq_irreps)
 
         # layers
@@ -178,6 +179,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             mlp_input_dimension=self.latent_dim,
             mlp_output_dimension=final_generate_n_weights,
         )
+        self.linear_norm = SO3_LayerNorm(out_irreps_node)
 
         # self.t_ij_emb = latent(
         #     mlp_input_dimension=self.latent_dim,
@@ -211,7 +213,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         # edge scalars
         h_i = h[edge_center]
         h_j = h[edge_neighbor]
-        t_ij_cat = torch.cat([h_i, h_j, phi_ij], dim=-1)
+        t_ij_cat = torch.cat([h_i, h_j, self.radial_scale * phi_ij], dim=-1)
         if AtomicDataDict.EDGE_FEATURES_KEY in data:
             t_ij_cat = torch.cat([t_ij_cat, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
         t_ij = self.edge_norm(self.t_ij_cat_to_t_ij(t_ij_cat))
@@ -219,7 +221,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         # node equivariants
         env_ij_scalar0 = self.t_ij_emb0(t_ij)
         env_j_scalar0  = self.h_j_emb0(h_j)
-        env_ij_w0      = env_ij_scalar0 * env_j_scalar0
+        env_ij_w0      = self.env_ij_w0_norm(env_ij_scalar0 * env_j_scalar0)
         X_ij           = self.env_weighter(spharms, env_ij_w0)
         X              = self.node_eq_norm(scatter(X_ij, edge_center, dim=0, dim_size=num_nodes))
 
@@ -238,7 +240,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # --- final layer --- #
         w = self.h_emb(h)
-        data[self.out_field_node] = self.reshape_node(self.linear(X, w))
+        data[self.out_field_node] = self.reshape_node(self.linear_norm(self.linear(X, w)))
         # data[self.out_field_edge] = self.t_ij_emb(t_ij)
 
         return data
@@ -342,6 +344,8 @@ class GotenInteractionLayer(torch.nn.Module):
             self.isqrtd       = math.isqrt(head_dim)
         else:
             self.W_query, self.W_key, self.rearrange_qk, self.isqrtd = None, None, None, None
+        
+        self.eqff = EQFF(latent_dim=latent_dim, lmax=max(tp_out_irreps.ls), latent=latent)
 
     def apply_attention(self, x, h_j, t_ij, edge_center) -> torch.Tensor:
         # Asserts needed for JIT
@@ -380,8 +384,8 @@ class GotenInteractionLayer(torch.nn.Module):
         # h
         w_index   = 0
         delta_h_j = env_ij_w.narrow(-1, w_index, self.latent_dim) # (dim, start, length)
-        delta_h   = scatter(delta_h_j, edge_center, dim=0, dim_size=num_nodes)
-        h         = self.node_norm(h + delta_h)
+        delta_h   = self.node_norm(scatter(delta_h_j, edge_center, dim=0, dim_size=num_nodes))
+        h         = h + delta_h
         # h_j = h[edge_neighbor] ? Optional. Check if it works better
 
         # t_ij
@@ -406,7 +410,86 @@ class GotenInteractionLayer(torch.nn.Module):
         delta_X_ij = delta_spharm_ij + delta_eq_ij
         if self.use_attention:
             delta_X_ij = self.apply_attention(delta_X_ij, h_j, t_ij, edge_center)
-        delta_X = scatter(delta_X_ij, edge_center, dim=0, dim_size=num_nodes)
-        X = self.node_eq_norm(apply_residual_stream(X, delta_X, update_coeff))
+        delta_X = self.node_eq_norm(scatter(delta_X_ij, edge_center, dim=0, dim_size=num_nodes))
+        X = apply_residual_stream(X, delta_X, update_coeff)
 
+        h, X = self.eqff(h, X)
         return h, X, t_ij
+
+
+class EQFF(torch.nn.Module):
+    """
+    Equivariant Feed-Forward (EQFF) Network for mixing atom features.
+
+    This module facilitates efficient channel-wise interaction while maintaining equivariance.
+    It separates scalar and high-degree steerable features, allowing for specialized processing
+    of each feature type before combining them with non-linear mappings as described in the paper:
+
+    EQFF(h, X^(l)) = (h + m_1, X^(l) + m_2 * (X^(l)W_{vu}))
+    where m_1, m_2 = split_2(gamma_{m}(||X^(l)W_{vu}||_2, h))
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        lmax: int,
+        latent: Callable,
+        epsilon: float = 1e-8,
+    ):
+        """
+        Initialize EQFF module.
+
+        Args:
+            latent_dim: Number of features to describe scalat latent features.
+            activation: Activation function. If None, no activation function is used.
+            lmax: Maximum angular momentum.
+            epsilon: Stability constant added in norm to prevent numerical instabilities.
+            weight_init: Weight initialization function.
+            bias_init: Bias initialization function.
+        """
+        super(EQFF, self).__init__()
+        self.lmax = lmax
+        self.latent_dim = latent_dim
+        self.epsilon = epsilon
+
+        # gamma_m implementation
+        self.gamma_m = latent(
+            mlp_input_dimension=2*latent_dim,
+            mlp_output_dimension=2*latent_dim,
+        )
+
+        self.W_vu = torch.nn.Parameter(torch.randn(latent_dim, latent_dim) / math.sqrt(latent_dim))
+
+    def forward(self, h: torch.Tensor, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute intraatomic mixing.
+
+        Args:
+            h: Scalar input values, [num_nodes, hidden_dims].
+            X: High-degree steerable features, [num_nodes, multiplicity, (L_max ** 2) - 1].
+
+        Returns:
+            Tuple of updated scalar values and high-degree steerable features,
+            each of shape [num_nodes, hidden_dims] and [num_nodes, multiplicity, (L_max ** 2) - 1].
+        """
+        X_p = torch.einsum('nml,mk -> nkl', X, self.W_vu)
+
+        # Compute norm of X_V with numerical stability
+        X_pn = torch.sqrt(torch.sum(X_p**2, dim=-1, keepdim=False) + self.epsilon)
+
+        # Concatenate features for context
+        channel_context = [h, X_pn]
+        ctx = torch.cat(channel_context, dim=-1)
+
+        # Apply gamma_m transformation
+        x = self.gamma_m(ctx)
+
+        # Split output into scalar and vector components
+        m1, m2 = torch.split(x, self.latent_dim, dim=-1)
+        dX_intra = m2.unsqueeze(-1) * X_p
+
+        # Update features with residual connections
+        h = h + m1
+        X = X + dX_intra
+
+        return h, X
