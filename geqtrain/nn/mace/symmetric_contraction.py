@@ -6,10 +6,10 @@
 ###########################################################################################
 
 from typing import Dict, Optional, Union
-from math import sqrt
 
 import opt_einsum_fx
 import torch
+import torch.fx
 from e3nn import o3
 from e3nn.util.codegen import CodeGenMixin
 from e3nn.util.jit import compile_mode
@@ -84,16 +84,6 @@ class SymmetricContraction(CodeGenMixin, torch.nn.Module):
 
 
 @compile_mode("script")
-class ParameterModule(torch.nn.Module):
-    def __init__(self, w):
-        super().__init__()
-        self.w = torch.nn.Parameter(w)
-
-    def forward(self):
-        return self.w
-
-
-@compile_mode("script")
 class Contraction(torch.nn.Module):
     def __init__(
         self,
@@ -109,7 +99,9 @@ class Contraction(torch.nn.Module):
         self.num_features = irreps_in.count((0, 1))
         self.coupling_irreps = o3.Irreps([irrep.ir for irrep in irreps_in])
         self.correlation = correlation
-        dtype = torch.float32
+        dtype = torch.get_default_dtype()
+
+        path_weight = []
         for nu in range(1, correlation + 1):
             U_matrix = U_matrix_real(
                 irreps_in=self.coupling_irreps,
@@ -117,6 +109,7 @@ class Contraction(torch.nn.Module):
                 correlation=nu,
                 dtype=dtype,
             )[-1]
+            path_weight.append(not torch.equal(U_matrix, torch.zeros_like(U_matrix)))
             self.register_buffer(f"U_matrix_{nu}", U_matrix)
 
         # Tensor contraction equations
@@ -124,8 +117,7 @@ class Contraction(torch.nn.Module):
         self.contractions_features = torch.nn.ModuleList()
 
         # Create weight for product basis
-        # self.weights = torch.nn.ParameterList([])
-        self.weights = torch.nn.ModuleList()
+        self.weights = torch.nn.ParameterList([])
 
         for i in range(correlation, 0, -1):
             # Shapes definying
@@ -160,7 +152,7 @@ class Contraction(torch.nn.Module):
                 # Parameters for the product basis
                 w = torch.nn.Parameter(
                     torch.randn((num_elements, num_params, self.num_features))
-                    / sqrt(num_elements * self.num_features)
+                    / num_params
                 )
                 self.weights_max = w
             else:
@@ -210,15 +202,36 @@ class Contraction(torch.nn.Module):
                 )
                 self.contractions_weighting.append(graph_opt_weighting)
                 self.contractions_features.append(graph_opt_features)
+                # Parameters for the product basis
+                w = torch.nn.Parameter(
+                    torch.randn((num_elements, num_params, self.num_features))
+                    / num_params
+                )
+                self.weights.append(w)
 
-                w = torch.randn((num_elements, num_params, self.num_features)) / sqrt(self.num_features)
-                self.weights.append(ParameterModule(w))
+        for idx, keep in enumerate(path_weight):
+            zero_flag = not keep
+            if idx < correlation - 1:
+                if zero_flag:
+                    self.weights[idx] = EmptyParam(self.weights[idx])
+                self.register_buffer(
+                    f"weights_{idx}_zeroed",
+                    torch.tensor(zero_flag, dtype=torch.bool),
+                )
+            else:
+                if zero_flag:
+                    self.weights_max = EmptyParam(self.weights_max)
+                self.register_buffer(
+                    "weights_max_zeroed",
+                    torch.tensor(zero_flag, dtype=torch.bool),
+                )
 
         if not internal_weights:
             self.weights = weights[:-1]
             self.weights_max = weights[-1]
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
+
         out = self.graph_opt_main(
             self.U_tensors(self.correlation),
             self.weights_max,
@@ -230,13 +243,22 @@ class Contraction(torch.nn.Module):
         ):
             c_tensor = contract_weights(
                 self.U_tensors(self.correlation - i - 1),
-                weight(),
+                weight,
                 y,
             )
             c_tensor = c_tensor + out
             out = contract_features(c_tensor, x)
-        resize_shape = torch.prod(torch.tensor(out.shape[1:]))
-        return out.view(out.shape[0], resize_shape)
+
+        return out.view(out.shape[0], -1)
 
     def U_tensors(self, nu: int):
         return dict(self.named_buffers())[f"U_matrix_{nu}"]
+
+
+class EmptyParam(torch.nn.Parameter):
+    def __new__(cls, data):  # pylint: disable=signature-differs
+        zero = torch.zeros_like(data)
+        return super().__new__(cls, zero, requires_grad=False)
+
+    def requires_grad_(self):
+        return self

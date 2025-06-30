@@ -96,22 +96,11 @@ def U_matrix_real(
 ):
     irreps_out = o3.Irreps(irreps_out)
     irrepss = [o3.Irreps(irreps_in)] * correlation
+
     if correlation == 4:
-        filter_ir_mid = [
-            (0, 1),
-            (1, -1),
-            (2, 1),
-            (3, -1),
-            (4, 1),
-            (5, -1),
-            (6, 1),
-            (7, -1),
-            (8, 1),
-            (9, -1),
-            (10, 1),
-            (11, -1),
-        ]
+        filter_ir_mid = [(i, 1 if i % 2 == 0 else -1) for i in range(12)]
     wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype)
+
     current_ir = wigners[0][0]
     out = []
     stack = torch.tensor([])
@@ -127,5 +116,13 @@ def U_matrix_real(
             current_ir, last_ir = ir, ir
         else:
             current_ir = ir
-    out += [last_ir, stack]
+    try:
+        out += [last_ir, stack]
+    except:  # pylint: disable=bare-except
+        first_dim = irreps_out.dim
+        if first_dim != 1:
+            size = [first_dim] + [o3.Irreps(irreps_in).dim] * correlation + [1]
+        else:
+            size = [o3.Irreps(irreps_in).dim] * correlation + [1]
+        out = [str(irreps_out)[:-2], torch.zeros(size, dtype=dtype)]
     return out
