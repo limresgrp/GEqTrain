@@ -6,7 +6,8 @@ from typing import Optional, List, Tuple, Type, Union
 
 from e3nn import nn, o3
 from e3nn.util.jit import compile_mode
-from torch_scatter import scatter_sum
+# from torch_scatter import scatter_sum
+from geqtrain.utils.pytorch_scatter import scatter_sum
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import (
@@ -36,7 +37,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         # hyperparams:
         latent_dim:                 int  = 64,
         mlp_latent_dimensions: List[int] = [64, 64, 64],
-        avg_num_neighbors:         float = 1.0,
+        avg_num_neighbors:         float = 10.0,
         # Other:
         irreps_in = None,
         name:str = "",
@@ -59,20 +60,29 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         # compute irreps
         edge_attrs_irreps  = self.irreps_in[self.edge_equivariant_field]
         edge_attrs_irreps  = self.include_eq_input_irreps(edge_attrs_irreps)
-        hidden_irreps      = complete_parities(o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]))
-        node_attrs_irreps  = self.irreps_in[node_invariant_field]
-        edge_feats_irreps  = (2 * node_attrs_irreps + self.irreps_in[self.edge_invariant_field]).simplify()
+        hidden_irreps      = o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]) # complete_parities(o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]))
+        num_features       = hidden_irreps.count(o3.Irrep(0, 1)) + hidden_irreps.count(o3.Irrep(0, -1))
+        node_feats_irreps  = o3.Irreps([(num_features, (0, 1))])
+        node_attrs_irreps  = self.irreps_in[self.node_invariant_field]
+        edge_feats_irreps  = (2 * node_feats_irreps + self.irreps_in[self.edge_invariant_field]).simplify()
         num_elements       = node_attrs_irreps.num_irreps
+        interaction_irreps = hidden_irreps
+
+        self.node_embedding = o3.Linear(
+            irreps_in=node_attrs_irreps,
+            irreps_out=node_feats_irreps,
+        )
 
         inter = RealAgnosticInteractionBlock(
             node_attrs_irreps=node_attrs_irreps,
-            node_feats_irreps=node_attrs_irreps,
+            node_feats_irreps=node_feats_irreps,
             edge_attrs_irreps=edge_attrs_irreps,
             edge_feats_irreps=edge_feats_irreps,
-            target_irreps=hidden_irreps,
+            target_irreps=interaction_irreps,
             hidden_irreps=hidden_irreps,
             avg_num_neighbors=avg_num_neighbors,
-            mlp_latent_dimensions=mlp_latent_dimensions
+            mlp_latent_dimensions=mlp_latent_dimensions,
+            sc=True,
         )
         self.interactions = torch.nn.ModuleList([inter])
         
@@ -83,6 +93,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
             target_irreps=hidden_irreps,
             correlation=correlation,
             num_elements=num_elements,
+            sc=True,
         )
         self.products = torch.nn.ModuleList([prod])
 
@@ -99,7 +110,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
                 node_feats_irreps=hidden_irreps,
                 edge_attrs_irreps=edge_attrs_irreps,
                 edge_feats_irreps=edge_feats_irreps,
-                target_irreps=hidden_irreps,
+                target_irreps=interaction_irreps,
                 hidden_irreps=hidden_irreps_out,
                 avg_num_neighbors=avg_num_neighbors,
                 mlp_latent_dimensions=mlp_latent_dimensions,
@@ -108,7 +119,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
             self.interactions.append(inter)
             
             prod = EquivariantProductBasisBlock(
-                node_feats_irreps=hidden_irreps,
+                node_feats_irreps=interaction_irreps,
                 target_irreps=hidden_irreps_out,
                 correlation=correlation,
                 num_elements=num_elements,
@@ -172,7 +183,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
 
         # For the first layer, we use the input invariants:
         # The center and neighbor invariants and edge invariants
-        node_feats = node_attrs.clone()
+        node_feats = self.node_embedding(node_attrs)
         edge_feats = [node_feats[edge_center], node_feats[edge_neighbor], edge_invariants]
         if AtomicDataDict.EDGE_FEATURES_KEY in data:
             edge_feats += [data[AtomicDataDict.EDGE_FEATURES_KEY]]
@@ -209,7 +220,7 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
             )
             node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
             node_energies_list.append(node_energies)
-        node_energy_contributions = torch.stack(node_energies_list, dim=-1)
+        node_energy_contributions = torch.stack(node_energies_list, dim=-1).sum(dim=-1, keepdim=True)
 
         data[self.out_field] = node_energy_contributions
         return data
@@ -217,9 +228,9 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
 
 @compile_mode("script")
 class LinearReadoutBlock(torch.nn.Module):
-    def __init__(self, irreps_in: o3.Irreps):
+    def __init__(self, irreps_in: o3.Irreps, irrep_out: o3.Irreps = o3.Irreps("0e")):
         super().__init__()
-        self.linear = o3.Linear(irreps_in=irreps_in, irreps_out=o3.Irreps("0e"))
+        self.linear = o3.Linear(irreps_in=irreps_in, irreps_out=irrep_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
         return self.linear(x)  # [n_nodes, 1]

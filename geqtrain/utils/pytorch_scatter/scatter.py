@@ -113,3 +113,67 @@ def scatter_mean(
     else:
         out.div_(count, rounding_mode="floor")
     return out
+
+
+@torch.jit.script
+def scatter_max(
+    src: torch.Tensor,
+    index: torch.Tensor,
+    dim: int = -1,
+    out: Optional[torch.Tensor] = None,
+    dim_size: Optional[int] = None,
+) -> torch.Tensor:
+    """
+    Returns the maximum value of all elements in the `src` tensor at the indices
+    specified in the `index` tensor along a given axis `dim`.
+    It also returns the arguments of the maximum values.
+    """
+    index = _broadcast(index, src, dim)
+
+    if out is None:
+        size = list(src.size())
+        if dim_size is not None:
+            size[dim] = dim_size
+        elif index.numel() == 0:
+            size[dim] = 0
+        else:
+            size[dim] = int(index.max()) + 1
+        out = torch.empty(size, dtype=src.dtype, device=src.device)
+        # The identity for max reduction is the minimum value of the dtype
+        if src.is_floating_point():
+            out.fill_(0.)
+        else:
+            out.fill_(0)
+
+    # Use scatter_reduce_ with 'amax' to get both max values and their indices
+    # Note: `include_self=False` is crucial. If an index is not present in the
+    # `index` tensor, the corresponding output will be the initial fill_value,
+    # and the arg_out will be filled with the size of the dimension, which is
+    # the behavior of pytorch_scatter.
+    out = out.scatter_reduce(dim, index, src, reduce="amax", include_self=False)
+    return out
+
+
+@torch.jit.script
+def scatter_softmax(
+    src: torch.Tensor,
+    index: torch.Tensor,
+    dim: int = -1,
+    dim_size: Optional[int] = None
+) -> torch.Tensor:
+    if not torch.is_floating_point(src):
+        raise ValueError('`scatter_softmax` can only be computed over tensors '
+                         'with floating point data types.')
+
+    index = _broadcast(index, src, dim)
+
+    max_value_per_index = scatter_max(src, index, dim=dim, dim_size=dim_size)
+    max_per_src_element = max_value_per_index.gather(dim, index)
+
+    recentered_scores = src - max_per_src_element
+    recentered_scores_exp = recentered_scores.exp_()
+
+    sum_per_index = scatter_sum(recentered_scores_exp, index, dim, dim_size=dim_size)
+    normalizing_constants = sum_per_index.gather(dim, index)
+
+    return recentered_scores_exp.div(normalizing_constants)

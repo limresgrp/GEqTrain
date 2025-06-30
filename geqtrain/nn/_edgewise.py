@@ -2,8 +2,9 @@ import torch
 import math
 from typing import Optional
 from einops.layers.torch import Rearrange
-from torch_scatter import scatter
-from torch_scatter.composite import scatter_softmax
+# from torch_scatter import scatter
+# from torch_scatter.composite import scatter_softmax
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
@@ -116,7 +117,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             edge_feat = self.reshape_out(edge_feat)
 
         # aggregation step
-        data[self.out_field] = scatter(edge_feat, edge_center, dim=0, dim_size=num_nodes)
+        data[self.out_field] = scatter_sum(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
         # if not self.use_attention:
         #     data[self.out_field] = data[self.out_field] * self.env_sum_normalization

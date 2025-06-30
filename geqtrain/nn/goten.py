@@ -3,8 +3,9 @@ import functools
 import torch
 
 from typing import Callable, Optional, Tuple, Union
-from torch_scatter import scatter
-from torch_scatter.composite import scatter_softmax
+# from torch_scatter import scatter
+# from torch_scatter.composite import scatter_softmax
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from einops.layers.torch import Rearrange
 
 from e3nn import o3
@@ -206,7 +207,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         proj_node = torch.einsum('ni,id -> nd', node_attr, self.W_node)
         proj_edge = proj_node[edge_neighbor]
         proj_radial = torch.einsum('ej,jd -> ed', phi_ij, self.W_edge)
-        m_node = scatter(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
+        m_node = scatter_sum(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
         proj_center_node = torch.einsum('ni,id -> nd', node_attr, self.W_center_node)
         h = self.node_norm(torch.einsum('nk,kd -> nd', torch.cat([proj_center_node, m_node], dim=-1), self.W_concat_node))
 
@@ -223,7 +224,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         env_j_scalar0  = self.h_j_emb0(h_j)
         env_ij_w0      = self.env_ij_w0_norm(env_ij_scalar0 * env_j_scalar0)
         X_ij           = self.env_weighter(spharms, env_ij_w0)
-        X              = self.node_eq_norm(scatter(X_ij, edge_center, dim=0, dim_size=num_nodes))
+        X              = self.node_eq_norm(scatter_sum(X_ij, edge_center, dim=0, dim_size=num_nodes))
 
         return num_nodes, h, X, t_ij
 
@@ -384,7 +385,7 @@ class GotenInteractionLayer(torch.nn.Module):
         # h
         w_index   = 0
         delta_h_j = env_ij_w.narrow(-1, w_index, self.latent_dim) # (dim, start, length)
-        delta_h   = self.node_norm(scatter(delta_h_j, edge_center, dim=0, dim_size=num_nodes))
+        delta_h   = self.node_norm(scatter_sum(delta_h_j, edge_center, dim=0, dim_size=num_nodes))
         h         = h + delta_h
         # h_j = h[edge_neighbor] ? Optional. Check if it works better
 
@@ -410,7 +411,7 @@ class GotenInteractionLayer(torch.nn.Module):
         delta_X_ij = delta_spharm_ij + delta_eq_ij
         if self.use_attention:
             delta_X_ij = self.apply_attention(delta_X_ij, h_j, t_ij, edge_center)
-        delta_X = self.node_eq_norm(scatter(delta_X_ij, edge_center, dim=0, dim_size=num_nodes))
+        delta_X = self.node_eq_norm(scatter_sum(delta_X_ij, edge_center, dim=0, dim_size=num_nodes))
         X = apply_residual_stream(X, delta_X, update_coeff)
 
         h, X = self.eqff(h, X)

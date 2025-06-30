@@ -1,6 +1,7 @@
 import torch
 from typing import Optional
-from torch_scatter import scatter
+# from torch_scatter import scatter
+from geqtrain.utils.pytorch_scatter import scatter_sum
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
@@ -46,5 +47,5 @@ class NodewiseReduce(GraphModuleMixin, torch.nn.Module):
             node_feat = torch.cat((node_feat, data[self.residual_field]), dim=-1)
 
         if batch is not None:
-            data[self.out_field] = scatter(node_feat, batch, dim=0)
+            data[self.out_field] = scatter_sum(node_feat, batch, dim=0)
         return data

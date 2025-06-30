@@ -6,7 +6,8 @@ from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from ._graph_mixin import GraphModuleMixin
 import math
-from torch_scatter import scatter
+# from torch_scatter import scatter
+from geqtrain.utils.pytorch_scatter import scatter_sum
 from typing import Dict, Optional, List
 
 
@@ -227,7 +228,7 @@ class GotenNetEmbedding(GraphModuleMixin, torch.nn.Module):
         proj_radial = torch.einsum('ej,jd -> ed', edge_attr, self.W_edge)
 
         num_nodes = len(node_attr)
-        m_node = scatter(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
+        m_node = scatter_sum(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
 
         proj_center_node = torch.einsum('nd,dd -> nd', node_attr, self.W_center_node)
         h_node = self.norm(torch.einsum('nk,kd -> nd', torch.cat(proj_center_node, m_node, dim=-1), self.W_concat_node))

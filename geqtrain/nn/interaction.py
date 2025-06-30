@@ -4,8 +4,9 @@ import torch
 import wandb
 
 from typing import Optional, List, Tuple, Union
-from torch_scatter import scatter
-from torch_scatter.composite import scatter_softmax
+# from torch_scatter import scatter
+# from torch_scatter.composite import scatter_softmax
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from einops.layers.torch import Rearrange
 
 from e3nn import o3
@@ -770,7 +771,7 @@ class InteractionLayer(torch.nn.Module):
             emb_latent = self.apply_attention(node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent)
 
         # Pool over all attention-weighted edge features to build node local environment embedding
-        local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
+        local_env_per_node = scatter_sum(emb_latent, edge_center, dim=0, dim_size=num_nodes)
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
