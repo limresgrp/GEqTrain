@@ -259,7 +259,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 mlp_nonlinearity = "swiglu",
             )
 
-        self.kqv_proj_output_size_multiplier = 2 if self.idx_key == 'ensemble_index' else 3
+        self.kqv_proj_output_size_multiplier = 2 if self.idx_key in ['ensemble_index', AtomicDataDict.GRAPH_FEATURES_KEY] else 3
         self.kqv_proj = nn.Linear(self.n_inpt_scalars, self.kqv_proj_output_size_multiplier*self.n_inpt_scalars, bias=False)
         if self.kqv_proj_output_size_multiplier == 2:
             self.query_embedding = nn.Parameter(torch.randn(self.n_inpt_scalars))
@@ -323,7 +323,10 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
     @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
     def forward(self, features, data):
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
-        attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
+        if self.idx_key == AtomicDataDict.GRAPH_FEATURES_KEY:
+            attention_idxs = torch.arange(features.shape[0], device=features.device)
+        else:
+            attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
 
         N, emb_dim = features.shape # N = num nodes or N ensemble confs

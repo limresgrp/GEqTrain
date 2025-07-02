@@ -221,7 +221,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
             if dataset_mode == 'ensemble':
                 idx_key = 'ensemble_index'
             else:
-                scalar_attnt = False
+                idx_key = AtomicDataDict.GRAPH_FEATURES_KEY
         else:
             raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
 
