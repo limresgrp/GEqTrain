@@ -2,14 +2,11 @@ from .kan import KAN
 from ._fc import ScalarMLPFunction, select_nonlinearity
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
-from ._node import OneHotAtomEncoding, EmbeddingAttrs
+from ._embedding_attrs import EmbeddingInputAttrs, EmbeddingAttrs
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
+from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, BaseEdgeEmbedding
 from ._graph import EmbeddingGraphAttrs
-from ._edgewise import (  # noqa: F401
-    EdgewiseReduce,
-    # EdgewiseLinear,
-)  # noqa: F401
+from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
 from .readout import ReadoutModule, ReadoutModuleWithConditioning
@@ -27,13 +24,14 @@ from .mace import MACEModule
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
-    OneHotAtomEncoding,
+    EmbeddingInputAttrs,
     EmbeddingAttrs,
     BesselBasis,
     BesselBasisVec,
     PolyBasisVec,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
+    BaseEdgeEmbedding,
     EmbeddingGraphAttrs,
     EdgewiseReduce,
     InteractionModule,

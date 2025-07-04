@@ -82,12 +82,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         "edge_features"         [n_edge, dim]       out_field                       edge_features are the output of interaction block
     '''
     num_layers: int
-    node_invariant_field: str
-    node_equivariant_field: str
     edge_invariant_field: str
     edge_equivariant_field: str
+    node_invariant_field: str
     env_embed_multiplicity: int
     out_field: str
+    
     def __init__(
         self,
         # required params
@@ -102,8 +102,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # alias:
         node_invariant_field   = AtomicDataDict.NODE_ATTRS_KEY,
         node_equivariant_field = AtomicDataDict.NODE_EQ_ATTRS_KEY,
-        edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-        edge_equivariant_field = AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+        edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+        edge_equivariant_field = AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
         out_field              = AtomicDataDict.EDGE_FEATURES_KEY,
         # hyperparams:
         latent_dim:             int  = 64,
@@ -151,53 +151,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.use_mace_product       = use_mace_product
         # set up irreps
         self._init_irreps(irreps_in=irreps_in, required_irreps_in=[self.node_invariant_field, self.edge_invariant_field, self.edge_equivariant_field])
+        input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
         # save dimensionalities
         self.edge_invariant_dim = self.irreps_in[self.edge_invariant_field].num_irreps
+        self.edge_radial_emb_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].num_irreps
         # initialize scalar functions
         two_body_latent = functools.partial(two_body_latent, **two_body_latent_kwargs)
         latent          = functools.partial(latent,          **latent_kwargs)
         env_embed       = functools.partial(env_embed,       **env_embed_kwargs)
-
-        # spharms
-        input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
-        
-        # concat node eq_input features of each atom pair to spharms vector
-        if AtomicDataDict.NODE_EQ_ATTRS_KEY in self.irreps_in:
-            node_eq_irreps = self.irreps_in[AtomicDataDict.NODE_EQ_ATTRS_KEY]
-            
-            # 1. Create the Irreps object for the naively concatenated features
-            unsorted_irreps_list = list(input_edge_eq_irreps) + list(node_eq_irreps) + list(node_eq_irreps)
-            unsorted_irreps = o3.Irreps(unsorted_irreps_list)
-
-            # 2. Get the sorted irreps and the BLOCK permutation
-            sorted_irreps, p_blocks, _ = unsorted_irreps.sort()
-
-            # 3. Get the dimensions of each block in the ORIGINAL unsorted order,
-            #    correctly accounting for multiplicity.
-            dims = torch.tensor([mul * ir.dim for mul, ir in unsorted_irreps])
-
-            # 4. Get the starting indices (offsets) of each block in the original tensor.
-            offsets = torch.cumsum(torch.cat((torch.tensor([0]), dims[:-1])), dim=0)
-
-            # 5. Compute the inverse of the block permutation (argsort).
-            #    This tells us which original block should go into each new position.
-            arg_p_blocks = sorted(range(len(p_blocks)), key=p_blocks.__getitem__)
-            
-            # 6. Build the full element-wise permutation using the inverse block permutation.
-            p_elements = torch.cat([
-                torch.arange(dims[i]) + offsets[i] for i in arg_p_blocks
-            ])
-
-            # 7. Store the final, correct, element-wise permutation as a buffer
-            self.register_buffer('concatenation_permutation', p_elements)
-            
-            # 8. Store the final sorted irreps description for later use
-            input_edge_eq_irreps = sorted_irreps
-            self._has_node_eq_attrs = True
-        else:
-            # If there are no node features to concatenate, no permutation is needed.
-            self.concatenation_permutation = None
-            self._has_node_eq_attrs = False
 
         env_embed_irreps     = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
         edge_features_irreps = complete_parities(env_embed_irreps)
@@ -347,7 +308,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
             self.rbf_embedder = None
             if self.learn_cutoff_bias:
-                self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
+                self.rbf_embedder = AdaLN(self.latent_dim, self.edge_radial_emb_dim)
             self.post_norm = None
             if self.use_post_norm:
                 self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
@@ -359,65 +320,36 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.irreps_out.update({self.out_field: self.out_irreps})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        edge_center     = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        edge_neighbor   = data[AtomicDataDict.EDGE_INDEX_KEY][1]
-        edge_length     = data[AtomicDataDict.EDGE_LENGTH_KEY]
-        edge_attr       = data[self.edge_equivariant_field]
-        edge_invariants = data[self.edge_invariant_field]
-        node_invariants = data[self.node_invariant_field]
-        num_edges: int  = edge_invariants.shape[0]
-        num_nodes: int  = node_invariants.shape[0]
+        edge_center, edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY]
+        edge_length       = data[AtomicDataDict.EDGE_LENGTH_KEY]
+        edge_equivariants = data[self.edge_equivariant_field]
+        edge_invariants   = data[self.edge_invariant_field]
+        node_invariants   = data[self.node_invariant_field]
+        num_edges: int    = edge_invariants.shape[0]
+        num_nodes: int    = node_invariants.shape[0]
 
         # Initialize state
-        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_attr.device)
-        latents = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_attr.device)
-        active_edges = torch.arange(num_edges,device=edge_attr.device)
-
-        # For the first layer, we use the input invariants:
-        # The center and neighbor invariants and edge invariants
-        if AtomicDataDict.EDGE_FEATURES_KEY in data:
-            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants, data[AtomicDataDict.EDGE_FEATURES_KEY]], dim=-1)
-        else:
-            inv_latent_cat = torch.cat([node_invariants[edge_center], node_invariants[edge_neighbor], edge_invariants], dim=-1)
-
-        # The nonscalar features
-        if self._has_node_eq_attrs and AtomicDataDict.NODE_EQ_ATTRS_KEY in data:
-            node_equivariants = data[AtomicDataDict.NODE_EQ_ATTRS_KEY] * 1000
-
-            # 1. Perform the naive concatenation.
-            unsorted_features = torch.cat([
-                edge_attr, 
-                node_equivariants[edge_center], 
-                node_equivariants[edge_neighbor]
-            ], dim=-1)
-
-            # 2. Apply the pre-computed element-wise permutation.
-            #    This `edge_attr` tensor now correctly corresponds to `input_edge_eq_irreps`.
-            edge_attr = unsorted_features[:, self.concatenation_permutation]
-        eq_features = edge_attr
-
+        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device)
+        eq_features  = None
+        active_edges = torch.arange(num_edges,device=edge_center.device)
+        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device)
         # Compute the sigmoids vectorized instead of each loop
         layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
-
         # Vectorized precompute per layer cutoffs
         cutoff_coeffs_all = tanh_cutoff(edge_length, self.per_layer_cutoffs, n=self.tanh_cutoff_n)
 
         for layer_index, layer in enumerate(self.interaction_layers):
-
-            # Determine which edges are still in play
             cutoff_coeffs = cutoff_coeffs_all[layer_index]
-
-            latents, inv_latent_cat, eq_features = layer(
+            latents, edge_invariants, eq_features = layer(
                 data=data,
-                active_edges=active_edges,
                 num_nodes=num_nodes,
-                latents=latents,
-                inv_latent_cat=inv_latent_cat,
-                eq_features=eq_features,
                 cutoff_coeffs=cutoff_coeffs,
-                edge_attr=edge_attr,
                 node_invariants=node_invariants,
                 edge_invariants=edge_invariants,
+                edge_equivariants=edge_equivariants,
+                active_edges=active_edges,
+                latents=latents,
+                eq_features=eq_features,
                 edge_center=edge_center,
                 edge_neighbor=edge_neighbor,
                 this_layer_update_coeff=layer_update_coefficients[layer_index - 1] if layer_index > 0 else None,
@@ -435,12 +367,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # - Output invariant values - #
         if self.has_scalar_output:
             # update latents
-            new_latents = self.final_latent_mlp(inv_latent_cat)
+            new_latents = self.final_latent_mlp(edge_invariants)
 
             # apply cutoff bias
             if self.learn_cutoff_bias:
                 assert self.rbf_embedder is not None
-                new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
+                new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
             else:
                 cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
                 half = new_latents.size(1) // 2
@@ -499,6 +431,7 @@ class InteractionLayer(torch.nn.Module):
         self.learn_cutoff_bias      = parent.learn_cutoff_bias
         self.use_post_norm          = parent.use_post_norm
         self.edge_invariant_dim     = parent.edge_invariant_dim
+        self.edge_radial_emb_dim    = parent.edge_radial_emb_dim
 
         emb_latent_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in env_embed_irreps if ir in input_edge_eq_irreps])
 
@@ -598,33 +531,22 @@ class InteractionLayer(torch.nn.Module):
                 shared_weights=True,
             )
             assert previous_latent_dim is None
+            edge_invariants_dim = parent.irreps_in[parent.edge_invariant_field].num_irreps
             # at the first layer, we have no invariants from previous TPs
             self.latent_mlp = two_body_latent(
-                mlp_input_dimension=(
-                    (
-                        # Node invariants for center and neighbor (chemistry)
-                        2 * parent.irreps_in[parent.node_invariant_field].num_irreps
-                        # Plus edge invariants for the edge (radius).
-                        + parent.irreps_in[parent.edge_invariant_field].num_irreps + (
-                            parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps
-                            if AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in
-                            else 0
-                        )
-                    )
-                ),
+                mlp_input_dimension=edge_invariants_dim,
                 mlp_output_dimension=self.latent_dim,
             )
         else:
             self.eq_features_linear = None
             assert previous_latent_dim is not None
             self.latent_dim = previous_latent_dim
+            # the embedded latent invariants from the previous layer(s)
+            # and the invariants extracted from the last layer's TP:
+            edge_invariants_dim = self.latent_dim + self.env_embed_multiplicity * parent._tp_n_scalar_outs[self.layer_index - 1]
+                    
             self.latent_mlp = latent(
-                mlp_input_dimension=(
-                    # the embedded latent invariants from the previous layer(s)
-                    self.latent_dim
-                    # and the invariants extracted from the last layer's TP:
-                    + self.env_embed_multiplicity * parent._tp_n_scalar_outs[self.layer_index - 1]
-                ),
+                mlp_input_dimension=edge_invariants_dim,
                 mlp_output_dimension=self.latent_dim,
             )
 
@@ -644,12 +566,7 @@ class InteractionLayer(torch.nn.Module):
 
         # Take the node attrs and obtain a query matrix
         self.edge_attr_to_query = ScalarMLPFunction(
-            mlp_input_dimension=(
-                # Node invariants for center and neighbor (chemistry)
-                2 * parent.irreps_in[parent.node_invariant_field].num_irreps
-                # Plus edge invariants for the edge (radius).
-                + parent.irreps_in[parent.edge_invariant_field].num_irreps
-            ),
+            mlp_input_dimension=edge_invariants_dim,
             mlp_latent_dimensions = [],
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
@@ -673,24 +590,19 @@ class InteractionLayer(torch.nn.Module):
 
         self.rbf_embedder = None
         if self.learn_cutoff_bias:
-            self.rbf_embedder = AdaLN(self.latent_dim, self.edge_invariant_dim)
+            self.rbf_embedder = AdaLN(self.latent_dim, self.edge_radial_emb_dim)
         self.post_norm = None
         if self.use_post_norm:
             self.post_norm = torch.nn.LayerNorm(self.latent_dim)
 
-    def apply_attention(self, node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent) -> torch.Tensor:
-        edge_full_attr = torch.cat([
-            node_invariants[edge_center],
-            node_invariants[edge_neighbor],
-            edge_invariants,
-        ], dim=-1)
+    def apply_attention(self, edge_invariants, edge_center, latents, emb_latent) -> torch.Tensor:
 
         # Asserts needed for JIT
         assert self.edge_attr_to_query is not None
         assert self.latent_to_key is not None
         assert self.rearrange_qk is not None
 
-        Q = self.edge_attr_to_query(edge_full_attr)
+        Q = self.edge_attr_to_query(edge_invariants)
         Q = self.rearrange_qk(Q)
 
         K = self.latent_to_key(latents)
@@ -714,24 +626,23 @@ class InteractionLayer(torch.nn.Module):
     def forward(
         self,
         data: AtomicDataDict.Type,
-        active_edges: torch.Tensor,
         num_nodes: int,
-        latents,
-        inv_latent_cat,
-        eq_features,
         cutoff_coeffs: torch.Tensor,
-        edge_attr: torch.Tensor,
-        node_invariants,
-        edge_invariants,
-        edge_center,
-        edge_neighbor,
+        node_invariants: torch.Tensor,
+        edge_invariants: torch.Tensor,
+        edge_equivariants: torch.Tensor,
+        active_edges: torch.Tensor,
+        latents: torch.Tensor,
+        eq_features: torch.Tensor,
+        edge_center: torch.Tensor,
+        edge_neighbor: torch.Tensor,
         this_layer_update_coeff: Optional[torch.Tensor],
     ):
-        new_latents = self.latent_mlp(inv_latent_cat)
+        new_latents = self.latent_mlp(edge_invariants)
         # Apply cutoff, which propagates through to everything else
         if self.learn_cutoff_bias:
             assert self.rbf_embedder is not None
-            new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY])
+            new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
         else:
             half = new_latents.size(1) // 2
             new_latents = torch.cat([
@@ -755,7 +666,7 @@ class InteractionLayer(torch.nn.Module):
             # embed initial edge
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
-            eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
+            eq_features = self._env_weighter(edge_equivariants, env_w)
             if self.eq_features_linear is not None:
                 eq_features = self.eq_features_linear(eq_features)
         eq_features = self.eq_features_irreps_norm(eq_features)
@@ -763,12 +674,12 @@ class InteractionLayer(torch.nn.Module):
         # Extract weights for the edge attrs
         env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
         w_index += self._env_weighter.weight_numel
-        emb_latent = self._env_weighter(edge_attr, env_w) # emb_latent is normalized below
+        emb_latent = self._env_weighter(edge_equivariants, env_w) # emb_latent is normalized below
         if self.emb_latent_linear is not None:
             emb_latent = self.emb_latent_linear(emb_latent)
 
         if self.use_attention:
-            emb_latent = self.apply_attention(node_invariants, edge_invariants, edge_center, edge_neighbor, latents, emb_latent)
+            emb_latent = self.apply_attention(edge_invariants, edge_center, latents, emb_latent)
 
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter_sum(emb_latent, edge_center, dim=0, dim_size=num_nodes)

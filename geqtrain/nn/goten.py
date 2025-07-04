@@ -3,8 +3,7 @@ import functools
 import torch
 
 from typing import Callable, Optional, Tuple, Union
-# from torch_scatter import scatter
-# from torch_scatter.composite import scatter_softmax
+from geqtrain.nn._embedding import BaseEmbedding
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from einops.layers.torch import Rearrange
 
@@ -90,14 +89,14 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             irreps_in=irreps_in,
             required_irreps_in=[
                 AtomicDataDict.NODE_ATTRS_KEY,
-                AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-                AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+                AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+                AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
         ])
         # initialize scalar functions
         latent = functools.partial(latent, **latent_kwargs)
 
         # Embed to the spharm * it as mul
-        spharms_irreps = self.irreps_in[AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY]
+        spharms_irreps = self.irreps_in[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
         assert all(mul == 1 for mul, _ in spharms_irreps)
 
         node_eq_irreps = o3.Irreps([(eq_multiplicity, ir) for _, ir in spharms_irreps])
@@ -118,7 +117,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # irreps
         input_node_irreps = irreps_in[AtomicDataDict.NODE_ATTRS_KEY]
-        input_edge_irreps = irreps_in[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY]
+        input_edge_irreps = irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
         if AtomicDataDict.EDGE_FEATURES_KEY in irreps_in:
             input_edge_irreps = input_edge_irreps + irreps_in[AtomicDataDict.EDGE_FEATURES_KEY]
 
@@ -126,7 +125,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.W_node = torch.nn.Parameter(torch.randn(input_node_irreps.dim, self.latent_dim))
         self.W_center_node = torch.nn.Parameter(torch.randn(input_node_irreps.dim, self.latent_dim))
         self.W_concat_node = torch.nn.Parameter(torch.randn(2 * self.latent_dim, self.latent_dim))
-        edge_attr_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY].dim
+        edge_attr_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
         self.W_edge = torch.nn.Parameter(torch.randn(edge_attr_dim, self.latent_dim))
         self.node_norm = torch.nn.LayerNorm(self.latent_dim)
         self.edge_norm = torch.nn.LayerNorm(self.latent_dim)
@@ -230,8 +229,8 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center, edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY]
-        phi_ij            = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY]
-        spharms           = data[AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY]
+        phi_ij            = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
+        spharms           = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
 
         num_nodes, h, X, t_ij = self.init_features(data, edge_center, edge_neighbor, phi_ij, spharms)
         update_coeffs = torch.sigmoid(self.update_coeffs)
@@ -494,3 +493,38 @@ class EQFF(torch.nn.Module):
         X = X + dX_intra
 
         return h, X
+
+
+@compile_mode("script")
+class GotenNodeEmbedding(BaseEmbedding):
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        node_irreps = self.irreps_in[self.node_field]
+        node_dim = node_irreps.dim
+        edge_attr_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
+        
+        self.W_node = torch.nn.Parameter(torch.randn(node_dim, node_dim))
+        self.W_center_node = torch.nn.Parameter(torch.randn(node_dim, node_dim))
+        self.W_concat_node = torch.nn.Parameter(torch.randn(2 * node_dim, node_dim))
+        self.W_edge = torch.nn.Parameter(torch.randn(edge_attr_dim, node_dim))
+        self.norm = torch.nn.LayerNorm(node_dim)
+        self.out_irreps = node_irreps
+    
+    def forward(
+        self,
+        data: AtomicDataDict.Type,
+    ) -> torch.Tensor:
+        edge_center, edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY]
+        edge_attr               = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
+        node_attr               = data[self.node_field]
+        
+        proj_node = torch.einsum('nd,dd -> nd', node_attr, self.W_node)
+        proj_edge = proj_node[edge_neigh]
+        proj_radial = torch.einsum('ej,jd -> ed', edge_attr, self.W_edge)
+
+        num_nodes = len(node_attr)
+        m_node = scatter_sum(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
+
+        proj_center_node = torch.einsum('nd,dd -> nd', node_attr, self.W_center_node)
+        return self.norm(torch.einsum('nk,kd -> nd', torch.cat([proj_center_node, m_node], dim=-1), self.W_concat_node))

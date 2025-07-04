@@ -240,7 +240,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
         if self.use_radial_bias:
-            rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY].dim
+            rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
             self.bias_norm = nn.LayerNorm(rbf_emb_dim)
             self.bias_proj = torch.nn.Sequential(
                 # nn.Linear(rbf_emb_dim, 4*rbf_emb_dim, bias=False),
@@ -261,7 +261,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.rearrange = Rearrange('batch source target heads -> batch heads source target')
 
     def _add_edge_based_bias(self, data: AtomicDataDict.Type):
-        edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
+        edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
         edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY] # (2, E)
         batch_map         = data[AtomicDataDict.BATCH_KEY] # assings each node to a given mol
         unique_idx, counts = torch.unique(batch_map, return_counts=True) # num_of mols, num of atoms per mol

@@ -1,20 +1,19 @@
 import logging
 from geqtrain.data import AtomicDataDict
-from geqtrain.model import update_config
 from geqtrain.utils import Config
-
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
     NodewiseReduce,
     InteractionModule,
-    EmbeddingAttrs,
+    EmbeddingInputAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     EmbeddingGraphAttrs,
     ReadoutModule,
     ReadoutModuleWithConditioning,
 )
+from geqtrain.model._embedding import buildEmbeddingLayers
 
 
 
@@ -22,7 +21,8 @@ def HeadlessGlobalGraphModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
-    layers = buildGlobalGraphModelLayers(config)
+    layers = buildEmbeddingLayers(config)
+    layers.update(buildGlobalGraphModelLayers())
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
@@ -32,33 +32,12 @@ def HeadlessGlobalGraphModel(config:Config) -> SequentialGraphNetwork:
 def buildGlobalGraphModelLayers(config:Config):
     logging.info("--- Building Global Graph Model")
 
-    update_config(config)
-
-    if 'node_attributes' not in config:
-        raise ValueError('Missing node_attributes in yaml')
-    
     layers = {
-        "node_attrs": (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            attributes=config.get('node_attributes'),
-        )),
-    }
-    
-    if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            attributes=config.get('edge_attributes'),
-        ))
-        layers["edge_attrs"] = edge_embedder
-
-    layers.update({
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "local_interaction": (InteractionModule, dict(
             name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_irreps=None,
             output_ls=[0],
@@ -78,8 +57,8 @@ def buildGlobalGraphModelLayers(config:Config):
         "context_aware_interaction": (InteractionModule, dict(
             name = "context_aware_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             output_mul="hidden",
         )),
@@ -98,7 +77,7 @@ def buildGlobalGraphModelLayers(config:Config):
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
         )),
-    })
+    }
 
     return layers
 
@@ -128,8 +107,8 @@ def appendNGNNLayers(config):
             layer_name : (InteractionModule, dict(
                 name = layer_name,
                 node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-                edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-                edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+                edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+                edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
                 out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                 out_irreps=None,
                 output_ls=[0],
@@ -151,8 +130,8 @@ def appendNGNNLayers(config):
         "last_interaction_layer": (InteractionModule, dict(
             name = "last_interaction_layer",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             output_mul="hidden",
         )),
@@ -177,10 +156,11 @@ def appendNGNNLayers(config):
 def moreGNNLayers(config:Config):
     logging.info("--- Building Global Graph Model")
 
+    from geqtrain.data._build import update_config
     update_config(config)
 
     if 'node_attributes' in config:
-        node_embedder = (EmbeddingAttrs, dict(
+        node_embedder = (EmbeddingInputAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
         ))
@@ -188,7 +168,7 @@ def moreGNNLayers(config:Config):
         raise ValueError('Missing node_attributes in yaml')
 
     if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
+        edge_embedder = (EmbeddingInputAttrs, dict(
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             attributes=config.get('edge_attributes'),
         ))

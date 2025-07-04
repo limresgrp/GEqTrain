@@ -15,30 +15,30 @@ from typing import List, Final
 
 ### == Define allowed keys as constants == ###
 
-R_MAX_KEY: Final[str] = "r_max"
-# The positions of the nodes in the system
-POSITIONS_KEY: Final[str] = "pos"
-# [2, n_edge] index tensor giving center -> neighbor relations
-EDGE_INDEX_KEY: Final[str] = "edge_index"
-# [bool] | [3] wether to use pbc or not and on which axis
-PBC_KEY: Final[str] = "pbc"
-# [n_edge, 3] tensor of how many periodic cells each edge crosses in each cell vector
-EDGE_CELL_SHIFT_KEY: Final[str] = "edge_cell_shift"
-# [n_batch, 3, 3] or [3, 3] tensor where rows are the cell vectors
-CELL_KEY: Final[str] = "cell"
-# [n_nodes] long tensor
-ATOM_NUMBER_KEY: Final[str] = "atom_numbers"
-# [n_nodes] long tensor
-NODE_TYPE_KEY: Final[str] = "node_types"
-# [n_edge] long tensor
-EDGE_TYPE_KEY: Final[str] = "edge_types"
+# (1)
+R_MAX_KEY:             Final[str] = "r_max"           # cutoff radius
+# [n_nodes, 3]
+POSITIONS_KEY:         Final[str] = "pos"             # positions of the nodes in the system
+# [2, n_edge]
+EDGE_INDEX_KEY:        Final[str] = "edge_index"      # index tensor giving center -> neighbor relations
+# (bool) | [3]
+PBC_KEY:               Final[str] = "pbc"             # wether to use pbc or not and on which axis
+# [n_edge, 3]
+EDGE_CELL_SHIFT_KEY:   Final[str] = "edge_cell_shift" # tensor of how many periodic cells each edge crosses in each cell vector
+# [n_batches, 3, 3] | [3, 3]
+CELL_KEY:              Final[str] = "cell"            # tensor where rows are the cell vectors
+# [n_nodes]
+NODE_TYPE_KEY:         Final[str] = "node_types"
+# [n_edges]
+EDGE_TYPE_KEY:         Final[str] = "edge_types"
+# [n_nodes]
+BATCH_KEY:             Final[str] = "batch"           # index tensor of the node batch
+# [n_batches]
+DATASET_RAW_FILE_NAME: Final[str] = "dataset_raw_file_name" # dataset raw file names
+# (1)
+NOISE_KEY:             Final[str] = "noise"           # noise level to inject to coordinates
 
-# [n_batch_nodes] index tensor of the node batch
-BATCH_KEY: Final[str] = "batch"
-# [n_batch_nodes] list of dataset raw file names
-DATASET_RAW_FILE_NAME: Final[str] = "dataset_raw_file_name"
-
-INPUT_STRUCTURE_KEYS: Final[List[str]] = [
+INPUT_STRUCTURE_KEYS:  Final[List[str]] = [
     POSITIONS_KEY,
     EDGE_INDEX_KEY,
     NODE_TYPE_KEY,
@@ -46,37 +46,39 @@ INPUT_STRUCTURE_KEYS: Final[List[str]] = [
 ]
 
 # [n_nodes, dim]
-NODE_ATTRS_KEY:    Final[str] = "node_attrs"    # scalar input features
+NODE_INPUT_ATTRS_KEY:    Final[str] = "node_input_attrs"    # node scalar input features
 # [n_nodes, dim]
-NODE_EQ_ATTRS_KEY: Final[str] = "node_eq_attrs" # equivariant iput features
-# [n_nodes, dim] (possibly equivariant) features of each node
-NODE_FEATURES_KEY: Final[str] = "node_features" # the processed version of NODE_ATTRS_KEY, used to do not overwrite NODE_ATTRS_KEY
-# [n_nodes, dim] (possibly equivariant) output features of each node
-NODE_OUTPUT_KEY: Final[str] = "node_output"
+NODE_EQ_INPUT_ATTRS_KEY: Final[str] = "node_eq_input_attrs" # node equivariant input features
+# [n_nodes, dim]
+NODE_ATTRS_KEY:          Final[str] = "node_attrs"          # node scalar attributes (attributes do not change once computed)
+# [n_nodes, dim]
+NODE_EQ_ATTRS_KEY:       Final[str] = "node_eq_attrs"       # node equivariant attributes (attributes do not change once computed)
+# [n_nodes, dim]
+NODE_FEATURES_KEY:       Final[str] = "node_features"       # processed version of NODE_ATTRS_KEY and NODE_EQ_ATTRS_KEY
 
-# [n_edges, dim] (possibly equivariant) edge input attributes
-EDGE_ATTRS_KEY: Final[str] = "edge_attrs" # look at difference between NODE_ATTRS_KEY and NODE_FEATURES_KEY
-# [n_edges, dim] (possibly equivariant) features of the edges
-EDGE_FEATURES_KEY: Final[str] = "edge_features" # look at difference between NODE_FEATURES_KEY and NODE_ATTRS_KEY
-# [n_edges, dim] (possibly equivariant) output features of the edges
-EDGE_OUTPUT_KEY: Final[str] = "edge_output"
-# [n_edges, 3] tensor of displacement vectors associated to edges
-EDGE_VECTORS_KEY: Final[str] = "edge_vectors"
-# [n_edges] tensor of the lengths of EDGE_VECTORS
-EDGE_LENGTH_KEY: Final[str] = "edge_lengths"
-# [n_edges, dim] equivariant angular attributes of the edges
-EDGE_ANGULAR_ATTRS_KEY: Final[str] = "edge_angular_attrs"
-# [n_edges, dim] invariant radial attributes of the edges
-EDGE_RADIAL_ATTRS_KEY: Final[str] = "edge_radial_attrs"
+# [n_edges, dim]
+EDGE_INPUT_ATTRS_KEY:    Final[str] = "edge_input_attrs"    # edge scalar input features
+# [n_edges, dim]
+EDGE_EQ_INPUT_ATTRS_KEY: Final[str] = "edge_eq_input_attrs" # edge equivariant input features
+# [n_edges, dim]
+EDGE_ATTRS_KEY:          Final[str] = "edge_attrs"          # edge scalar attributes (attributes do not change once computed)
+# [n_edges, dim]
+EDGE_EQ_ATTRS_KEY:       Final[str] = "edge_eq_attrs"       # edge equivariant attributes (attributes do not change once computed)
+# [n_edges, dim]
+EDGE_FEATURES_KEY:       Final[str] = "edge_features"       # processed version of EDGE_ATTRS_KEY and EDGE_EQ_ATTRS_KEY
+# [n_edges, 3]
+EDGE_VECTORS_KEY:        Final[str] = "edge_vectors"        # displacement vectors associated to edges
+# [n_edges]
+EDGE_LENGTH_KEY:         Final[str] = "edge_lengths"        # lengths of EDGE_VECTORS_KEY
+# [n_edges, dim]
+EDGE_SPHARMS_EMB_KEY:    Final[str] = "spharms_emb"         # spherical harmonics, embedding of EDGE_VECTORS_KEY (angular component)
+# [n_edges, dim]
+EDGE_RADIAL_EMB_KEY:     Final[str] = "radial_emb"          # radial basis functions, embedding of EDGE_LENGTH_KEY (radial component)
 
-# [n_graphs, dim] invariant graph input attributes
-GRAPH_ATTRS_KEY: Final[str] = "graph_attrs"
-# [n_graphs, dim] (possibly equivariant) graph features of graph
-GRAPH_FEATURES_KEY: Final[str] = "graph_features"
-# [n_graphs, dim] (possibly equivariant) output features of graph
-GRAPH_OUTPUT_KEY: Final[str] = "graph_output"
-
-NOISE_KEY: Final[str] = "noise"
+# [n_graphs, dim]
+GRAPH_ATTRS_KEY:         Final[str] = "graph_attrs"         # graph scalar attributes (attributes do not change once computed)
+# [n_graphs, dim]
+GRAPH_FEATURES_KEY:      Final[str] = "graph_features"      # processed version of GRAPH_ATTRS_KEY
 
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [

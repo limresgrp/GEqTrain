@@ -2,56 +2,34 @@ import logging
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import Config
 
-from geqtrain.model import update_config
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
     InteractionModule,
-    EmbeddingAttrs,
-    SphericalHarmonicEdgeAngularAttrs,
-    BasisEdgeRadialAttrs,
 )
-
+from geqtrain.model._embedding import buildEmbeddingLayers
 
 
 def HeadlessNodeModel(config:Config) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
-    layers = buildNodeModelLayers(config)
+    layers = buildEmbeddingLayers(config)
+    layers.update(buildNodeModelLayers())
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
         layers=layers,
     )
 
-def buildNodeModelLayers(config:Config):
+def buildNodeModelLayers():
     logging.info("--- Building Node Model ---")
 
-    update_config(config)
-
     layers = {
-        "node_attrs": (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            eq_out_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
-            attributes=config.get('node_attributes'),
-            eq_attributes=config.get('eq_node_attributes'),
-        )),
-    }
-
-    if 'edge_attributes' in config:
-        layers["edge_attrs"] = (EmbeddingAttrs, dict(
-            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            attributes=config.get('edge_attributes'),
-        ))
-
-    layers.update({
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
         "interaction": (InteractionModule, dict(
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             output_mul="hidden",
         )),
@@ -59,6 +37,6 @@ def buildNodeModelLayers(config:Config):
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-    })
+    }
 
     return layers

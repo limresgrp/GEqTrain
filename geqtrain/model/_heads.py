@@ -11,7 +11,7 @@ from torch.utils.data import ConcatDataset
 from importlib import import_module
 
 
-def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def Heads(model, config: Config) -> SequentialGraphNetwork:
     '''
     instanciates a layer with multiple ReadoutModules
     '''

@@ -1,4 +1,3 @@
-from .init_utils import update_config
 from ._node_model import HeadlessNodeModel
 from ._graph_model import HeadlessGraphModel
 from ._global_graph_model import HeadlessGlobalGraphModel, moreGNNLayers
@@ -18,7 +17,6 @@ from ._build import model_from_config
 from ._mace_model import MACEModel
 
 __all__ = [
-    update_config,
     HeadlessNodeModel,
     HeadlessGraphModel,
     HeadlessGlobalGraphModel,

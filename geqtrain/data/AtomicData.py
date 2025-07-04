@@ -29,8 +29,6 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.NODE_TYPE_KEY,
-    AtomicDataDict.ATOM_NUMBER_KEY,
-    AtomicDataDict.NODE_OUTPUT_KEY,
     AtomicDataDict.BATCH_KEY,
     AtomicDataDict.NOISE_KEY,
 }
@@ -39,15 +37,14 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
     AtomicDataDict.EDGE_LENGTH_KEY,
     AtomicDataDict.EDGE_FEATURES_KEY,
     AtomicDataDict.EDGE_ATTRS_KEY,
-    AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-    AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+    AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+    AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
     AtomicDataDict.EDGE_CELL_SHIFT_KEY,
 }
 _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.GRAPH_ATTRS_KEY,
     AtomicDataDict.GRAPH_FEATURES_KEY,
-    AtomicDataDict.GRAPH_OUTPUT_KEY,
     AtomicDataDict.CELL_KEY,
 }
 _DEFAULT_EXTRA_FIELDS: Set[str] = {}

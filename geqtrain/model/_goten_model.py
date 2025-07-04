@@ -1,12 +1,9 @@
 import logging
-
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import Config
-
-from geqtrain.model import update_config
 from geqtrain.nn import (
     SequentialGraphNetwork,
-    EmbeddingAttrs,
+    EmbeddingInputAttrs,
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     GotenInteractionModule,
@@ -28,17 +25,18 @@ def GotenModel(config:Config) -> SequentialGraphNetwork:
 def buildGotenModelLayers(config:Config):
     logging.info("--- Building Node Model ---")
 
+    from geqtrain.data._build import update_config
     update_config(config)
 
     layers = {
-        "node_attrs": (EmbeddingAttrs, dict(
+        "node_attrs": (EmbeddingInputAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
         )),
     }
 
     if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingAttrs, dict(
+        edge_embedder = (EmbeddingInputAttrs, dict(
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             attributes=config.get('edge_attributes'),
         ))
