@@ -367,7 +367,7 @@ def main(args=None, running_as_script: bool = True):
                     return ''
                 if not isinstance(node_output, torch.Tensor): node_output = node_output.mean[0]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-                atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
+                atom_number = node_type
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
                 num_node_centers = len(node_centers)
@@ -394,7 +394,7 @@ def main(args=None, running_as_script: bool = True):
                 # Extract fields from data
                 pos = data[AtomicDataDict.POSITIONS_KEY]
                 node_type = data[AtomicDataDict.NODE_TYPE_KEY]
-                atom_number = data.get(AtomicDataDict.ATOM_NUMBER_KEY, node_type)
+                atom_number = node_type
                 node_output = data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in data else None
                 ref_node_output = ref_data[AtomicDataDict.NODE_OUTPUT_KEY] if AtomicDataDict.NODE_OUTPUT_KEY in ref_data else None
                 node_centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()

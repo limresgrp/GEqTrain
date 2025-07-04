@@ -342,10 +342,8 @@ class Trainer:
 
         learning_rate (float): initial learning rate
         lr_scheduler_name (str): scheduler name
-        lr_scheduler_kwargs (dict): parameters to initialize the scheduler
 
         optimizer_name (str): name for optimizer
-        optimizer_kwargs (dict): parameters to initialize the optimizer
 
         batch_size (int): size of each batch
         validation_batch_size (int): batch size for evaluating the model for validation
@@ -408,8 +406,6 @@ class Trainer:
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
     object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
-    lr_scheduler_module = torch.optim.lr_scheduler
-    optim_module = torch.optim
 
     def __init__(
         self,
@@ -428,9 +424,7 @@ class Trainer:
         max_epochs: int = 10000,
         learning_rate: float = 1e-2,
         lr_scheduler_name: str = "none",
-        lr_scheduler_kwargs: Optional[dict] = None,
         optimizer_name: str = "Adam",
-        optimizer_kwargs: Optional[dict] = None,
         max_gradient_norm: float = float("inf"),
         exclude_keys: list = [],
         batch_size: int = 5,
@@ -792,7 +786,6 @@ class Trainer:
             prefix="optimizer",
             positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
-            optional_args=self.optimizer_kwargs,
         )
 
     def _init_scheduler(self):
@@ -805,9 +798,8 @@ class Trainer:
         ), f"{self.lr_scheduler_name} cannot be used unless callback functions are defined"
 
         self.lr_sched = None
-        self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
-            # note: lr_scheduler_T_max is used for schedulers that require max num of steps
+            # note: T_max is used for schedulers that require max num of steps
             # e.g. T_max in https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#cosineannealinglr
             self._init_warmup()
 
@@ -815,15 +807,15 @@ class Trainer:
                 total_number_of_steps = self.num_optim_steps * self.max_epochs
                 if self.warmup_epochs > 0:
                     total_number_of_steps -= self.warmup_steps
-                self.kwargs['lr_scheduler_T_max'] = total_number_of_steps
-                self.kwargs['eta_min'] = self.lr_scheduler_min_lr if hasattr(self, "lr_scheduler_min_lr") else self.learning_rate*.1
+                self.kwargs['T_max'] = total_number_of_steps
+                if 'eta_min' not in self.kwargs:
+                    self.kwargs['eta_min'] = self.learning_rate * 1e-2
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
                 class_name=self.lr_scheduler_name,
                 prefix="lr_scheduler",
                 positional_args=dict(optimizer=self.optim),
-                optional_args=self.lr_scheduler_kwargs,
                 all_args=self.kwargs,
             )
 
@@ -836,6 +828,7 @@ class Trainer:
             else:
                 raise ValueError(f"Invalid {match.string} format provided, it must be eg: '7.1%' in yaml, with ''")
 
+        self.warmup_steps = 0
         if self.warmup_epochs > 0:
             import pytorch_warmup as warmup
             self.warmup_steps = self.num_optim_steps * self.warmup_epochs
@@ -1349,6 +1342,8 @@ class Trainer:
         # when this returns true -> start normal lr_scheduler.step() call
         if self.warmup_epochs == -1:
             return True
+        if not hasattr(self, "warmup_scheduler"):
+            return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
 
@@ -1364,6 +1359,8 @@ class Trainer:
         self.batch_losses = self.loss_stat(loss, loss_contrib)
 
     def lr_sched_step(self, batch_lvl:bool) -> None:
+        if self.lr_sched is None:
+            return
         if batch_lvl:
             if not self._is_warmup_period_over():
                 with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over

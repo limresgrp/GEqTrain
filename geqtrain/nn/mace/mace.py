@@ -31,8 +31,8 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         # alias:
         node_invariant_field   = AtomicDataDict.NODE_ATTRS_KEY,
         node_equivariant_field = AtomicDataDict.NODE_EQ_ATTRS_KEY,
-        edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_ATTRS_KEY,
-        edge_equivariant_field = AtomicDataDict.EDGE_ANGULAR_ATTRS_KEY,
+        edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+        edge_equivariant_field = AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
         out_field              = AtomicDataDict.NODE_FEATURES_KEY,
         # hyperparams:
         latent_dim:                 int  = 64,
