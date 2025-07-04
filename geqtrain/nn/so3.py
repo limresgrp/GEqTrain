@@ -9,121 +9,117 @@ from einops.layers.torch import Rearrange
 @compile_mode("script")
 class SO3_Linear(torch.nn.Module):
     def __init__(
-            self,
-            in_irreps: o3.Irreps,
-            out_irreps: o3.Irreps,
-            bias: bool = True,
-        ):
+        self,
+        in_irreps: o3.Irreps,
+        out_irreps: o3.Irreps,
+        bias: bool = True,
+    ):
         '''
-        FOR DOCUMENTATION purposes: UNDERSTAND EQUIVARIANT LINEAR LAYER
-
-        Initializes the SO3_Linear layer.
+        Initializes a fully-connected SO(3)-equivariant linear layer that
+        correctly handles varied multiplicities.
 
         Args:
             in_irreps (o3.Irreps): Input irreducible representations.
             out_irreps (o3.Irreps): Output irreducible representations.
-            bias (bool): Whether to include a bias term. Default is True.
-
-        Attributes:
-            in_irreps (o3.Irreps): Stored input irreducible representations.
-            out_irreps (o3.Irreps): Stored output irreducible representations.
-            mul (int): Multiplicity of the irreducible representations.
-            bias (torch.nn.Parameter or None): Bias term if `bias` is True, else None.
-            params (torch.nn.ParameterDict): Dictionary of weight parameters for different l values.
-            l_dims_in (list): List of input dimensions for each l value.
-            l_dims_out (list): List of output dimensions for each l value.
-
-        Example Usage:
-            in_irreps = o3.Irreps('8x0e+8x0e+8x1o')
-            out_irreps = o3.Irreps('8x0e+8x1o+8x1o')
-
-            so3_linear = SO3_Linear(
-                in_irreps=in_irreps,
-                out_irreps=out_irreps,
-                bias=True,
-            )
-
-            x = in_irreps.randn(10, -1).reshape(10, 8, -1)
-            output = so3_linear(x)
+            bias (bool): Whether to include a bias term for the scalar (l=0) outputs.
         '''
-
         super().__init__()
-        self.in_irreps = in_irreps
-        self.out_irreps = out_irreps
-        self.mul_in = in_irreps[0].mul
-        self.mul_out = out_irreps[0].mul
+        self.in_irreps = in_irreps #o3.Irreps(in_irreps).simplify()
+        self.out_irreps = out_irreps # o3.Irreps(out_irreps).simplify()
+
+        self.paths = torch.nn.ModuleList()
+        self.instructions = []
+
+        # Get convenient slicing information for our input and output tensors
+        in_slices = {ir: s for ir, s in zip(self.in_irreps, self.in_irreps.slices())}
+        out_slices = {ir: s for ir, s in zip(self.out_irreps, self.out_irreps.slices())}
+
+        for ir_out, s_out in out_slices.items():
+            for ir_in, s_in in in_slices.items():
+                # A path is valid only if the irrep type is the same
+                if ir_in.ir == ir_out.ir:
+                    # Create a standard linear layer that will mix the multiplicities
+                    path = torch.nn.Linear(ir_in.mul, ir_out.mul, bias=False)
+                    self.init_path_weights(path) # Optional: Kaiming init
+
+                    path_idx = len(self.paths)
+                    self.paths.append(path)
+
+                    # Store instructions for the forward pass
+                    self.instructions.append({
+                        "in_slice": s_in,
+                        "out_slice": s_out,
+                        "path_idx": path_idx,
+                        "dim": ir_in.ir.dim,
+                    })
+        
         self.bias = None
+        self.bias_slice = None
+        if bias:
+            # The bias is a learnable parameter for each scalar output channel
+            scalar_out_irreps = o3.Irreps([ir for ir in self.out_irreps if ir.ir.l == 0])
+            if scalar_out_irreps.dim > 0:
+                self.bias_slice = self.out_irreps.slices()[0]
+                self.bias = torch.nn.Parameter(torch.zeros(scalar_out_irreps.dim))
 
-        scalars = 0
-        params = {}
-        lengths = []
-        rearrange_in_list  = []
-        rearrange_out_list = []
+    def init_path_weights(self, path: torch.nn.Linear):
+        # A simple but effective initialization
+        torch.nn.init.kaiming_uniform_(path.weight, a=math.sqrt(5))
 
-        for l in set(out_irreps.ls):
-            l_in_irr = [irr for irr in in_irreps if irr.ir.l == l]
-            assert all([irr.mul == self.mul_in for irr in l_in_irr])  # assert all have same multiplicity
-            in_features = self.mul_in * len(l_in_irr)
-            l_out_irr = [irr for irr in out_irreps if irr.ir.l == l]
-            assert all([irr.mul == self.mul_out for irr in l_out_irr]) # assert all have same multiplicity
-            out_features = self.mul_out * len(l_out_irr)
-
-            l_weight = torch.nn.Parameter(torch.randn(out_features, in_features))
-            bound = 1 / math.sqrt(in_features)
-            torch.nn.init.uniform_(l_weight, -bound, bound)
-            params[f'l{l}_weight'] = l_weight
-
-            _l_dims_in = [2 * l + 1] * len(l_in_irr)
-            _l_dims_out = [2 * l + 1] * len(l_out_irr)
-            lengths.append(sum(_l_dims_in))
-
-            rearrange_in_list.append(Rearrange('b m (i l) -> b l (m i)', m=self.mul_in, l=_l_dims_in[0],  i=len(_l_dims_in)))
-            rearrange_out_list.append(Rearrange('b l (m o) -> b m (o l)', m=self.mul_out, l=_l_dims_out[0], o=len(_l_dims_out)))
-
-            if l == 0 and bias:
-                scalars = len(l_out_irr)
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul_out, scalars))
-
-        self.scalars            = scalars
-        self.lengths            = lengths
-        self.params             = torch.nn.ParameterDict(params)
-        self.rearrange_in_list  = torch.nn.ModuleList(rearrange_in_list)
-        self.rearrange_out_list = torch.nn.ModuleList(rearrange_out_list)
-
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         '''
         Forward pass for the SO3_Linear layer.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, mul, feature_dim).
+            x (torch.Tensor): Input tensor of shape (batch_size, in_irreps.dim).
 
         Returns:
-            torch.Tensor: Output tensor after linear transformation and optional bias addition.
+            torch.Tensor: Output tensor of shape (batch_size, out_irreps.dim).
         '''
+        # Create an output tensor of the correct shape, filled with zeros.
+        # We will add the results of each path to this tensor.
+        output = torch.zeros(x.shape[0], self.out_irreps.dim, device=x.device, dtype=x.dtype)
 
-        out = []
-        start = 0
-        for idx, (_weight, rearrange_in, rearrange_out) in enumerate(zip(self.params.values(), self.rearrange_in_list, self.rearrange_out_list)):
-            _length = self.lengths[idx]
-            feature = x.narrow(dim=-1, start=start, length=_length)
-            feature = rearrange_in(feature)
-            feature = torch.einsum('bli, oi -> blo', feature, _weight)
-            feature = rearrange_out(feature)
+        for ins in self.instructions:
+            # 1. Slice the input to get the features for one irrep type
+            input_chunk = x[:, ins["in_slice"]]
 
-            out.append(feature)
-            start += _length
+            # 2. Reshape to separate multiplicity and irrep dimensions
+            # from (batch, mul_in * dim) -> (batch, mul_in, dim)
+            input_chunk = input_chunk.reshape(x.shape[0], -1, ins["dim"])
+            
+            # 3. Transpose for torch.nn.Linear, which expects features in the last dim
+            # from (batch, mul_in, dim) -> (batch, dim, mul_in)
+            input_chunk = input_chunk.transpose(1, 2)
 
-        out = torch.cat(out, dim=-1)
+            # 4. Apply the linear layer to the multiplicity channel
+            path = self.paths[ins["path_idx"]]
+            processed_chunk = path(input_chunk) # output: (batch, dim, mul_out)
+
+            # 5. Transpose back
+            # from (batch, dim, mul_out) -> (batch, mul_out, dim)
+            processed_chunk = processed_chunk.transpose(1, 2)
+
+            # 6. Reshape back to a flat feature vector
+            # from (batch, mul_out, dim) -> (batch, mul_out * dim)
+            processed_chunk = processed_chunk.reshape(x.shape[0], -1)
+
+            # 7. Add the result to the correct slice of the output tensor
+            output[:, ins["out_slice"]] += processed_chunk
+        
         if self.bias is not None:
-            out[..., :self.scalars] += self.bias.unsqueeze(0)
+            output[:, self.bias_slice] += self.bias
 
-        return out
+        return output
 
     def __repr__(self):
-        return f"{self.__class__.__name__}("     + \
-               f"in_irreps={self.in_irreps}, "   + \
-               f"out_irreps={self.out_irreps}, " + \
-               f"bias={self.bias is not None})"
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  in_irreps='{self.in_irreps}',\n"
+            f"  out_irreps='{self.out_irreps}',\n"
+            f"  bias={self.bias is not None},\n"
+            f"  num_paths={len(self.paths)}\n)"
+        )
 
 
 @compile_mode("script")
