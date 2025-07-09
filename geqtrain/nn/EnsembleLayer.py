@@ -105,7 +105,9 @@ class WeightedEnsembleAggregator(GraphModuleMixin, Module):
                 group_weights = entmax_bisect(group_scores/0.2, alpha=1.9, dim=0)
                 weights[mask] = group_weights
 
-            data[self.out_field] = features * weights.unsqueeze(-1)
+            features = features * weights.unsqueeze(-1)
+            features = torch.cat((features, equiv), dim=-1)
+            data[self.out_field] = features
             return data
 
         # Compute softmax weights for each group (batch-wise)
@@ -116,5 +118,8 @@ class WeightedEnsembleAggregator(GraphModuleMixin, Module):
         sum_exp_per_group = scatter_sum(exp_scores, inverse, dim=0)
         sum_exp_per_group_expanded = sum_exp_per_group[inverse]
         softmax_weights = exp_scores / (sum_exp_per_group_expanded + 1e-8)
-        data[self.out_field] = features * softmax_weights.unsqueeze(-1)
+        features = features * softmax_weights.unsqueeze(-1)
+        features = torch.cat((features, equiv), dim=-1)
+        data[self.out_field] = features
+
         return data
