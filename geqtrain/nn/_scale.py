@@ -17,7 +17,7 @@ class PerNodeAttrsScaleModule(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         field: str,
-        out_field: str,
+        out_field: Optional[str] = None,
         readout_latent        = ScalarMLPFunction,
         readout_latent_kwargs = {},
         # Other:
@@ -25,7 +25,7 @@ class PerNodeAttrsScaleModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.field = field
-        self.out_field = out_field
+        self.out_field = out_field if out_field is not None else field
         out_irreps = Irreps("0e")
         
         # check and init irreps
@@ -70,8 +70,8 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         field: str,
-        out_field: str,
         num_types: int,
+        out_field: Optional[str] = None,
         per_type_bias: Optional[List] = None,
         per_type_std:  Optional[List] = None,
         # Other:
@@ -79,7 +79,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
     ):
         super().__init__()
         self.field = field
-        self.out_field = out_field
+        self.out_field = out_field if out_field is not None else field
 
         if per_type_bias is not None:
             assert len(per_type_bias) == num_types, (

@@ -28,6 +28,7 @@ def buildNodeModelLayers():
     layers = {
         "interaction": (InteractionModule, dict(
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
+            node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
             edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,

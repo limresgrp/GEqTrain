@@ -102,8 +102,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # alias:
         node_invariant_field   = AtomicDataDict.NODE_ATTRS_KEY,
         node_equivariant_field = AtomicDataDict.NODE_EQ_ATTRS_KEY,
-        edge_invariant_field   = AtomicDataDict.EDGE_RADIAL_EMB_KEY,
-        edge_equivariant_field = AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+        edge_invariant_field   = AtomicDataDict.EDGE_ATTRS_KEY,
+        edge_equivariant_field = AtomicDataDict.EDGE_EQ_ATTRS_KEY,
         out_field              = AtomicDataDict.EDGE_FEATURES_KEY,
         # hyperparams:
         latent_dim:             int  = 64,
@@ -112,6 +112,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         head_dim:               int  = 16,
         use_mace_product:       bool = False,
         product_correlation:    int  = 2,
+        parity:                 str  = 'so3',
         # MLP parameters:
         two_body_latent        = ScalarMLPFunction,
         two_body_latent_kwargs = {},
@@ -161,7 +162,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed       = functools.partial(env_embed,       **env_embed_kwargs)
 
         env_embed_irreps     = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
-        edge_features_irreps = complete_parities(env_embed_irreps)
+        edge_features_irreps = complete_parities(env_embed_irreps) if parity == "o3_full" else env_embed_irreps
         assert (edge_features_irreps[0].ir == SCALAR) or (edge_features_irreps[0].ir == PSEUDO_SCALAR), "edge_features_irreps must start with scalars"
 
         # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent

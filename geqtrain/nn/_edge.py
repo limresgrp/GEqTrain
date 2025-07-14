@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Union
+from typing import Union
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
