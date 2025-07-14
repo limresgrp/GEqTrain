@@ -82,9 +82,24 @@ class GraphModuleMixin:
                 )
         # Save stuff
         self.irreps_in = irreps_in
+
+        for out_field, out_irreps in irreps_out.items():
+            if isinstance(out_irreps, o3.Irreps):
+                continue
+            elif isinstance(out_irreps, str):
+                try:
+                    out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
+                except ValueError:
+                    assert out_irreps in irreps_in, f"'out_irreps' param is behaving like a key, but '{out_irreps}' is missing from irreps_in"
+                    out_irreps = irreps_in[out_irreps] # othewise we expect it to be key for irreps_in[key]
+            elif out_field in irreps_in:
+                out_irreps = irreps_in[out_field] # outs same irreps of irreps_in[out_field]
+            irreps_out[out_field] = out_irreps
+
         # The output irreps of any graph module are whatever inputs it has, overwritten with whatever outputs it has.
         new_out = irreps_in.copy()
         new_out.update(irreps_out)
+
         self.irreps_out = new_out
 
     def _add_independent_irreps(self, irreps: Dict[str, Any]):
