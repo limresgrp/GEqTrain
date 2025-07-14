@@ -1,3 +1,4 @@
+import copy
 import inspect
 from typing import Optional
 from torch.nn import Module
@@ -60,7 +61,7 @@ def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
             _callable = add_suffix(builder, i)
             builders_and_params[_callable] = dict()
 
-    return builders_and_params
+    return copy.deepcopy(builders_and_params)
 
 def flatten_list(nested_list):
     """
