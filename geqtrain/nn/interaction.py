@@ -124,6 +124,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         debug: bool = False,
         name:str = "",
         learn_cutoff_bias: bool = True,
+        learn_eq_lin_layers_w: bool = False,
     ):
         super().__init__()
         self.name = name
@@ -141,6 +142,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.isqrtd                 = math.isqrt(head_dim)
         self.tanh_cutoff_n          = float(TanhCutoff_n)
         self.learn_cutoff_bias      = learn_cutoff_bias
+        self.learn_eq_lin_layers_w  = learn_eq_lin_layers_w
         # architectural choices
         self.use_attention          = use_attention
         self.use_mace_product       = use_mace_product
@@ -433,15 +435,18 @@ class InteractionLayer(torch.nn.Module):
         self.use_mace_product = parent.use_mace_product
         self.learn_cutoff_bias = parent.learn_cutoff_bias
         self.edge_invariant_dim = parent.edge_invariant_dim
+        self.learn_eq_lin_layers_w = parent.learn_eq_lin_layers_w
 
         # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
         self.env_norm = SO3_LayerNorm(env_embed_irreps)
         self.env_linear = Linear(
-            env_embed_irreps,
-            env_embed_irreps,
-            internal_weights=True,
-            shared_weights=True,
-        )
+                env_embed_irreps,
+                env_embed_irreps,
+                internal_weights=False if self.learn_eq_lin_layers_w else True,
+                shared_weights=False if self.learn_eq_lin_layers_w else True,
+            )
+        self.env_linear_weight_computer = torch.nn.Linear(env_embed_irreps[0].dim, self.env_linear.weight_numel) if self.learn_eq_lin_layers_w else None
+
 
         self.product, self.reshape_in_module = None, None
         if self.use_mace_product:
@@ -516,12 +521,16 @@ class InteractionLayer(torch.nn.Module):
                 mlp_nonlinearity=None,
             )
 
-        self.linear = Linear(
-            irreps_in=o3.Irreps([(mul, ir) for mul, ir in full_out_irreps if ir.l in linear_out_irreps.ls]),
-            irreps_out=linear_out_irreps,
-            internal_weights=True,
-            shared_weights=True,
-        ) if len(set(linear_out_irreps.ls)) > 0 else None
+        self.linear = None
+        if len(set(linear_out_irreps.ls)) > 0: # i.e. has eq out
+            self.linear = Linear(
+                irreps_in=o3.Irreps([(mul, ir) for mul, ir in full_out_irreps if ir.l in linear_out_irreps.ls]),
+                irreps_out=linear_out_irreps,
+                internal_weights=False if self.learn_eq_lin_layers_w else True,
+                shared_weights=False if self.learn_eq_lin_layers_w else True,
+            )
+            self.linear_weight_computer = torch.nn.Linear(self.latent_dim+2*self.env_embed_multiplicity, self.linear.weight_numel) if self.learn_eq_lin_layers_w else None
+
         self.latest_linear_out_irreps = linear_out_irreps
 
         edge_feature_dim = parent.irreps_in[AtomicDataDict.EDGE_FEATURES_KEY].num_irreps if AtomicDataDict.EDGE_FEATURES_KEY in parent.irreps_in else 0
@@ -686,8 +695,12 @@ class InteractionLayer(torch.nn.Module):
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
 
         local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
-        local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
-
+        if self.env_linear_weight_computer:
+            local_env_per_node_active_node_centers_scalars, _ = torch.split(local_env_per_node_active_node_centers, [1, eq_features.size(-1) - 1], dim=-1)
+            local_env_per_node_active_node_centers_scalars = self.rearrange_scalars(local_env_per_node_active_node_centers_scalars)
+            local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers, self.env_linear_weight_computer(local_env_per_node_active_node_centers_scalars))
+        else:
+            local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
         local_env_per_active_atom = self.pre_tp_norm(local_env_per_active_atom)
 
         if self.use_mace_product:
@@ -725,7 +738,12 @@ class InteractionLayer(torch.nn.Module):
             return latents, inv_latent, None, None
 
         # do the linear for eq. features
-        eq_features = self.linear(equivariant if self.is_last_layer else eq_features)
+        eq_inpt = equivariant if self.is_last_layer else eq_features
+        if self.linear_weight_computer:
+            eq_features = self.linear(eq_inpt, self.linear_weight_computer(inv_latent))
+        else:
+            eq_features = self.linear(eq_inpt)
+
         if self.debug and wandb.run is not None:
             log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
         return latents, inv_latent, eq_features, local_env_per_node

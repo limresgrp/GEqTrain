@@ -46,7 +46,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self,
         field: str,
         out_field: Optional[str] = None,
-        out_irreps: Union[o3.Irreps, str] = None,
+        out_irreps: Union[o3.Irreps, str] = None, # if none: # outs tensor of same o3.irreps of out_field
         strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
@@ -59,10 +59,16 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
-        scalar_attnt: bool = True,
-        num_heads: int = 32,
         dataset_mode: str = 'single', # single|ensemble
         normalize_l1:bool=False, # this must be false
+
+        # attention params:
+        scalar_attnt: bool = True,
+        num_heads: int = 32,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
+        learn_query:bool=False,
     ):
         super().__init__()
 
@@ -234,8 +240,24 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.scalar_attnt = scalar_attnt
         if self.scalar_attnt:
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
-            self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
-            self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
+            attention_params = {
+                "irreps_in":irreps_in,
+                "field":field,
+                "out_field":field,
+                "num_heads":num_heads,
+                "idx_key":idx_key,
+                "use_radial_bias":use_radial_bias, # if 'noise' not in self.out_field else False,
+                "sparse_attention":sparse_attention,
+                "attention_prenorm":attention_prenorm,
+                "learn_query":learn_query,
+            }
+            self.ensemble_attnt1 = L0IndexedAttention(
+                update_mlp=True,
+                **attention_params,
+            )
+            self.ensemble_attnt2 = L0IndexedAttention(
+                **attention_params
+            )
 
         self.normalize_l1=normalize_l1
 
@@ -325,7 +347,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         field: str,
         conditioning_field: str,
         out_field: Optional[str] = None,
-        out_irreps: Union[o3.Irreps, str] = None,
+        out_irreps: Union[o3.Irreps, str] = None, # if none: # outs tensor of same o3.irreps of out_field
         strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
@@ -338,29 +360,43 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
+        dataset_mode: str = 'single', # single|ensemble
+        normalize_l1:bool=False, # this must be false
+
+        # attention params:
         scalar_attnt: bool = True,
         num_heads: int = 32,
-        normalize_l1:bool=False,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
+        learn_query:bool=False,
     ):
         super().__init__(
-            field,
-            out_field,
-            out_irreps,
-            strict_irreps,
-            readout_latent,
-            readout_latent_kwargs,
-            eq_has_internal_weights,
-            resnet,
-            dampen,
-            input_ls,
-            input_mul,
-            output_ls,
-            output_mul,
-            irreps_in,
-            ignore_amp,
-            scalar_attnt,
-            num_heads,
-            normalize_l1,
+            field=field,
+            out_field=out_field,
+            out_irreps=out_irreps,
+            strict_irreps=strict_irreps,
+            readout_latent=readout_latent,
+            readout_latent_kwargs=readout_latent_kwargs,
+            eq_has_internal_weights=eq_has_internal_weights,
+            resnet=resnet,
+            dampen=dampen,
+            input_ls=input_ls,
+            input_mul=input_mul,
+            output_ls=output_ls,
+            output_mul=output_mul,
+            irreps_in=irreps_in,
+            ignore_amp=ignore_amp,
+            dataset_mode=dataset_mode,
+            normalize_l1=normalize_l1,
+
+            # attention params:
+            scalar_attnt=scalar_attnt,
+            num_heads=num_heads,
+            use_radial_bias=use_radial_bias,
+            sparse_attention=sparse_attention,
+            attention_prenorm=attention_prenorm,
+            learn_query=learn_query,
         )
 
         self.conditioning_field = conditioning_field

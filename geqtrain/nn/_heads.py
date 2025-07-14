@@ -16,7 +16,10 @@ from torch.nn import functional as F
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.data import AtomicDataDict
 from einops import repeat
-# from entmax import sparsemax, entmax15, entmax_bisect, normmax_bisect, budget_bisect
+try:
+    from entmax import sparsemax, entmax15, entmax_bisect, normmax_bisect, budget_bisect
+except ImportError:
+    sparsemax = entmax15 = entmax_bisect = normmax_bisect = budget_bisect = None
 
 class FFBlock(torch.nn.Module):
     def __init__(self, inp_size, out_size:int|None=None, residual:bool=True, group_norm:bool=False):
@@ -215,6 +218,9 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         num_heads: int = 8,
         dropout: float = 0.0,
         update_mlp:bool=False,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
         learn_query:bool=False,
     ):
         super().__init__()
@@ -240,7 +246,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim = self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
+        self.use_radial_bias = use_radial_bias and (field == AtomicDataDict.NODE_FEATURES_KEY) or (field == AtomicDataDict.NODE_ATTRS_KEY)
         if self.use_radial_bias:
             rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY].dim
             self.bias_norm = nn.LayerNorm(rbf_emb_dim)
@@ -251,6 +257,13 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 nn.Linear(rbf_emb_dim, num_heads)
             )
 
+        # from sd3.5 https://arxiv.org/pdf/2403.03206, 5.3.2
+        self.attention_prenorm = attention_prenorm
+        if self.attention_prenorm:
+            self.pre_norm_k = nn.LayerNorm(self.head_dim)
+            self.pre_norm_q = nn.LayerNorm(self.head_dim)
+            self.pre_norm_v = nn.LayerNorm(self.head_dim)
+
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
                 mlp_input_dimension=self.n_inpt_scalars,
@@ -259,11 +272,16 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 mlp_nonlinearity = "swiglu",
             )
 
-        self.kqv_proj_output_size_multiplier = 2 if self.idx_key in ['ensemble_index', AtomicDataDict.GRAPH_FEATURES_KEY] else 3
+        self.sparse_attention = sparse_attention
+
+        self.learn_query = learn_query
+        self.kqv_proj_output_size_multiplier = 3
+        if self.learn_query and self.idx_key in ['ensemble_index', AtomicDataDict.GRAPH_FEATURES_KEY]:
+            self.kqv_proj_output_size_multiplier = 2
+
         self.kqv_proj = nn.Linear(self.n_inpt_scalars, self.kqv_proj_output_size_multiplier*self.n_inpt_scalars, bias=False)
         if self.kqv_proj_output_size_multiplier == 2:
             self.query_embedding = nn.Parameter(torch.randn(self.n_inpt_scalars))
-
 
     def _add_edge_based_bias(self, data):
         edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
@@ -369,6 +387,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         q = q.transpose(1,2)
         v = v.transpose(1,2)
 
+        if self.attention_prenorm:
+            k = self.pre_norm_k(k)
+            q = self.pre_norm_q(q)
+            v = self.pre_norm_v(v)
+
         qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
         qvt /= self.scale # scale by sqrt of head_dim
 
@@ -384,8 +407,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         # all the above has been done to set -inf maksing in in rows populated, and zeros in rows that are completely empty (due to padding)
 
-        # attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
-        attnt_coeffs = F.softmax(qvt, dim=-1)
+        if self.sparse_attention:
+            attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
+        else:
+            attnt_coeffs = F.softmax(qvt, dim=-1)
+
         attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all "padding only" rows
 
         # assert torch.allclose(
