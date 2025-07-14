@@ -33,6 +33,7 @@ setup(
         "pytorch-warmup",
         "wandb>=0.13",
         "e3nn>=0.4.4",
+        "torcheval",
         "torch_ema",
         "pyyaml",
         "torch-runstats>=0.2.0",
