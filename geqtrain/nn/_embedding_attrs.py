@@ -277,7 +277,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         # node scalar
-        if self.node_emb is not None:
+        if self.node_emb is None:
             node_attr = data.pop(self.node_field) # default embedding
         else:
             node_attr = self.node_emb(data)

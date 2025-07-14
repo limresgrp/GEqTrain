@@ -123,11 +123,6 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # init h
         self.W_node = torch.nn.Parameter(torch.randn(input_node_irreps.dim, self.latent_dim))
-        self.W_center_node = torch.nn.Parameter(torch.randn(input_node_irreps.dim, self.latent_dim))
-        self.W_concat_node = torch.nn.Parameter(torch.randn(2 * self.latent_dim, self.latent_dim))
-        edge_attr_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
-        self.W_edge = torch.nn.Parameter(torch.randn(edge_attr_dim, self.latent_dim))
-        self.node_norm = torch.nn.LayerNorm(self.latent_dim)
         self.edge_norm = torch.nn.LayerNorm(self.latent_dim)
 
         # init t_ij
@@ -202,13 +197,8 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         # node scalars
         node_attr = data[AtomicDataDict.NODE_ATTRS_KEY]
         num_nodes: int = node_attr.shape[0]
-        
-        proj_node = torch.einsum('ni,id -> nd', node_attr, self.W_node)
-        proj_edge = proj_node[edge_neighbor]
-        proj_radial = torch.einsum('ej,jd -> ed', phi_ij, self.W_edge)
-        m_node = scatter_sum(proj_edge * proj_radial, edge_center, dim=0, dim_size=num_nodes)
-        proj_center_node = torch.einsum('ni,id -> nd', node_attr, self.W_center_node)
-        h = self.node_norm(torch.einsum('nk,kd -> nd', torch.cat([proj_center_node, m_node], dim=-1), self.W_concat_node))
+
+        h = torch.einsum('ni,id -> nd', node_attr, self.W_node)
 
         # edge scalars
         h_i = h[edge_center]
