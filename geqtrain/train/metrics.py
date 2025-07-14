@@ -12,9 +12,8 @@ import torch
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.train.loss import Loss
-from torch_runstats import RunningStats, Reduction
+from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
 
-from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
 
@@ -81,9 +80,10 @@ class Metrics(Loss):
                 if hasattr(self.funcs[key], "reduction"): func_params["reduction"] = self.funcs[key].reduction
             
             reductions = {
-                'mean': Reduction.MEAN,
-                'rms' : Reduction.RMS,
-                None  : Reduction.MEAN,
+                'mean'  : Reduction.MEAN,
+                'rms'   : Reduction.RMS,
+                'latest': Reduction.LATEST,
+                None    : Reduction.MEAN,
             }
             reduction = reductions.get(func_params.get('reduction'), func_params.get('reduction'))
             self.kwargs[key] = dict(reduction=reduction)
@@ -156,7 +156,7 @@ class Metrics(Loss):
 
             _, params = self.params[key]
             per_species = params["PerSpecies"]
-            per_target   = params["PerTarget"]
+            per_target  = params["PerTarget"]
 
             # initialize the internal run_stat base on the error shape
             if key not in self.running_stats:
@@ -193,7 +193,6 @@ class Metrics(Loss):
             stat.to(device=device)
 
     def current_result(self):
-
         metrics = {}
         for key, stat in self.running_stats.items():
             metrics[key] = stat.current_result()
@@ -228,7 +227,7 @@ class Metrics(Loss):
 
             key_clean = self.remove_suffix(key)
             metric_name = ABBREV.get(key_clean, key_clean)
-            loss_name = self.funcs[key].func_name
+            loss_name = str(self.funcs[key])
             metric_key = f"{metric_name}_{loss_name}_{reduction}"
 
             per_species = params["PerSpecies"]

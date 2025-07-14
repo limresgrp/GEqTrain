@@ -603,7 +603,9 @@ class Trainer:
         """Initialize callbacks."""
         self._initial_callbacks      = [load_callable(callback) for callback in self.initial_callbacks]
         self._end_of_batch_callbacks = [load_callable(callback) for callback in self.end_of_batch_callbacks]
+        self.end_of_train_callbacks.append("geqtrain.train.trainer.reset_loss")
         self._end_of_train_callbacks = [load_callable(callback) for callback in self.end_of_train_callbacks]
+        self.end_of_valid_callbacks.append("geqtrain.train.trainer.reset_loss")
         self._end_of_valid_callbacks = [load_callable(callback) for callback in self.end_of_valid_callbacks]
         self._end_of_epoch_callbacks = [load_callable(callback) for callback in self.end_of_epoch_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in self.final_callbacks]
@@ -1920,6 +1922,9 @@ class Trainer:
             **dl_kwargs,
         )
 
+def reset_loss(trainer: Trainer):
+    trainer.loss.reset_loss()
+    trainer.metrics.reset_loss()
 
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""

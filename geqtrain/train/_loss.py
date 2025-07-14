@@ -45,6 +45,8 @@ class SimpleLoss:
             all_args={},
         )
 
+        self.extra_params = {}
+
     def __call__(
         self,
         pred: dict,
@@ -88,6 +90,8 @@ class SimpleLoss:
 
         return pred_key, ref_key
 
+    def __str__(self):
+        return self.func_name
 
 class SimpleLossWithNaNsFilter(SimpleLoss):
     """
@@ -208,6 +212,97 @@ class RMSDLoss(SimpleLossWithNaNsFilter):
             # Thus, we need to pass the sqrt(loss) to obtain the RMSD as output.
             loss[~not_nan_filter[:, 0].bool()] = torch.nan
             return torch.sqrt(loss)
+    
+    def __str__(self):
+        return "RMSD"
+
+
+class FocalLossBinaryAccuracy(SimpleLoss):
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+        **kwargs,
+    ):
+        '''
+        alpha is a number between 0 and 1
+        If alpha is 0.25, the loss for positive examples (target is 1) is multiplied by 0.25,
+        and the loss for negative examples (target is 0) is multiplied by 0.75 (since 1-0.25=0.75).
+        Effect: less weight to positive class and more weight to negative class, useful when the positive class is over-represented.
+
+        gamma: purpose: focus more on hard-to-classify examples by reducing the relative loss for well-classified examples.
+        higher gamma higher focus to hard-to-classify examples i.e. examples on which the net is not so confident.
+        scalses up the loss value when the net is not confident in the correct class
+        '''
+
+        super().__init__("BCEWithLogitsLoss", params)
+        self.alpha: float = params.get('alpha', 0.85)
+        self.gamma: float = params.get('gamma', 2)
+        assert 0 < self.alpha < 1
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        **kwargs,
+    ):
+        logits, target = super().prepare(pred, ref, key, **kwargs)
+        bce_loss = self.func(logits, target)
+        p = torch.sigmoid(logits)
+        p_t = p * target + (1 - p) * (1 - target)
+        
+        loss = bce_loss * ((1 - p_t) ** self.gamma)
+
+        if self.alpha >= 0:
+            alpha_t = self.alpha * target + (1 - self.alpha) * (1 - target)
+            loss = alpha_t * loss
+
+        return loss.mean() if mean else loss
+    
+    def __str__(self):
+        return "FocalLossBinaryAccuracy"
+
+
+class BinaryAUROCMetric:
+    def __init__(
+        self,
+        func_name: str,
+        params: dict = {},
+        **kwargs,
+    ):
+        from torcheval.metrics import BinaryAUROC
+        self.metric = BinaryAUROC(**params)
+        self.extra_params = {"reduction": "latest"}
+
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        **kwargs,
+    ):
+        if mean:
+            raise(f"{__class__.__name__} cannot be used as loss function for training")
+
+        logits = pred[key].squeeze(-1)
+        target = ref[key].squeeze(-1)
+
+        if target.dim() == 0: # if bs = 1
+            target = target.unsqueeze(0)
+            logits = logits.unsqueeze(0)
+
+        self.metric.update(logits, target)
+        rocauc = self.metric.compute()
+        return rocauc.to(logits.device)
+    
+    def reset(self):
+        self.metric.reset()
+    
+    def __str__(self):
+        return "BinaryAUROC"
 
 
 def instantiate_loss_function(name: str, params: Dict):
