@@ -228,9 +228,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             irreps_out={self.out_field: irreps_out},
         )
 
-        irreps_as_dict = {i:mul for i, (mul, l) in enumerate(in_irreps)}
-        # assert len(irreps_as_dict) == 1, f'Head to predict {field} has equivariant out: {str(self.irreps_in[self.out_field])}'
-        self.n_inpt_scalars = irreps_as_dict[0]
+        self.n_inpt_scalars = in_irreps.ls.count(0)
         self.kqv_norm = nn.LayerNorm(self.n_inpt_scalars)
         self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars, bias=False)
         self.out_proj = nn.Linear(self.n_inpt_scalars, self.n_inpt_scalars)
