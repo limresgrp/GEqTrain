@@ -6,7 +6,7 @@ import torch.nn
 
 from typing import Dict
 from importlib import import_module
-from torch_runstats import Reduction
+from geqtrain.utils.torch_runstats._runstats import Reduction
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import instantiate_from_cls_name
 
