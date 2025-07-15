@@ -20,6 +20,9 @@ from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate
 from geqtrain.train.sampler import EnsembleSampler
 
+
+from geqtrain.data import _GRAPH_FIELDS
+
 def init_logger(log: str = None):
     from geqtrain.utils import Output
 
@@ -178,7 +181,7 @@ def main(args=None, running_as_script: bool = True):
         "--batch-size",
         help="Batch size to use. Larger is usually faster on GPU. If you run out of memory, lower this. You can also try to raise this for faster evaluation. Default: 16.",
         type=int,
-        default=2,
+        default=200,
     )
     parser.add_argument(
         "-d",
@@ -330,6 +333,7 @@ def main(args=None, running_as_script: bool = True):
     else:
         dl_kwargs.update(dict(batch_size=args.batch_size))
 
+    dl_kwargs['graph_fields'] = _GRAPH_FIELDS # needed for ddp
     dataloader = DataLoader(**dl_kwargs)
 
     # run inference

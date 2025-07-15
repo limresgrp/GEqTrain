@@ -12,6 +12,7 @@ except ImportError:
 class EnsembleAggregator(GraphModuleMixin, Module):
     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None, aggregation_method: str = "mean"):
         super().__init__()
+        assert aggregation_method in ["mean", "sum", "max"], f"aggregation_method must be one of ['mean', 'sum', 'max'], got {aggregation_method}"
         self.field = field
         self.out_field = out_field or field
         self.aggregation_method = aggregation_method
@@ -53,7 +54,7 @@ class WeightedEnsembleAggregator(GraphModuleMixin, Module):
         input_dim: int,
         softmax_func:str='softmax', # or 'entmax'
     ):
-        assert self.softmax_func in ['softmax', 'entmax'], "softmax_func must be 'softmax' or 'entmax'"
+        assert softmax_func in ['softmax', 'entmax'], "softmax_func must be 'softmax' or 'entmax'"
 
         super().__init__()
         self.field = field

@@ -5,7 +5,8 @@ import enum
 import numbers
 
 import torch
-from geqtrain.utils.pytorch_scatter.scatter import scatter_sum
+# from geqtrain.utils.pytorch_scatter.scatter import scatter_sum
+from torch_scatter import scatter_sum
 
 
 def _prod(x):

@@ -53,13 +53,14 @@ def appendNGNNLayers(config):
                 field=AtomicDataDict.EDGE_FEATURES_KEY,
                 out_field=AtomicDataDict.NODE_FEATURES_KEY,
                 reduce=config.get("edge_reduce", "sum"),
+                # use_attention=True,
             )),
             f"update_{layer_idx}": (ReadoutModule, dict(
                 field=AtomicDataDict.NODE_FEATURES_KEY,
                 out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
                 out_irreps=None, # outs tensor of same o3.irreps of out_field
                 resnet=True,
-                normalize_l1=True,
+                # normalize_l1=True,
             )),
             # f"update_{layer_idx}": (ReadoutModuleWithConditioning, dict(
             #     field=AtomicDataDict.NODE_FEATURES_KEY,
@@ -83,13 +84,14 @@ def appendNGNNLayers(config):
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
+            # use_attention=True,
         )),
         "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
-            normalize_l1=True,
+            # normalize_l1=True,
         )),
         # f"update": (ReadoutModuleWithConditioning, dict(
         #         field=AtomicDataDict.NODE_FEATURES_KEY,
@@ -104,10 +106,18 @@ def appendNGNNLayers(config):
             out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
             # residual_field=AtomicDataDict.NODE_ATTRS_KEY,
         )),
+
         # "global_ensemble_pooling": (WeightedEnsembleAggregator, dict(
         #     field=AtomicDataDict.GRAPH_FEATURES_KEY,
         #     out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
         #     input_dim=config.get('latent_dim'),
+        #     # softmax_func='entmax'
+        # )),
+
+        # "global_ensemble_pooling": (EnsembleAggregator, dict(
+        #     field=AtomicDataDict.GRAPH_FEATURES_KEY,
+        #     out_field=AtomicDataDict.GRAPH_FEATURES_KEY,
+        #     aggregation_method="sum" # "mean", "sum", "max"
         # )),
     })
     return modules
@@ -121,7 +131,7 @@ def moreGNNLayers(config:Config):
         node_embedder = (EmbeddingAttrs, dict(
             out_field=AtomicDataDict.NODE_ATTRS_KEY,
             attributes=config.get('node_attributes'),
-            use_kano_embeddings=False, #config.get('use_kano_embeddings'),
+            use_kano_embeddings=config.get('use_kano_embeddings', False),
         ))
     else:
         raise ValueError('Missing node_attributes in yaml')
