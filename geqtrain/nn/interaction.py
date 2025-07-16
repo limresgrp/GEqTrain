@@ -125,12 +125,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # Other:
         irreps_in = None,
         debug: bool = False,
-        name:str = "",
         learn_cutoff_bias: bool = True,
         use_post_norm: bool = True,
     ):
         super().__init__()
-        self.name = name
         assert (num_layers >= 1)
         self.debug = debug
         # save parameters
@@ -321,7 +319,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.irreps_out.update({self.out_field: self.out_irreps})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        edge_center, edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY]
+        edge_center       = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         edge_length       = data[AtomicDataDict.EDGE_LENGTH_KEY]
         edge_equivariants = data[self.edge_equivariant_field]
         edge_invariants   = data[self.edge_invariant_field]
@@ -352,7 +350,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 latents=latents,
                 eq_features=eq_features,
                 edge_center=edge_center,
-                edge_neighbor=edge_neighbor,
                 this_layer_update_coeff=layer_update_coefficients[layer_index - 1] if layer_index > 0 else None,
             )
 
@@ -393,7 +390,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         data[self.out_field] = out_features
         if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{self.name}.out_features.scalar", latents, self.training)
+          log_feature_on_wandb(f"{str(self)}.out_features.scalar", latents, self.training)
           if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.vectorial", eq_features, self.training)
         return data
 
@@ -419,7 +416,6 @@ class InteractionLayer(torch.nn.Module):
     ) -> None:
         super().__init__()
         #! cannot store self.parent = parent due to nn recursive loops
-        self.parent_name            = parent.name
         self.debug                  = parent.debug
         self.layer_index            = layer_index
         self.is_last_layer          = is_last_layer
@@ -634,9 +630,8 @@ class InteractionLayer(torch.nn.Module):
         edge_equivariants: torch.Tensor,
         active_edges: torch.Tensor,
         latents: torch.Tensor,
-        eq_features: torch.Tensor,
+        eq_features: Optional[torch.Tensor],
         edge_center: torch.Tensor,
-        edge_neighbor: torch.Tensor,
         this_layer_update_coeff: Optional[torch.Tensor],
     ):
         new_latents = self.latent_mlp(edge_invariants)
@@ -670,6 +665,7 @@ class InteractionLayer(torch.nn.Module):
             eq_features = self._env_weighter(edge_equivariants, env_w)
             if self.eq_features_linear is not None:
                 eq_features = self.eq_features_linear(eq_features)
+        assert eq_features is not None
         eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs
@@ -715,8 +711,8 @@ class InteractionLayer(torch.nn.Module):
         inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
 
         if self.debug and wandb.run is not None:
-            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.latents", latents, self.training)
-            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
+            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.latents", latents, self.training)
+            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
             return latents, inv_latent, None
@@ -724,5 +720,5 @@ class InteractionLayer(torch.nn.Module):
         # do the linear for eq. features
         eq_features = self.linear(equivariant if self.is_last_layer else tp_out)
         if self.debug and wandb.run is not None:
-            log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.eq_features", eq_features, self.training)
+            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.eq_features", eq_features, self.training)
         return latents, inv_latent, eq_features

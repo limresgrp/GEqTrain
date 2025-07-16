@@ -1,8 +1,7 @@
 from abc import abstractmethod
-import math
 import torch
 
-from typing import Optional, List, Tuple, Type, Union
+from typing import List, Tuple
 
 from e3nn import nn, o3
 from e3nn.util.jit import compile_mode

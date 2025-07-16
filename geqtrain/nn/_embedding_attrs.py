@@ -2,21 +2,22 @@ import logging
 import torch
 import torch.nn
 from e3nn.o3 import Irreps
-from e3nn.util.jit import compile_mode
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn._edge import BaseEdgeEmbedding, BaseEdgeEqEmbedding
 from ._graph_mixin import GraphModuleMixin
 from typing import Dict, Optional, List
+from e3nn.util.jit import compile_mode
 
 
+@torch.jit.script
 def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     """
-    Applies masking to categorical attributes within an input tensor.
+    Applies masking to categorical attributes within an input tensor in a JIT-compatible way.
 
     This function randomly masks elements of the input tensor `x` and replaces them
     either with a mask token or a random token, based on a certain probability.
     This is often used as a data augmentation technique in training models dealing
-    with categorical data, such as training language models.
+    with categorical data.
 
     Args:
         x (torch.Tensor): The input tensor containing categorical attributes.
@@ -24,33 +25,47 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
             different categories.
         mask_token_index (int): The index of the mask token. This is used to replace
             some of the input tokens with a mask token. It is also assumed that the
-            number of categories is `mask_token_index - 1`.
+            number of categories for random sampling is `mask_token_index`.
 
     Returns:
         torch.Tensor: A new tensor with the same shape as `x`, where some elements
                       have been replaced with either a mask token or a random token.
-
     """
     # step 1: define which elements of input are going to be masked
+    # Create a clone to avoid modifying the original tensor in place
+    output = x.clone()
     random_mask = torch.rand(x.shape, device=x.device)
-    mask = (random_mask > 0.8) # 20% masking
-    x = x.clone()  # Avoid modifying the original tensor
-
+    mask = (random_mask > 0.8)  # 20% masking
+    
     # step 2: determine whether to use mask token or random token
     random_choice = torch.rand(x.shape, device=x.device)
-    mask_or_random = random_choice > 0.5  # 50% chance of random token
+    use_random_token = random_choice > 0.5  # 50% chance of random token
 
-    # step 3a: apply mask token
-    mask_indices = mask & ~mask_or_random # Apply mask where mask is True AND mask_or_random is False
-    x[mask_indices] = mask_token_index
+    # step 3: prepare replacements
+    # The number of actual categories (e.g., atom types) to sample from is
+    # all indices up to, but not including, the mask_token_index.
+    # torch.randint's second argument is the exclusive upper bound.
+    # So, we should sample from [0, mask_token_index).
+    num_random_categories = mask_token_index
 
-    # step3b: apply random token
-    random_indices = mask & mask_or_random # Apply random where mask is True AND mask_or_random is True
-    num_categories = mask_token_index - 1 # Exclude mask token from random sampling
-    random_tokens = torch.randint(0, num_categories, random_indices.sum().item(), device=x.device, dtype=x.dtype)
-    x[random_indices] = random_tokens
+    # 3a: prepare random tokens for all positions
+    random_tokens = torch.randint(
+        0, num_random_categories, x.shape, device=x.device, dtype=x.dtype
+    )
 
-    return x
+    # 3b: prepare mask tokens for all positions
+    mask_tokens = torch.full_like(x, fill_value=mask_token_index)
+
+    # step 4: apply replacements using torch.where
+    # First, apply random tokens where `mask` is true AND `use_random_token` is true
+    condition_random = mask & use_random_token
+    output = torch.where(condition_random, random_tokens, output)
+
+    # Then, apply mask tokens where `mask` is true AND `use_random_token` is false
+    condition_mask = mask & ~use_random_token
+    output = torch.where(condition_mask, mask_tokens, output)
+
+    return output
 
 
 @compile_mode("script")
@@ -77,6 +92,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
 
         self.use_masking = use_masking
         self.fields_to_mask = fields_to_mask
+        self.n_types = 0
         
         output_embedding_dim = 0
         for field, values in attributes.items():
@@ -89,16 +105,16 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 output_embedding_dim += embedding_dim
                 self._numerical_attrs.append(field)
             else:
-                n_types: int = values['actual_num_types']
+                self.n_types: int = values['actual_num_types']
                 if embedding_mode == 'one_hot':
                     # Use one-hot encoding
-                    emb_module = OneHotEncoding(n_types)
+                    emb_module = OneHotEncoding(self.n_types)
                     self._categorical_attrs_modules[field] = emb_module
-                    output_embedding_dim_incr = n_types
+                    output_embedding_dim_incr = self.n_types
                 else:
                     # Use Embedding
                     assert embedding_mode == 'embedding'
-                    emb_module = torch.nn.Embedding(n_types, embedding_dim)
+                    emb_module = torch.nn.Embedding(self.n_types, embedding_dim)
                     torch.nn.init.xavier_uniform_(emb_module.weight)
                     output_embedding_dim_incr = embedding_dim
                 output_embedding_dim += output_embedding_dim_incr
@@ -133,14 +149,14 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
     #! ----------- COMMENT TO JIT COMPILE --------------- #
-    @torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
+    #@torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     # --------------------------------------------------- #
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
         for attribute_name, emb_layer in self._categorical_attrs_modules.items():
             x = data[attribute_name].squeeze(-1)
-            if self.use_masking and attribute_name in self.fields_to_mask:
-                x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] - 1) # last index is reserved for masking, make sure to match this in yaml
+            if self.use_masking and attribute_name in self.fields_to_mask and self.n_types > 0:
+                x = apply_masking(x, mask_token_index=self.n_types - 1) # last index is reserved for masking, make sure to match this in yaml
             x_emb = emb_layer(x)
             out.append(x_emb)
         
@@ -150,7 +166,8 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 x = data[attribute_name]
                 out.append(x)
         
-        data[self.out_field] = torch.cat(out, dim=-1).to(torch.get_default_dtype())
+        dtype = data[AtomicDataDict.POSITIONS_KEY].dtype
+        data[self.out_field] = torch.cat(out, dim=-1).to(dtype)
         
         if self._has_equivariants:
             eq_out = []
@@ -158,7 +175,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
             for eq_attribute_name in self._eq_numerical_attrs:
                 x = data[eq_attribute_name]
                 eq_out.append(x)
-            data[self.eq_out_field] = torch.cat(eq_out, dim=-1).to(torch.get_default_dtype())    
+            data[self.eq_out_field] = torch.cat(eq_out, dim=-1).to()
         
         return data
 
@@ -278,14 +295,16 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         # node scalar
         if self.node_emb is None:
-            node_attr = data.pop(self.node_field) # default embedding
+            node_attr: torch.Tensor = data.pop(self.node_field) # default embedding
         else:
-            node_attr = self.node_emb(data)
+            node_attr: torch.Tensor = self.node_emb(data)
         data[self.node_out_field] = node_attr
         
         # node equivariant (optional)
+        node_eq_attr: Optional[torch.Tensor] = None
         if self.node_eq_emb is None:
-            node_eq_attr = data.pop(self.node_eq_field, None) # default embedding
+            if self.node_eq_field in data:
+                node_eq_attr = data.get(self.node_eq_field) # default embedding
         else:
             node_eq_attr = self.node_emb(data)
         if node_eq_attr is not None:

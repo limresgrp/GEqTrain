@@ -1,7 +1,6 @@
 import logging
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import Config
-
 from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,

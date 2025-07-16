@@ -35,13 +35,18 @@ class AllegroEdgeEmbedding(BaseEmbedding):
         self.out_irreps = o3.Irreps(f"{out_dim}x0e")
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_center, edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY]
-        edge_attr               = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        node_attr               = data[self.node_field]
+        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        edge_neigh  = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+        edge_attr   = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
+        node_field  = self.node_field
+        assert isinstance(node_field, str)
+        node_attr   = data[node_field]
 
         edge_node_attrs_to_cat = [node_attr[edge_center], node_attr[edge_neigh]]
         if self.has_edge_attr:
-            edge_node_attrs_to_cat.append(data.pop(self.edge_field))
+            edge_field = self.edge_field
+            assert isinstance(edge_field, str)
+            edge_node_attrs_to_cat.append(data.pop(edge_field))
         edge_node_attrs_emb = torch.cat(edge_node_attrs_to_cat, dim=-1)
         if self.proj_to_latent:
             edge_node_attrs_emb = edge_node_attrs_emb @ self.linear_proj

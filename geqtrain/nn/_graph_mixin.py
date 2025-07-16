@@ -24,6 +24,8 @@ class GraphModuleMixin:
         Explanation of Mixin classes: https://medium.com/@yanxingyang/usage-of-mixin-class-in-python-932b940db80
     """
 
+    _name: str
+
     def _init_irreps(
         self,
         irreps_in: Dict[str, Any] = {},
@@ -46,6 +48,7 @@ class GraphModuleMixin:
             irreps_out (dict): mapping names of fields that are modified/output by
                 this graph module to their irreps.
         """
+        self._name = 'MissingName'
         # Coerce
         irreps_in = {} if irreps_in is None else irreps_in
         irreps_in = AtomicDataDict._fix_irreps_dict(irreps_in)
@@ -142,6 +145,13 @@ class GraphModuleMixin:
             )
         return out
 
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
 
 class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
     r"""A ``torch.nn.Sequential`` of ``GraphModuleMixin``s.
@@ -200,6 +210,8 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             if isinstance(module, SequentialGraphNetwork):
                 recursive_flatten(self)
             else:
+                if hasattr(module, 'name'):
+                    module.name = name
                 flat_modules[name] = module
 
         super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version

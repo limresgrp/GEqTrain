@@ -173,11 +173,16 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
         edge_eq_attr = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
         if self.has_edge_eq_attr:
             # 1.1 Perform the naive concatenation.
-            edge_eq_attr = torch.cat([edge_eq_attr, data.pop(self.edge_eq_field)])
+            edge_eq_field = self.edge_eq_field
+            assert isinstance(edge_eq_field, str)
+            edge_eq_attr = torch.cat([edge_eq_attr, data.pop(edge_eq_field)])
         if self.has_node_eq_attr:
             # 1.2 Perform the naive concatenation.
-            edge_center, edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY]
-            node_eq_attr            = data[self.node_eq_field]
+            edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+            edge_neigh  = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+            node_eq_field = self.node_eq_field
+            assert isinstance(node_eq_field, str)
+            node_eq_attr            = data[node_eq_field]
             edge_eq_attr = torch.cat([
                 edge_eq_attr, 
                 node_eq_attr[edge_center], 

@@ -50,6 +50,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
     num_layers: int
     env_embed_multiplicity: int
     out_field: str
+
     def __init__(
         self,
         # required params
@@ -505,9 +506,12 @@ class GotenNodeEmbedding(BaseEmbedding):
         self,
         data: AtomicDataDict.Type,
     ) -> torch.Tensor:
-        edge_center, edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY]
-        edge_attr               = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        node_attr               = data[self.node_field]
+        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        edge_neigh  = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+        edge_attr   = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
+        node_field  = self.node_field
+        assert isinstance(node_field, str)
+        node_attr   = data[node_field]
         
         proj_node = torch.einsum('nd,dd -> nd', node_attr, self.W_node)
         proj_edge = proj_node[edge_neigh]
