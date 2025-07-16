@@ -27,7 +27,8 @@ from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 
 import geqtrain
-from geqtrain.utils import load_callable
+from geqtrain.utils import load_callable, instantiate
+from torch.utils.data import ConcatDataset
 from geqtrain.data import (
     AtomicData,
     AtomicDataDict,
@@ -35,16 +36,10 @@ from geqtrain.data import (
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
     _EXTRA_FIELDS,
+    _FIXED_FIELDS,
 )
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
-from torch.utils.data import ConcatDataset
-
-from geqtrain.utils import (
-    instantiate,
-    get_w_prefix,
-    Config
-)
 
 
 def fix_batch_dim(arr):
@@ -358,7 +353,6 @@ class AtomicInMemoryDataset(AtomicDataset):
         self,
         root: str,
         ensemble_index: int,
-        pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
         ignore_fields: List = [],
@@ -372,7 +366,6 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_attributes: Dict = {},
         transforms: Optional[List[Callable]] = None,
     ):
-        self.pbc = pbc
         self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         self.url = getattr(type(self), "URL", url)
 
@@ -544,7 +537,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                         **{f: v[i] for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
-                    }, pbc=self.pbc, ignore_fields=self.ignore_fields)
+                    }, ignore_fields=self.ignore_fields)
                 for i in include_frames
             ]
 
@@ -632,7 +625,6 @@ class NpzDataset(AtomicInMemoryDataset):
         self,
         root: str,
         ensemble_index: int,
-        pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -651,7 +643,6 @@ class NpzDataset(AtomicInMemoryDataset):
 
         try:
             super().__init__(
-                pbc=pbc,
                 file_name=file_name,
                 ensemble_index=ensemble_index,
                 url=url,
@@ -708,6 +699,7 @@ class NpzDataset(AtomicInMemoryDataset):
             or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)
             or self.extra_attributes.get(k, {}).get('fixed', False)
+            or k in _FIXED_FIELDS
         }
 
         node_fields = {

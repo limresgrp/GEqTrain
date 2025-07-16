@@ -48,11 +48,15 @@ _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.CELL_KEY,
 }
 _DEFAULT_EXTRA_FIELDS: Set[str] = {}
+_DEFAULT_FIXED_FIELDS: Set[str] = {
+    AtomicDataDict.PBC_KEY
+}
 
 _NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
 _EDGE_FIELDS:  Set[str] = set(_DEFAULT_EDGE_FIELDS)
 _GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
 _EXTRA_FIELDS: Set[str] = set(_DEFAULT_EXTRA_FIELDS)
+_FIXED_FIELDS: Set[str] = set(_DEFAULT_FIXED_FIELDS)
 _LONG_FIELDS:  Set[str] = set(_DEFAULT_LONG_FIELDS)
 
 
@@ -61,6 +65,7 @@ def register_fields(
     edge_fields:  Sequence[str] = [],
     graph_fields: Sequence[str] = [],
     extra_fields: Sequence[str] = [],
+    fixed_fields: Sequence[str] = [],
     long_fields:  Sequence[str] = [],
 ) -> None:
     r"""
@@ -71,6 +76,7 @@ def register_fields(
     - _EDGE_FIELDS
     - _GRAPH_FIELDS
     - _EXTRA_FIELDS
+    - _FIXED_FIELDS
     - _LONG_FIELDS
     that are used to parse the yaml and thus the data from source.
 
@@ -87,6 +93,7 @@ def register_fields(
     node_fields:  set = set(node_fields)
     edge_fields:  set = set(edge_fields)
     graph_fields: set = set(graph_fields)
+    fixed_fields: set = set(fixed_fields)
     extra_fields: set = set(extra_fields)
     allfields = node_fields.union(edge_fields, graph_fields, extra_fields)
     assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields)
@@ -95,6 +102,7 @@ def register_fields(
     _EDGE_FIELDS.update(edge_fields)
     _GRAPH_FIELDS.update(graph_fields)
     _EXTRA_FIELDS.update(extra_fields)
+    _FIXED_FIELDS.update(fixed_fields)
     _LONG_FIELDS.update(long_fields)
     if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _EXTRA_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS) + len(_EXTRA_FIELDS)):
         raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
@@ -254,14 +262,17 @@ class AtomicData(Data):
         parts of any edge features passed via kwargs (i.e., any feature with shape [num_edges, ...]).
         Parameters:
             pos: Node positions for the current frame.
-            edge_index: Edge indices for a single frame, possibly padded with -1 or NaN, of shape (2, num_edges).
+            edge_index: Edge indices for a single frame, possibly masked or padded with -1 or NaN, of shape (2, num_edges).
             **kwargs: Additional attributes, such as edge features. If an attribute has shape [num_edges, ...], it will be masked to remove padded edges.
         Returns:
             An instance of the class with masked edge_index and corresponding edge features.
         """
         
         num_edges = edge_index.shape[-1]
-        mask = (edge_index[0] != -1) & (~np.isnan(edge_index[0]))
+        try:
+            mask = ~edge_index[0].mask # if edge_index is a np.ma.masked_array
+        except:
+            mask = (edge_index[0] != -1) & (~np.isnan(edge_index[0])) # if edge_index is normal np.ndarray
         edge_index = edge_index[:, mask]
         for k, v in kwargs.items():
             try:
@@ -292,9 +303,7 @@ class AtomicData(Data):
 
         if pbc is None:
             if cell is not None:
-                raise ValueError(
-                    "A cell was provided, but pbc weren't. Please explicitly provide PBC."
-                )
+                raise ValueError("A cell was provided, but pbc weren't. Please explicitly provide PBC.")
             # there are no PBC if cell and pbc are not provided
             pbc = False
 
