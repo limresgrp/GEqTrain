@@ -1,23 +1,24 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
-from collections import defaultdict
-from e3nn import o3
-
+import re
+import math
 import inspect
 import logging
 import wandb
 import contextlib
-from copy import deepcopy
-from os.path import isfile
-from time import perf_counter
-from typing import Callable, Optional, Union, Tuple, List, Dict
-from pathlib import Path
-import torch.distributed as dist
-import numpy as np
 import torch
-import re
+import numpy as np
+import torch.distributed as dist
+
+from typing import Callable, Optional, Union, Tuple, List, Dict
+from collections import defaultdict
+from pathlib import Path
+from e3nn import o3
+from copy import deepcopy
+from time import perf_counter
+from os.path import isfile
+
 from torch.utils.data import DistributedSampler, Sampler
-import math
 from geqtrain.data import (
     DataLoader,
     AtomicData,
@@ -41,19 +42,18 @@ from geqtrain.utils import (
     atomic_write_group,
     gradfilter_ema,
 )
-
 from geqtrain.model import model_from_config
+from geqtrain.train import sync_tensor_across_GPUs, sync_dict_of_tensors_across_GPUs
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train.sampler import EnsembleSampler, EnsembleDistributedSampler
-from geqtrain.train import sync_tensor_across_GPUs, sync_dict_of_tensors_across_GPUs
+from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
-from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
-from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
@@ -112,25 +112,21 @@ def run_inference(
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available(
     ) else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
-    # AtomicDataDict is the dstruct that is taken as input from each forward
     batch = AtomicData.to_AtomicDataDict(data.to(device))
-
-    batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-    num_batch_center_nodes = len(batch_index[0].unique())
+    batch_center_nodes = batch[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+    num_batch_center_nodes = len(batch_center_nodes)
 
     if skip_chunking:
         input_data = {
             k: v.requires_grad_() if requires_grad and torch.is_floating_point(v) else v
             for k, v in batch.items()
-            # if k not in output_keys
+            if k not in output_keys
         }
         ref_data = batch
-        batch_center_nodes = batch_index[0].unique()
     else:
         input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
-            already_computed_nodes=already_computed_nodes,
             batch=batch,
-            data=data,
+            already_computed_nodes=already_computed_nodes,
             output_keys=output_keys,
             per_node_outputs_keys=per_node_outputs_keys,
             batch_max_atoms=batch_max_atoms,
@@ -142,7 +138,7 @@ def run_inference(
         for slices_key, slices in data.__slices__.items():
             val = torch.tensor(slices, dtype=torch.long, device=device)
             input_data[f"{slices_key}_slices"] = val
-            ref_data[f"{slices_key}_slices"] = val
+            ref_data  [f"{slices_key}_slices"] = val
 
     if dropout_edges > 0:
         apply_dropout_edges(dropout_edges, input_data)
@@ -191,9 +187,8 @@ def apply_dropout_edges(dropout_edges, input_data):
         input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
 
 def prepare_chunked_input_data(
-    already_computed_nodes: Optional[torch.Tensor],
     batch: AtomicDataDict.Type,
-    data: AtomicDataDict.Type,
+    already_computed_nodes: Optional[torch.Tensor],
     output_keys: List[str] = [],
     per_node_outputs_keys: List[str] = [],
     batch_max_atoms: int = 1000,
@@ -202,37 +197,35 @@ def prepare_chunked_input_data(
 ):
     # === Limit maximum batch size to avoid CUDA Out of Memory === #
 
-    chunk = already_computed_nodes is not None
     batch_chunk = deepcopy(batch)
-    batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+    batch_chunk_edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+
+    chunk = already_computed_nodes is not None
+    if chunk:
+        batch_chunk_edge_index = batch_chunk_edge_index[:, ~torch.isin(batch_chunk_edge_index[0], already_computed_nodes)]
+    if len(batch_chunk_edge_index[0].unique()) == 0:
+        return None, None, None
+
+    # = Iteratively remove edges from batch_chunk = #
+    # = ----------------------------------------- = #
     edge_fields_dict = {
         edge_field: batch[edge_field]
         for edge_field in _EDGE_FIELDS
         if edge_field in batch
     }
-
-    if chunk:
-        batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
-    batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
-    if len(batch_chunk_center_node_idcs) == 0:
-        return None, None, None
-
-    # = Iteratively remove edges from batch_chunk = #
-    # = ----------------------------------------- = #
-
     offset = 0
-    while len(batch_chunk_index.unique()) > batch_max_atoms:
+    while len(batch_chunk_edge_index.unique()) > batch_max_atoms:
 
-        def get_node_center_idcs(batch_chunk_index: torch.Tensor, batch_max_atoms: int, offset: int):
+        def get_node_center_idcs(batch_chunk_edge_index: torch.Tensor, batch_max_atoms: int, offset: int):
             unique_set = set()
 
-            for i, num in enumerate(batch_chunk_index[1]):
+            for i, num in enumerate(batch_chunk_edge_index[1]):
                 unique_set.add(num.item())
 
                 if len(unique_set) >= batch_max_atoms:
-                    node_center_idcs = batch_chunk_index[0, :i+1].unique()
+                    node_center_idcs = batch_chunk_edge_index[0, :i+1].unique()
                     if len(node_center_idcs) == 1:
-                        num_nodes = torch.isin(batch_chunk_index[0], node_center_idcs).sum()
+                        num_nodes = torch.isin(batch_chunk_edge_index[0], node_center_idcs).sum()
                         if num_nodes > batch_max_atoms:
                             raise ValueError(
                                 f"At least one node in the graph has more neighbors ({num_nodes}) "
@@ -241,33 +234,32 @@ def prepare_chunked_input_data(
                             )
                         return node_center_idcs
                     return node_center_idcs[:-offset]
-            return batch_chunk_index[0].unique()
+            return batch_chunk_edge_index[0].unique()
 
-        def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
-            node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
-            edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
+        def get_edge_filter(batch_chunk_edge_index: torch.Tensor, offset: int):
+            node_center_idcs = get_node_center_idcs(batch_chunk_edge_index, batch_max_atoms, offset)
+            edge_filter = torch.isin(batch_chunk_edge_index[0], node_center_idcs)
             return edge_filter
 
         chunk = True
         offset += 1
-        fltr = get_edge_filter(batch_chunk_index, offset)
-        batch_chunk_index = batch_chunk_index[:, fltr]
+        fltr = get_edge_filter(batch_chunk_edge_index, offset)
+        batch_chunk_edge_index = batch_chunk_edge_index[:, fltr]
         for k, v in edge_fields_dict.items():
             edge_fields_dict[k] = v[fltr]
 
     # = ----------------------------------------- = #
 
     if chunk:
-        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
-        batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
+        batch_chunk_node_indices = batch_chunk_edge_index.unique()
+        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_edge_index
+        batch_chunk[AtomicDataDict.BATCH_KEY]      = batch[AtomicDataDict.BATCH_KEY][batch_chunk_node_indices]
         for k, v in edge_fields_dict.items():
-            batch[k] = v
-        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
-            batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
+            batch_chunk[k] = v
         for per_node_output_key in per_node_outputs_keys:
             chunk_per_node_outputs_value = batch[per_node_output_key].clone()
             mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
-            mask[batch_chunk_index[0].unique()] = False
+            mask[batch_chunk_edge_index[0].unique()] = False
             chunk_per_node_outputs_value[mask] = torch.nan
             batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
 
@@ -305,7 +297,7 @@ def prepare_chunked_input_data(
             updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
         last_idx = idx
     batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
-    batch_chunk_center_nodes = edge_index[0].unique()
+    batch_chunk_center_nodes = edge_index[0].unique() # original center node indices
 
     del edge_index
     del node_index
@@ -1037,25 +1029,6 @@ class Trainer:
 
         return filename
 
-    @classmethod
-    def from_file(
-        cls, filename: str, format: Optional[str] = None, append: Optional[bool] = None
-    ):
-        """load a model from file
-
-        Args:
-
-        filename (str): name of the file
-        append (bool): if True, append the old model files and append the same logfile
-        """
-
-        dictionary = load_file(
-            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
-            filename=filename,
-            enforced_format=format,
-        )
-        return cls.from_dict(dictionary, append)
-
     def load_state_dicts_for_restart(self, config: Config):
         dictionary: dict = config.as_dict()
 
@@ -1103,6 +1076,25 @@ class Trainer:
 
         if self.stop_cond:
             raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
+
+    @classmethod
+    def from_file(
+        cls, filename: str, format: Optional[str] = None, append: Optional[bool] = None
+    ):
+        """load a model from file
+
+        Args:
+
+        filename (str): name of the file
+        append (bool): if True, append the old model files and append the same logfile
+        """
+
+        dictionary = load_file(
+            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
+            filename=filename,
+            enforced_format=format,
+        )
+        return cls.from_dict(dictionary, append)
 
     @classmethod
     def from_config(cls, config: Config, append: Optional[bool] = None):
@@ -1922,10 +1914,6 @@ class Trainer:
             **dl_kwargs,
         )
 
-def reset_loss(trainer: Trainer):
-    trainer.loss.reset_loss()
-    trainer.metrics.reset_loss()
-
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
 
@@ -2048,3 +2036,8 @@ class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
         if not self.is_master:
             return
         super().end_of_epoch_log()
+
+
+def reset_loss(trainer: Trainer):
+    trainer.loss.reset_loss()
+    trainer.metrics.reset_loss()
