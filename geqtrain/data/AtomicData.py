@@ -3,6 +3,7 @@
 Original authors: Albert Musaelian
 """
 
+import logging
 from typing import Union, Dict, Set, Sequence
 from collections.abc import Mapping
 
@@ -303,9 +304,11 @@ class AtomicData(Data):
 
         if pbc is None:
             if cell is not None:
-                raise ValueError("A cell was provided, but pbc weren't. Please explicitly provide PBC.")
-            # there are no PBC if cell and pbc are not provided
-            pbc = False
+                logging.info("A cell was provided, assuming PBC on all dimensions.")
+                pbc = True
+            else:
+                # there are no PBC if cell and pbc are not provided
+                pbc = False
 
         if isinstance(pbc, bool):
             pbc = (pbc,) * 3
