@@ -9,11 +9,11 @@ from ._graph import EmbeddingGraphAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
-from .readout import ReadoutModule, ReadoutModuleWithConditioning
+from .readout import ReadoutModule, ReadoutModuleWithConditioning, ReadoutModuleWithSimilarity, ReadoutModuleWithVQ
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
-from ._heads import WeightedTP, TransformerBlock # GVPGeqTrain
+from ._heads import WeightedTP, TransformerBlock
 from .AdaLN import AdaLN
 from ._norm import Norm
 from ._combine import CombineModule
@@ -37,6 +37,8 @@ __all__ = [
     InteractionModule,
     ReadoutModule,
     ReadoutModuleWithConditioning,
+    ReadoutModuleWithSimilarity,
+    ReadoutModuleWithVQ,
     PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
@@ -46,7 +48,6 @@ __all__ = [
     SO3_Linear,
     SO3_LayerNorm,
     select_nonlinearity,
-    # GVPGeqTrain,
     WeightedTP,
     TransformerBlock,
     AdaLN,

@@ -1,5 +1,6 @@
-from typing import Optional, Tuple, Union, List
+from typing import Callable, Optional, Tuple, Union
 import torch
+import torch.nn as nn
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 from geqtrain.data import (
@@ -14,26 +15,13 @@ from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.utils import add_tags_to_module
 
-from geqtrain.nn._heads import L0IndexedAttention, L1Scalarizer
-
-import re
+from geqtrain.nn._heads import L0IndexedAttention
 
 from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
 
-def is_valid_irreps_string(irrep_string):
-    r'''
-    Examples:
-    print(is_valid_irreps_string('64x0e+64x1o+64x2e'))  # Should return True
-    print(is_valid_irreps_string('64x0e+64x1o+64x2e+128x3o'))  # Should return True
-    print(is_valid_irreps_string('something'))  # Should return False
-    print(is_valid_irreps_string('64x0e+64x1o+64x'))  # Should return False
-    '''
-    pattern = re.compile(r'^(\d+x\d+[eo](\+\d+x\d+[eo])*)$')
-    return bool(pattern.match(irrep_string))
-
 
 @compile_mode("script")
-class ReadoutModule(GraphModuleMixin, torch.nn.Module):
+class ReadoutModule(GraphModuleMixin, nn.Module):
     '''
     out_irreps options evaluated in the following order:
         1) o3.Irreps obj
@@ -55,10 +43,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         eq_has_internal_weights: bool = False,
         resnet: bool = False,
         dampen: bool = False,
-        input_ls:  Optional[List[int]]              = None,
-        input_mul: Optional[Union[str, int]]        = None,
-        output_ls:  Optional[List[int]]             = None,
-        output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
         scalar_attnt: bool = True,
@@ -66,91 +50,38 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         dataset_mode: str = 'single', # single|ensemble
     ):
         super().__init__()
-
-        # --- start definition of input/output irreps --- #
-
-        # define input irreps
+        
         self.field = field
-        in_irreps = irreps_in[field]
-
-        # --- start in_irreps ls --- #
-        # default behavior: do not modify
-
-        # - [optional] filter in_irreps l degrees if needed:
-        if input_ls is None:
-            input_ls = in_irreps.ls # all ls if none are passed
-        assert isinstance(input_ls, List)
-
-        # [optional] set in_irreps multiplicity
-        if input_mul is None:
-            input_mul = in_irreps[0].mul # take l=0 mul; ok since all ls have same mul
-
-        in_irreps = o3.Irreps([(input_mul, ir) for _, ir in in_irreps if ir.l in input_ls])
-
-        # update dict
-        irreps_in[field] = in_irreps
-
-        # --- end in_irreps ls --- #
-
-        # define output irreps
-        self.out_field = out_field or field
-        if isinstance(out_irreps, o3.Irreps):
-            out_irreps = out_irreps # leave as it is
-        elif isinstance(out_irreps, str):
-            if is_valid_irreps_string(out_irreps):
-                out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
-            else:
-                assert out_irreps in irreps_in, f"'out_irreps' param is behaving like a key, but '{out_irreps}' is missing from irreps_in"
-                out_irreps = o3.Irreps(irreps_in[out_irreps]) # othewise we expect it to be key for irreps_in[key]
-        elif self.out_field in irreps_in:
-            out_irreps = irreps_in[self.out_field] # outs same irreps of irreps_in[out_field]
-        else:
-           out_irreps = in_irreps # outs same irreps of irreps_in[field]
-
-        # --- start out_irreps ls --- #
-        # default behavior: do not modify
-
-        # - [optional] filter out_irreps l degrees if needed:
-        if output_ls is None:
-            output_ls = out_irreps.ls # all ls if none are passed
-        assert isinstance(output_ls, List)
-
-        # [optional] set out_irreps multiplicity
-        if output_mul is None:
-            output_mul = out_irreps[0].mul # take l=0 mul; ok since all ls have same mul
-
-        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in output_ls])
-
-        # --- end out_irreps ls --- #
-        self.out_irreps_muls = [ir.mul for ir in out_irreps]
-
-        # check and init irreps dict
-        my_irreps_in = {field: in_irreps}
-        if resnet:
-            my_irreps_in.update({self.out_field: out_irreps})
+        self.ignore_amp = ignore_amp
+        self.out_field = out_field or self.field
+        irreps_out = {self.out_field: out_irreps}
         self._init_irreps(
             irreps_in=irreps_in,
-            my_irreps_in=my_irreps_in,
-            irreps_out={self.out_field: out_irreps},
+            required_irreps_in=[field],
+            irreps_out=irreps_out,
         )
+        in_irreps:  o3.Irreps = self.irreps_in[field]
+        out_irreps: o3.Irreps = self.irreps_out[self.out_field]
+        
+        # --- start definition of input/output irreps --- #
+        
+        self.resnet = resnet
+        self.eq_has_internal_weights = eq_has_internal_weights
+        self.has_invariant_output   = False
+        self.has_equivariant_output = False
+        self.n_scalars_in = in_irreps.ls.count(0)
+        assert self.n_scalars_in > 0
+        self.inv_readout = None
+        self.n_scalars_out = out_irreps.ls.count(0)
+
+        # check irreps
+        if self.resnet:
+            assert in_irreps == out_irreps        
 
         # --- end definition of input/output irreps --- #
 
-        # self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
-        # if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # self.field == AtomicDataDict.GRAPH_FEATURES_KEY or
-        #     self.use_l1_scalarizer = False
-
         # --- start layer construction --- #
-
-        self.eq_has_internal_weights = eq_has_internal_weights
-        self.has_invariant_output = False # whether self outs scalars
-        self.has_equivariant_output = False # whether self outs l>0
-
-        self.n_scalars_in = in_irreps.ls.count(0)
-        assert self.n_scalars_in > 0
-
-        self.n_scalars_out = out_irreps.ls.count(0)
-        self.inv_readout = None
+        # scalar
         if self.n_scalars_out > 0:
             self.has_invariant_output = True
             self.inv_readout = readout_latent( # mlp on scalars ONLY
@@ -159,12 +90,13 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 **readout_latent_kwargs,
             )
 
-        # if the out irreps requested has more elements then the request number of scalars to be provided in output
+        # l>0
         self.reshape_in: Optional[reshape_irreps] = None
         self.eq_readout = None
+        self.weights_emb = None
         if out_irreps.dim > self.n_scalars_out:
             self.has_equivariant_output = True
-            eq_linear_input_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
+            eq_linear_input_irreps  = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
             eq_linear_output_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l>0])
             self.reshape_in = reshape_irreps(eq_linear_input_irreps)
             self.eq_readout_iw, self.eq_readout = None, None
@@ -176,7 +108,6 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                         internal_weights=self.eq_has_internal_weights,
                         pad_to_alignment=1,
                 )
-                w_embs = self.eq_readout_iw.weight_numel
             else:
                 self.eq_readout = Linear( # equivariant MLP acting on l>0 ONLY
                         eq_linear_input_irreps,
@@ -185,7 +116,11 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                         internal_weights=self.eq_has_internal_weights,
                         pad_to_alignment=1,
                 )
-                w_embs = self.eq_readout.weight_numel
+                self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
+                    mlp_input_dimension=self.n_scalars_in,
+                    mlp_output_dimension=self.eq_readout.weight_numel,
+                    **readout_latent_kwargs,
+                )
             self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
         elif strict_irreps:
             assert in_irreps.dim == self.n_scalars_in, (
@@ -196,30 +131,16 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                     "If you want to allow this behavior, set 'strict_irreps=False'."
                 )
 
-        if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
-            self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
-                mlp_input_dimension=self.n_scalars_in,
-                mlp_output_dimension=w_embs,
-                **readout_latent_kwargs,
-            )
-
         # --- end layer construction --- #
-
-        self.resnet = resnet
-        self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
+        self._resnet_update_coeff: Optional[nn.Parameter] = None # init to None for jit
         if self.resnet:
             assert irreps_in[self.out_field] == out_irreps
-            self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
+            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0]))
         self.out_irreps_dim = out_irreps.dim
-
         self.act_on_nodes = self.field in _NODE_FIELDS
-        self.ignore_amp = ignore_amp
 
         if dampen:
             add_tags_to_module(self, 'dampen')
-
-        # if self.use_l1_scalarizer:
-        #     self.l1_scalarizer = L1Scalarizer(irreps_in, field=field)
 
         if self.field in _NODE_FIELDS:
             idx_key = 'batch'
@@ -243,6 +164,8 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         self.scalar_attnt = scalar_attnt
         irps = irreps_in[self.field]
         self.split_index = sum([mul for mul, ir in irps if ir in [SCALAR, PSEUDO_SCALAR]])
+        self.ensemble_attnt1 = None
+        self.ensemble_attnt2 = None
         if self.scalar_attnt:
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
@@ -250,9 +173,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         #! ----------- COMMENT TO JIT COMPILE --------------- #
-        if self.ignore_amp:
-            with torch.amp.autocast('cuda', enabled=False):
-                return self._forward_impl(data)
+        # if self.ignore_amp:
+        #     with torch.amp.autocast('cuda', enabled=False):
+        #         return self._forward_impl(data)
         # --------------------------------------------------- #
         return self._forward_impl(data)
 
@@ -287,7 +210,9 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
         )
         return features, out_features
 
-    def _apply_scalar_attnt(self, features, data: AtomicDataDict.Type):
+    def _apply_scalar_attnt(self, features, data: AtomicDataDict.Type) -> torch.Tensor:
+        assert self.ensemble_attnt1 is not None
+        assert self.ensemble_attnt2 is not None
         scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
         scalars = self.ensemble_attnt1(scalars, data)
         scalars = self.ensemble_attnt2(scalars, data)
@@ -343,33 +268,27 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         eq_has_internal_weights: bool = False,
         resnet: bool = False,
         dampen: bool = False,
-        input_ls:  Optional[List[int]]              = None,
-        input_mul: Optional[Union[str, int]]        = None,
-        output_ls:  Optional[List[int]]             = None,
-        output_mul: Optional[Union[str, int]]       = None,
         irreps_in=None, # if output is only scalar, this is required
         ignore_amp: bool = False, # wheter to adopt amp or not
         scalar_attnt: bool = True,
         num_heads: int = 32,
+        dataset_mode: str = 'single', # single|ensemble
     ):
         super().__init__(
-            field,
-            out_field,
-            out_irreps,
-            strict_irreps,
-            readout_latent,
-            readout_latent_kwargs,
-            eq_has_internal_weights,
-            resnet,
-            dampen,
-            input_ls,
-            input_mul,
-            output_ls,
-            output_mul,
-            irreps_in,
-            ignore_amp,
-            scalar_attnt,
-            num_heads,
+            field=field,
+            out_field=out_field,
+            out_irreps=out_irreps,
+            strict_irreps=strict_irreps,
+            readout_latent=readout_latent,
+            readout_latent_kwargs=readout_latent_kwargs,
+            eq_has_internal_weights=eq_has_internal_weights,
+            resnet=resnet,
+            dampen=dampen,
+            irreps_in=irreps_in,
+            ignore_amp=ignore_amp,
+            scalar_attnt=scalar_attnt,
+            num_heads=num_heads,
+            dataset_mode=dataset_mode,
         )
 
         self.conditioning_field = conditioning_field
@@ -413,7 +332,12 @@ class ReadoutModuleWithConditioning(ReadoutModule):
 
     def _initialize_features(self, data: AtomicDataDict.Type):
         # get features from input and create empty tensor to store output
-        features, out_features = super()._initialize_features(data)
+        features = data[self.field]
+        out_features = torch.zeros(
+            (features.shape[0], self.out_irreps_dim),
+            dtype=torch.float32,
+            device=features.device
+        )
         conditioning = data[self.conditioning_field]
         scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
         scalars = self.film1(scalars, conditioning)
@@ -421,22 +345,175 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         scalars = self.film2(scalars, conditioning)
         return torch.cat((scalars, equiv), dim=-1), out_features
 
-    def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
-        super()._handle_invariant_output(features, data, active_nodes, out_features)
+    def _handle_invariant_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features) -> torch.Tensor:
+        assert self.inv_readout is not None
+        out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in])
         out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
             out_features[active_nodes, :self.n_scalars_out],
             data[self.conditioning_field],
         )
         return out_features
 
-    def _handle_vectorial_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features):
+    def _handle_vectorial_output(self, features, data: AtomicDataDict.Type, active_nodes, out_features) -> torch.Tensor:
         eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
         if self.eq_has_internal_weights: # eq linear layer with its own inner weights
-            eq_features = self.eq_readout(eq_features)
+            assert self.eq_readout_iw is not None
+            eq_features = self.eq_readout_iw(eq_features)
         else:
             # else the weights are computed via mlp using scalars
             weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
             weights = self.film_vectorial(weights, data[self.conditioning_field])
+            assert self.eq_readout is not None
             eq_features = self.eq_readout(eq_features, weights)
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features
+
+
+@compile_mode("script")
+class ReadoutModuleWithSimilarity(GraphModuleMixin, nn.Module):
+    '''
+    out_irreps options evaluated in the following order:
+        1) o3.Irreps obj
+        2) str castable to o3.Irreps obj (eg: 1x0e)
+        3) a irreps_in key (and get its o3.Irreps)
+        4) same irreps of out_field (if out_field in GraphModuleMixin.irreps_in dict)
+        if out_irreps=None is passed, then option 4 is triggered is valid, else 5)
+        5) if none of the above: outs irreps of same size of field
+        if out_irreps is not provided it takes out_irreps from yaml
+    '''
+    def __init__(
+        self,
+        field: str,
+        out_field: Optional[str] = None,
+        out_irreps: Union[o3.Irreps, str] = None,
+        num_heads: int = 32,
+        irreps_in=None,
+    ):
+        super().__init__()
+        self.field = field
+        self.out_field = out_field or self.field
+        in_irreps: o3.Irreps = irreps_in[field]
+
+        irreps_out = {self.out_field: out_irreps}
+        self._init_irreps(
+            irreps_in=irreps_in,
+            required_irreps_in=[field],
+            irreps_out=irreps_out,
+        )
+        out_irreps = self.irreps_out[self.out_field]
+
+        self.n_scalars_in = in_irreps.ls.count(0)
+        assert self.n_scalars_in > 0
+        self.n_scalars_out = out_irreps.ls.count(0)
+        assert self.n_scalars_out > 0
+
+        self.register_parameter("linear_proj", nn.Parameter(torch.empty(self.n_scalars_in, self.n_scalars_in, dtype=torch.get_default_dtype())))
+        nn.init.xavier_uniform_(self.linear_proj)
+
+        self.register_parameter("similarity", nn.Parameter(torch.empty(num_heads, self.n_scalars_out, self.n_scalars_in, dtype=torch.get_default_dtype())))
+        nn.init.xavier_uniform_(self.similarity)
+
+        self.register_buffer("tau", torch.tensor(2.7172))
+
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        x = data[self.field][:, :self.n_scalars_in]
+        h = torch.einsum('ni,io -> no', x, self.linear_proj).unsqueeze(-2).unsqueeze(-2)
+
+        # Compute similarity between h and shape_matcher (cosine similarity)
+        similarity = nn.functional.cosine_similarity(h, self.similarity, dim=-1)
+        w = nn.functional.softmax(similarity * self.tau, dim=-2)
+
+        data[self.out_field] = (w * similarity).sum(dim=-2) * 2 * self.tau # output logits
+        return data
+
+
+@compile_mode("script")
+class ReadoutModuleWithVQ(GraphModuleMixin, nn.Module):
+    '''
+    A readout module that uses a VQ-VAE-like mechanism.
+
+    For each input feature, it finds the `num_selected_codes` (N) closest vectors
+    from a learnable `codebook` of size `num_codes` (BigN). The average of these
+    selected vectors is then projected to produce the final output logits.
+    '''
+    def __init__(
+        self,
+        field: str,
+        out_field: Optional[str] = None,
+        out_irreps: Union[o3.Irreps, str] = None,
+        num_codes: int = 512,           # BigN: Total number of vectors in the codebook
+        num_selected_codes: int = 4,    # N: Number of closest vectors to select
+        irreps_in=None,
+    ):
+        super().__init__()
+        self.field = field
+        self.out_field = out_field or self.field
+        self.num_codes = num_codes
+        self.num_selected_codes = num_selected_codes
+
+        # --- Irreps Initialization ---
+        in_irreps: o3.Irreps = irreps_in[field]
+        irreps_out = {self.out_field: out_irreps}
+        self._init_irreps(
+            irreps_in=irreps_in,
+            required_irreps_in=[field],
+            irreps_out=irreps_out,
+        )
+        out_irreps = self.irreps_out[self.out_field]
+
+        self.n_scalars_in = in_irreps.ls.count(0)
+        assert self.n_scalars_in > 0
+        self.n_scalars_out = out_irreps.ls.count(0)
+        assert self.n_scalars_out > 0
+
+        # --- Learnable Parameters ---
+
+        # 1. Optional initial projection of input features
+        self.linear_proj = nn.Parameter(torch.empty(self.n_scalars_in, self.n_scalars_in))
+        nn.init.xavier_uniform_(self.linear_proj)
+
+        # 2. The codebook (replaces 'similarity' parameter)
+        self.codebook = nn.Parameter(torch.empty(self.num_codes, self.n_scalars_in))
+        nn.init.xavier_uniform_(self.codebook)
+
+        # 3. Final projection head to produce logits
+        self.logit_head = nn.Linear(self.n_scalars_in, self.n_scalars_out)
+
+
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        # Select scalar features from the input field
+        x = data[self.field][:, :self.n_scalars_in]
+
+        # Project input features
+        h = torch.einsum('ni,io -> no', x, self.linear_proj)
+
+        # --- VQ-style selection ---
+
+        # 1. Compute pairwise squared Euclidean distances between inputs and codebook vectors
+        # dist^2 = ||h - c||^2 = ||h||^2 - 2*h*c^T + ||c||^2
+        h_squared = torch.sum(h**2, dim=1, keepdim=True)
+        codebook_squared = torch.sum(self.codebook**2, dim=1)
+        h_dot_codebook = torch.matmul(h, self.codebook.t()) # (batch, num_codes)
+
+        distances_sq = h_squared - 2 * h_dot_codebook + codebook_squared
+
+        # 2. Find the indices of the N closest codebook vectors for each input
+        # We use `topk` with `largest=False` to find the smallest distances
+        _, top_k_indices = torch.topk(
+            distances_sq,
+            k=self.num_selected_codes,
+            dim=-1,
+            largest=False
+        ) # Shape: (batch, num_selected_codes)
+
+        # 3. Gather the N closest codebook vectors
+        selected_codes = self.codebook[top_k_indices] # Shape: (batch, num_selected_codes, n_scalars_in)
+
+        # 4. Aggregate the selected vectors (e.g., by averaging)
+        quantized_h = torch.mean(selected_codes, dim=1) # Shape: (batch, n_scalars_in)
+
+        # 5. Project to the final logit dimension
+        logits = self.logit_head(quantized_h) # Shape: (batch, n_scalars_out)
+
+        data[self.out_field] = logits
+        return data

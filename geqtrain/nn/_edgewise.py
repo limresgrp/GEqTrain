@@ -2,8 +2,6 @@ import torch
 import math
 from typing import Optional
 from einops.layers.torch import Rearrange
-# from torch_scatter import scatter
-# from torch_scatter.composite import scatter_softmax
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
@@ -29,7 +27,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         readout_latent_kwargs={},
         head_dim: int = 32,
         avg_num_neighbors: Optional[float] = 5.0,
-        avg_num_neighbors_is_learnable: bool = True,
+        avg_num_neighbors_is_learnable: bool = False,
         irreps_in={},
     ):
         super().__init__()
@@ -91,11 +89,12 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             self.reshape_out = inverse_reshape_irreps(irreps)
             self.irreps_out.update({self.out_field: irreps})
 
-        # if not self.use_attention:
-        #   if avg_num_neighbors_is_learnable:
-        #     self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
-        #   else:
-        #     self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
+        self.env_sum_normalization = None
+        if not self.use_attention:
+          if avg_num_neighbors_is_learnable:
+            self.env_sum_normalization = torch.nn.Parameter(torch.as_tensor([avg_num_neighbors]).rsqrt())
+          else:
+            self.register_buffer("env_sum_normalization", torch.as_tensor([avg_num_neighbors]).rsqrt())
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -119,6 +118,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         # aggregation step
         data[self.out_field] = scatter_sum(edge_feat, edge_center, dim=0, dim_size=num_nodes)
 
-        # if not self.use_attention:
-        #     data[self.out_field] = data[self.out_field] * self.env_sum_normalization
+        if not self.use_attention:
+            assert self.env_sum_normalization is not None
+            data[self.out_field] = data[self.out_field] * self.env_sum_normalization
         return data

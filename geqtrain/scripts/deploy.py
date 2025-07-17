@@ -60,7 +60,7 @@ def _sanity_checks(config):
 
 def debug(sequential_module_to_test):
 
-    print(f"Found {len(sequential_module_to_test)} modules in model.func.")
+    print(f"Found {len(sequential_module_to_test)} modules in model.")
     print("Attempting to script and freeze each submodule individually...")
     print("-----------------------------------------------------------")
 
@@ -112,7 +112,7 @@ def debug(sequential_module_to_test):
 def _compile_for_deploy(model):
     model.eval()
 
-    debug(model.func)
+    debug(model)
 
     if not isinstance(model, torch.jit.ScriptModule):
         model = script(model)
@@ -260,7 +260,7 @@ def main(args=None):
         import contextlib
         debug_output = io.StringIO()
         with contextlib.redirect_stdout(debug_output):
-            debug(model.func)
+            debug(model)
         output = debug_output.getvalue()
         print(output)
         if ">>> CULPRIT LIKELY FOUND" in output:

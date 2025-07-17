@@ -324,8 +324,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_equivariants = data[self.edge_equivariant_field]
         edge_invariants   = data[self.edge_invariant_field]
         node_invariants   = data[self.node_invariant_field]
-        num_edges: int    = edge_invariants.shape[0]
-        num_nodes: int    = node_invariants.shape[0]
+        num_edges         = edge_invariants.shape[0]
+        num_nodes         = node_invariants.shape[0]
 
         # Initialize state
         latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device)
@@ -456,9 +456,9 @@ class InteractionLayer(torch.nn.Module):
 
         # Make TP
         l_arg_irreps, l_out_irreps = tps_irreps
-        tmp_i_out: int = 0
+        tmp_i_out = 0
+        tp_n_scalar_outs = 0
         instr = []
-        tp_n_scalar_outs: int = 0
         full_out_irreps = []
         for i_out, (_, ir_out) in enumerate(l_out_irreps):
             for i_1, (_, ir_1) in enumerate(l_arg_irreps):
@@ -657,7 +657,7 @@ class InteractionLayer(torch.nn.Module):
         if self.film is not None:
             weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
 
-        w_index: int = 0
+        w_index = 0
         if self.layer_index == 0:
             # embed initial edge
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
