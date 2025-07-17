@@ -7,11 +7,9 @@ import sys
 from typing import Any, List, Optional
 import zipfile
 import numpy as np
-
 import fsspec
 import torch
 from torch import Tensor
-# from torch_scatter import scatter
 from geqtrain.utils.pytorch_scatter import scatter_sum
 from tqdm import tqdm
 import urllib
