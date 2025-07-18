@@ -228,6 +228,7 @@ class ReadoutModule(GraphModuleMixin, torch.nn.Module):
                 idx_key = 'ensemble_index'
             else:
                 idx_key = AtomicDataDict.GRAPH_FEATURES_KEY
+                #! scalar_attnt = False
         else:
             raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
 
@@ -362,6 +363,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         ignore_amp: bool = False, # wheter to adopt amp or not
         dataset_mode: str = 'single', # single|ensemble
         normalize_l1:bool=False, # this must be false
+        conditioning_vec_size:int=None, # if conditioning_field not yet registered in self.irreps_in[self.conditioning_field but present in data
 
         # attention params:
         scalar_attnt: bool = True,
@@ -370,6 +372,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         sparse_attention:bool=False,
         attention_prenorm:bool=False,
         learn_query:bool=False,
+
     ):
         super().__init__(
             field=field,
@@ -400,10 +403,16 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         )
 
         self.conditioning_field = conditioning_field
+        if self.conditioning_field in self.irreps_in:
+            self.conditioning_dim = self.irreps_in[self.conditioning_field].dim
+        elif conditioning_vec_size is not None:
+            self.conditioning_dim = conditioning_vec_size
+        else:
+            raise ValueError(f"conditioning_field '{self.conditioning_field}' not found in irreps_in and conditioning_vec_size is None")
 
         # Shared MLP (pre-FiLM)
         self.film1 = FiLMFunction(
-            mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
+            mlp_input_dimension=self.conditioning_dim,
             mlp_latent_dimensions=[],
             mlp_output_dimension=self.n_scalars_in,
             mlp_nonlinearity=None,
@@ -416,7 +425,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         )
 
         self.film2 = FiLMFunction(
-            mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
+            mlp_input_dimension=self.conditioning_dim,
             mlp_latent_dimensions=[],
             mlp_output_dimension=self.n_scalars_in,
             mlp_nonlinearity=None,
@@ -424,7 +433,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
 
         if self.has_invariant_output:
             self.film_scalar = FiLMFunction(
-                mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
+                mlp_input_dimension=self.conditioning_dim,
                 mlp_latent_dimensions=[],
                 mlp_output_dimension=self.n_scalars_out,
                 mlp_nonlinearity=None,
@@ -432,7 +441,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
 
         if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
             self.film_vectorial = FiLMFunction(
-                mlp_input_dimension=self.irreps_in[self.conditioning_field].dim,
+                mlp_input_dimension=self.conditioning_dim,
                 mlp_latent_dimensions=[],
                 mlp_output_dimension=self.eq_readout.weight_numel,
                 mlp_nonlinearity=None,
@@ -443,6 +452,17 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         features, out_features = super()._initialize_features(data)
         conditioning = data[self.conditioning_field]
         scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+
+        if self.act_on_nodes:
+            active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        else:
+            active_nodes = torch.arange(len(features), device=features.device)
+
+        # now it ammits graph features as conditioning that are broadcasted to all nodes
+        if scalars.shape[0] != conditioning.shape[0]:
+            conditioning = conditioning[data['batch']]
+            conditioning = conditioning[active_nodes]
+
         scalars = self.film1(scalars, conditioning)
         scalars = self.fc1(scalars)
         scalars = self.film2(scalars, conditioning)
@@ -450,9 +470,18 @@ class ReadoutModuleWithConditioning(ReadoutModule):
 
     def _handle_invariant_output(self, features, data, active_nodes, out_features):
         super()._handle_invariant_output(features, data, active_nodes, out_features)
+
+        scalars = out_features[active_nodes, :self.n_scalars_out]
+        conditioning = data[self.conditioning_field]
+
+        # now it ammits graph features as conditioning that are broadcasted to all nodes
+        if scalars.shape[0] != conditioning.shape[0]:
+            conditioning = conditioning[data['batch']]
+            conditioning = conditioning[active_nodes]
+
         out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
-            out_features[active_nodes, :self.n_scalars_out],
-            data[self.conditioning_field],
+            scalars,
+            conditioning,
         )
         return out_features
 
@@ -466,7 +495,14 @@ class ReadoutModuleWithConditioning(ReadoutModule):
                 eq_features = eq_features/torch.norm(eq_features, dim=-1, keepdim=True)
 
             weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
-            weights = self.film_vectorial(weights, data[self.conditioning_field])
+
+            conditioning = data[self.conditioning_field]
+            if weights.shape[0] != conditioning.shape[0]:
+                conditioning = conditioning[data['batch']]
+                conditioning = conditioning[active_nodes]
+
+            weights = self.film_vectorial(weights, conditioning)
             eq_features = self.eq_readout(eq_features, weights)
+
         out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
         return out_features

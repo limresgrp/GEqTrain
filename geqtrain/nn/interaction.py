@@ -273,6 +273,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 )
             )
 
+        self.last_eq_norm = None
         if self.linear_out_irreps:
             self.last_eq_norm = SO3_LayerNorm(self.linear_out_irreps)
 
@@ -365,7 +366,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # --- final layer --- #
 
         # - Output equivariant values - #
-        if eq_features is not None:
+        if self.last_eq_norm is not None and eq_features is not None:
             eq_features = self.last_eq_norm(eq_features)
             out_features[..., self.out_n_scalars:] = eq_features
 
@@ -445,8 +446,14 @@ class InteractionLayer(torch.nn.Module):
                 internal_weights=False if self.learn_eq_lin_layers_w else True,
                 shared_weights=False if self.learn_eq_lin_layers_w else True,
             )
-        self.env_linear_weight_computer = torch.nn.Linear(env_embed_irreps[0].dim, self.env_linear.weight_numel) if self.learn_eq_lin_layers_w else None
 
+        self.env_linear_weight_computer = None
+        if self.learn_eq_lin_layers_w:
+            input_dim = env_embed_irreps[0].dim
+            self.env_linear_weight_computer = torch.nn.Sequential(
+                torch.nn.LayerNorm(input_dim),
+                torch.nn.Linear(input_dim, self.env_linear.weight_numel, bias=False)
+            )
 
         self.product, self.reshape_in_module = None, None
         if self.use_mace_product:
@@ -529,7 +536,14 @@ class InteractionLayer(torch.nn.Module):
                 internal_weights=False if self.learn_eq_lin_layers_w else True,
                 shared_weights=False if self.learn_eq_lin_layers_w else True,
             )
-            self.linear_weight_computer = torch.nn.Linear(self.latent_dim+2*self.env_embed_multiplicity, self.linear.weight_numel) if self.learn_eq_lin_layers_w else None
+
+            self.linear_weight_computer = None
+            if self.learn_eq_lin_layers_w:
+                input_dim = self.latent_dim+2*self.env_embed_multiplicity
+                self.linear_weight_computer = torch.nn.Sequential(
+                    torch.nn.LayerNorm(input_dim),
+                    torch.nn.Linear(input_dim, self.linear.weight_numel, bias=False)
+            )
 
         self.latest_linear_out_irreps = linear_out_irreps
 
@@ -643,7 +657,7 @@ class InteractionLayer(torch.nn.Module):
         num_nodes: int,
         latents,
         inv_latent_cat,
-        eq_features,
+        eq_features: torch.Tensor,
         cutoff_coeffs: torch.Tensor,
         edge_attr: torch.Tensor,
         node_invariants,
@@ -651,8 +665,8 @@ class InteractionLayer(torch.nn.Module):
         edge_center,
         edge_neighbor,
         this_layer_update_coeff: Optional[torch.Tensor],
-        residual_local_env_per_node: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual_local_env_per_node: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: #,Optional[torch.Tensor],Optional[torch.Tensor]]:
         new_latents = self.latent_mlp(inv_latent_cat)
         # Apply cutoff, which propagates through to everything else
         if self.learn_cutoff_bias:
@@ -674,7 +688,8 @@ class InteractionLayer(torch.nn.Module):
             # embed initial edge
             env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
             w_index += self._env_weighter.weight_numel
-            eq_features = self._env_weighter(eq_features, env_w) # eq_features is edge_attr
+            eq_features = self._env_weighter(eq_features, env_w)
+
         eq_features = self.eq_features_irreps_norm(eq_features)
 
         # Extract weights for the edge attrs
@@ -688,14 +703,14 @@ class InteractionLayer(torch.nn.Module):
         # Pool over all attention-weighted edge features to build node local environment embedding
         local_env_per_node = scatter(emb_latent, edge_center, dim=0, dim_size=num_nodes)
 
-        if self.layer_index != 0:
+        if self.layer_index != 0 and residual_local_env_per_node is not None:
             local_env_per_node += residual_local_env_per_node
 
         active_node_centers = torch.unique(edge_center)
         local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
 
         local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
-        if self.env_linear_weight_computer:
+        if self.env_linear_weight_computer is not None:
             local_env_per_node_active_node_centers_scalars, _ = torch.split(local_env_per_node_active_node_centers, [1, eq_features.size(-1) - 1], dim=-1)
             local_env_per_node_active_node_centers_scalars = self.rearrange_scalars(local_env_per_node_active_node_centers_scalars)
             local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers, self.env_linear_weight_computer(local_env_per_node_active_node_centers_scalars))
@@ -735,11 +750,11 @@ class InteractionLayer(torch.nn.Module):
             log_feature_on_wandb(f"{self.parent_name}/{self.layer_index}.inv_latent", inv_latent, self.training)
 
         if self.linear is None:
-            return latents, inv_latent, None, None
+            return latents, inv_latent, eq_features, local_env_per_node #None, None
 
         # do the linear for eq. features
         eq_inpt = equivariant if self.is_last_layer else eq_features
-        if self.linear_weight_computer:
+        if self.linear_weight_computer is not None:
             eq_features = self.linear(eq_inpt, self.linear_weight_computer(inv_latent))
         else:
             eq_features = self.linear(eq_inpt)

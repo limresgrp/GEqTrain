@@ -5,7 +5,6 @@ from e3nn import o3
 import math
 # !pip install geometric-vector-perceptron
 import torch
-from einops import rearrange
 from torch import nn
 # from geometric_vector_perceptron import GVP, GVPDropout, GVPLayerNorm
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
@@ -15,7 +14,15 @@ from torch.nn import GroupNorm
 from torch.nn import functional as F
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.data import AtomicDataDict
-from einops import repeat
+
+
+# from einops import repeat
+# from einops import rearrange
+
+from einops.layers.torch import Rearrange #, Repeat
+
+
+
 try:
     from entmax import sparsemax, entmax15, entmax_bisect, normmax_bisect, budget_bisect
 except ImportError:
@@ -259,11 +266,15 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         # from sd3.5 https://arxiv.org/pdf/2403.03206, 5.3.2
         self.attention_prenorm = attention_prenorm
+        self.pre_norm_k = None
+        self.pre_norm_q = None
+        self.pre_norm_v = None
         if self.attention_prenorm:
             self.pre_norm_k = nn.LayerNorm(self.head_dim)
             self.pre_norm_q = nn.LayerNorm(self.head_dim)
             self.pre_norm_v = nn.LayerNorm(self.head_dim)
 
+        self.mlp = None
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
                 mlp_input_dimension=self.n_inpt_scalars,
@@ -280,10 +291,16 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             self.kqv_proj_output_size_multiplier = 2
 
         self.kqv_proj = nn.Linear(self.n_inpt_scalars, self.kqv_proj_output_size_multiplier*self.n_inpt_scalars, bias=False)
+        self.query_embedding = None
         if self.kqv_proj_output_size_multiplier == 2:
             self.query_embedding = nn.Parameter(torch.randn(self.n_inpt_scalars))
 
-    def _add_edge_based_bias(self, data):
+        self.rearrange1 = Rearrange('batch source target heads -> batch heads source target')
+        self.rearrange2 = Rearrange('d -> 1 d')
+        # self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+
+
+    def _add_edge_based_bias(self, data:AtomicDataDict.Type):
         edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_ATTRS_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
         edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY] # (2, E)
         batch_map         = data[AtomicDataDict.BATCH_KEY] # assings each node to a given mol
@@ -319,7 +336,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # --- Initialize the padded output tensor ---
         padding_value = 0.0
         padded_edge_attrs = torch.full(
-            (num_uniques, max_count, max_count, self.n_heads),
+            [int(num_uniques), int(max_count), int(max_count), int(self.n_heads)],
             padding_value,
             dtype=edge_radial_attrs.dtype,
             device=device
@@ -334,17 +351,17 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # place the edge attributes into the correct locations in the padded tensor.
         padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
 
-        padded_edge_attrs = rearrange(padded_edge_attrs, 'batch source target heads -> batch heads source target')
+        padded_edge_attrs = self.rearrange1(padded_edge_attrs)
         return padded_edge_attrs
 
 
-    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
-    def forward(self, features, data):
+    # @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
+    def forward(self, features, data: AtomicDataDict.Type) -> torch.Tensor:
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
         if self.idx_key == AtomicDataDict.GRAPH_FEATURES_KEY:
             attention_idxs = torch.arange(features.shape[0], device=features.device)
         else:
-            attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
+            attention_idxs = data[self.idx_key] # either 'batch' or 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
 
         N, emb_dim = features.shape # N = num nodes or N ensemble confs
@@ -359,7 +376,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         # mask to select how many atoms or conformers are there in/for that mol
         mask = torch.arange(max_count, device=_device)[None, :] < counts[:, None] # for each mol select what is NOT padding
-        assert torch.all(mask.sum(-1) == counts) == True
+        # assert torch.all(mask.sum(-1) == counts) == True
 
         # map features to kqv
         features = self.kqv_norm(features)
@@ -367,7 +384,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         if self.kqv_proj_output_size_multiplier == 2:
             _k, _v = torch.chunk(kvq, 2, dim=-1)
-            _q = repeat(self.query_embedding, 'd -> b d', b=_k.shape[0])
+            if self.query_embedding is not None:
+                _q = self.rearrange2(self.query_embedding)
+            else:
+                # fallback: use _k as _q if no query_embedding is provided
+                _q = _k
         else:
             _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
 
@@ -388,9 +409,9 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         v = v.transpose(1,2)
 
         if self.attention_prenorm:
-            k = self.pre_norm_k(k)
-            q = self.pre_norm_q(q)
-            v = self.pre_norm_v(v)
+            if self.pre_norm_k is not None: k = self.pre_norm_k(k)
+            if self.pre_norm_q is not None: q = self.pre_norm_q(q)
+            if self.pre_norm_v is not None: v = self.pre_norm_v(v)
 
         qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
         qvt /= self.scale # scale by sqrt of head_dim
@@ -407,10 +428,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
 
         # all the above has been done to set -inf maksing in in rows populated, and zeros in rows that are completely empty (due to padding)
 
-        if self.sparse_attention:
-            attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
-        else:
-            attnt_coeffs = F.softmax(qvt, dim=-1)
+        # if self.sparse_attention:
+        #     # attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
+        #     pass
+        # else:
+        attnt_coeffs = F.softmax(qvt, dim=-1)
 
         attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all "padding only" rows
 
@@ -429,7 +451,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         out = self.out_proj(tmp_out)
         out+=residual
 
-        if self.update_mlp:
+        if self.update_mlp and self.mlp is not None:
             out = out+self.mlp(out)
 
         return out
