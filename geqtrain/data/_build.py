@@ -27,6 +27,7 @@ from geqtrain.utils import (
     get_w_prefix,
     Config,
 )
+from geqtrain.utils.torch_geometric import Batch
 
 from functools import partial
 from multiprocessing import Pool
@@ -126,11 +127,13 @@ def node_types_to_exclude_from_edges(config):
     if exclude_type_names_from_edge_center is not None:
         from geqtrain.train.utils import find_matching_indices
         config["exclude_node_types_from_edge_center"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edge_center))
+    
     exclude_type_names_from_edge_neigh = config.get("exclude_type_names_from_edge_neigh", None)
     if exclude_type_names_from_edge_neigh is not None:
         from geqtrain.train.utils import find_matching_indices
         config["exclude_node_types_from_edge_neigh"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edge_neigh))
-    return config.get("exclude_node_types_from_edge_center", None) # , config.get("exclude_node_types_from_edge_neigh", None)
+        
+    return config.get("exclude_node_types_from_edge_center", None), config.get("exclude_node_types_from_edge_neigh", None)
 
 def dataset_from_config(config,
                         prefix: str = "dataset",
@@ -161,7 +164,7 @@ def dataset_from_config(config,
     """
 
     config_dataset_list: List[Dict] = config.get(f"{prefix}_list", [config])
-    assert len(config_dataset_list) == 1, f"Only one dataset can be specified in {prefix}_list"
+    all_instances = []
     for _config_dataset in config_dataset_list:
         config_dataset_type = _config_dataset.get(prefix, None)
         if config_dataset_type is None:
@@ -197,9 +200,12 @@ def dataset_from_config(config,
             instances = [mp_handle_single_dataset_file_name(file_name) for file_name in dataset_file_names_and_ensemble_indices]
 
         instances = [el for el in instances if el is not None]
-        if inmemory:
-            return InMemoryConcatDataset(instances)
-        return LazyLoadingConcatDataset(class_name, prefix, config, instances)
+        if not instances:
+             raise ValueError("No valid data points found after filtering. Please check your dataset and filtering criteria.")
+        all_instances.extend(instances)
+    if inmemory:
+        return InMemoryConcatDataset(all_instances)
+    return LazyLoadingConcatDataset(class_name, prefix, config, all_instances)
 
 
 def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_clean_list, dataset_file_names_and_ensemble_indices):
@@ -223,113 +229,163 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
     except RuntimeError as e:
         logging.warning(f"{e}. Nested exception: {e.__cause__}")
         return None
+    
     if instance.data is None:
         return None
 
-    """
-    !!! remove_node_centers_for_NaN_targets_and_edges is not supported for NOT-inmemory dataset !!!
-    """
-    if inmemory:
-        if not config.get("equivariance_test", False):
-            # Filter out nan nodes and nodes with type_names that we don't want to keep
-            default_num_threads = torch.get_num_threads() # default is 64 (always?)
-            torch.set_num_threads(1)  # torch.argwhere, torch.isin and torch.nonzero may parallelize on many cpus and clutter the machine
-            instance = remove_node_centers_for_NaN_targets_and_edges(
-                instance,
-                key_clean_list,
-                node_types_to_keep(config),
-                node_types_to_exclude_from_edges(config)
-            )
-            torch.set_num_threads(default_num_threads)
-        return instance
+    # Apply filtering to the dataset instance.
+    # This modifies the `instance.data` batch object in place.
+    if not config.get("equivariance_test", False):
+        default_num_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        
+        instance = filter_dataset(
+            instance,
+            key_clean_list,
+            node_types_to_keep(config),
+            *node_types_to_exclude_from_edges(config)
+        )
+        torch.set_num_threads(default_num_threads)
 
-    # otherwise return the non-in-mem data struct that contains all info to reinstanciate instance at runtime
-    out = {
-        file_name_key: dataset_file_name,
-        ensemble_index_key: ensemble_index,
-        'lazy_dataset': np.arange(instance.data.num_graphs),
-    }
-    del instance
-    return out
-
-def remove_node_centers_for_NaN_targets_and_edges(
-    dataset: AtomicInMemoryDataset,
-    key_clean_list: List[str],
-    keep_node_types: Optional[List[str]] = None,
-    exclude_node_types_from_edge_neigh: Optional[List[str]] = None,
-):
-    data = dataset.data
-    if AtomicDataDict.NODE_TYPE_KEY in data:
-        node_types: torch.Tensor = data[AtomicDataDict.NODE_TYPE_KEY]
-    else:
-        node_types: torch.Tensor = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
-
-    def get_node_types_mask(node_types, filter, data):
-        return torch.isin(node_types.flatten(), filter.cpu()).repeat(data.__num_graphs__)
-
-    def update_node_index(data, key_clean: str, node_filter: torch.Tensor):
-        data[key_clean] = data[key_clean][node_filter]
-        if len(node_filter) == 0:
-            return
-        node_filter_cumsum = node_filter.cumsum(0)
-        new_node_index_slices = node_filter_cumsum[torch.as_tensor(data.__slices__[key_clean][1:]) - 1].tolist()
-        new_node_index_slices.insert(0, 0)
-        data.__slices__[key_clean] = torch.tensor(new_node_index_slices, dtype=torch.long, device=node_filter.device)
-
-    def update_edge_index(data, edge_filter: torch.Tensor):
-        data[AtomicDataDict.EDGE_INDEX_KEY] = data[AtomicDataDict.EDGE_INDEX_KEY][:, edge_filter]
-        if len(edge_filter) == 0:
-            return
-        edge_filter_cumsum = edge_filter.cumsum(0)
-        new_edge_index_slices = edge_filter_cumsum[torch.as_tensor(data.__slices__[AtomicDataDict.EDGE_INDEX_KEY][1:]) - 1].tolist()
-        new_edge_index_slices.insert(0, 0)
-        data.__slices__[AtomicDataDict.EDGE_INDEX_KEY] = torch.tensor(new_edge_index_slices, dtype=torch.long, device=edge_filter.device)
-        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in data:
-            data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][edge_filter]
-            data.__slices__[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = data.__slices__[AtomicDataDict.EDGE_INDEX_KEY]
-
-    # - Remove edges of atoms whose result is NaN - #
-    node_center_edge_idcs = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-    keep_edges_filter = []
-    for key_clean in key_clean_list:
-        if key_clean not in data: continue
-        if key_clean in _GRAPH_FIELDS:
-            # if any loss requires the full graph, we cannot drop any edge
-            keep_edges_filter.append(torch.ones(len(node_center_edge_idcs), dtype=torch.bool))
-        if key_clean in _EDGE_FIELDS: # TODO remove edges for which we have nan targets
-            pass
-        elif key_clean in _NODE_FIELDS:
-            if keep_node_types is not None: # Set target values to nan for nodes not present in 'keep_node_types'
-                remove_node_types_mask = ~get_node_types_mask(node_types, keep_node_types, data)
-                data[key_clean][remove_node_types_mask] = torch.nan
-            val: torch.Tensor = data[key_clean]
-            if val.dim() == 1: val = val.reshape(len(val), -1)
-
-            # Here we are performing the UNION of edge_idcs we want to keep, across different target keys
-            keep_edges_filter.append(torch.isin(node_center_edge_idcs, torch.argwhere(torch.any(~torch.isnan(val), dim=-1)).flatten()))
-        elif key_clean in _EXTRA_FIELDS:
-            pass
-
-    if len(keep_edges_filter) > 0:
-        keep_edges_filter = torch.any(torch.stack(keep_edges_filter), dim=0)
-    else:
-        keep_edges_filter = torch.ones(len(node_center_edge_idcs), dtype=torch.bool)
-
-    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edge_neigh'
-    if exclude_node_types_from_edge_neigh is not None:
-        exclude_node_types_from_edge_neigh_mask = get_node_types_mask(node_types, exclude_node_types_from_edge_neigh, data)
-        # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
-        keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edge_neigh_mask).flatten())
-
-    keep_nodes_filter = torch.zeros(len(data.pos), dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
-    keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
-    update_edge_index(data, keep_edges_filter)
-    for key_clean in key_clean_list:
-        if key_clean in _NODE_FIELDS and key_clean in data:
-            update_node_index(data, key_clean, keep_nodes_filter)
-
-    if data[AtomicDataDict.EDGE_INDEX_KEY].shape[-1] == 0:
+    if instance is None:
+        logging.warning(f"All data from {dataset_file_name} was filtered out.")
         return None
 
-    dataset.data = data
+    if inmemory:
+        return instance
+    else:
+        # For lazy loading, we save the filtered data back to the processed cache
+        # and return the metadata needed to reconstruct it later.
+        instance.save_processed()
+        out = {
+            file_name_key: dataset_file_name,
+            ensemble_index_key: ensemble_index,
+            'lazy_dataset': np.arange(instance.data.num_graphs),
+        }
+        del instance
+        return out
+
+def filter_dataset(
+    dataset: AtomicInMemoryDataset,
+    key_clean_list: List[str],
+    keep_node_types: Optional[torch.Tensor] = None,
+    exclude_node_types_from_edge_center: Optional[torch.Tensor] = None,
+    exclude_node_types_from_edge_neigh: Optional[torch.Tensor] = None,
+) -> Optional[AtomicInMemoryDataset]:
+    """
+    Filters a dataset by directly removing nodes and edges based on type,
+    then filters remaining edges based on NaN targets and other criteria.
+    This function creates a new filtered dataset object if any data remains.
+    """
+    data = dataset.data
+    if data is None or data.num_graphs == 0:
+        return None
+
+    # Deconstruct the batch into a list of individual graphs to filter them one by one
+    data_list = data.to_data_list()
+    filtered_data_list = []
+    original_graph_indices = []
+
+    # Handle node types that can be fixed for the whole dataset
+    has_per_graph_node_types = AtomicDataDict.NODE_TYPE_KEY in data
+    fixed_node_types = None
+    if not has_per_graph_node_types and AtomicDataDict.NODE_TYPE_KEY in dataset.fixed_fields:
+        fixed_node_types = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY]
+
+    for i, graph in enumerate(data_list):
+        # 1. Primary node filtering based on `keep_node_types`
+        # If keep_node_types is given, we immediately create a subgraph.
+        if keep_node_types is not None:
+            current_node_types = fixed_node_types if fixed_node_types is not None else graph[AtomicDataDict.NODE_TYPE_KEY]
+            if current_node_types is not None:
+                device = current_node_types.device
+                nodes_to_keep_mask = torch.isin(current_node_types, keep_node_types.to(device))
+                nodes_to_keep_indices = torch.where(nodes_to_keep_mask)[0]
+                
+                if nodes_to_keep_indices.shape[0] == 0:
+                    continue  # Skip this graph entirely if no nodes of the desired type are present
+                
+                # Subgraph operation filters nodes, node attributes, and edges
+                # to the induced subgraph of the kept nodes.
+                graph = graph.subgraph(nodes_to_keep_indices)
+
+                # Update fixed_node_types
+                if fixed_node_types is not None:
+                    fixed_node_types = fixed_node_types[nodes_to_keep_indices]
+
+        # If graph is empty after primary filtering, skip it
+        if graph.num_nodes == 0 or graph.num_edges == 0:
+            continue
+
+        # 2. Secondary edge filtering on the (potentially already filtered) graph
+        edge_index = graph.edge_index
+        edges_to_keep_mask = torch.ones(graph.num_edges, dtype=torch.bool, device=edge_index.device)
+
+        # Filter based on NaN targets
+        nan_edge_filters = []
+        for key in key_clean_list:
+            if key in _NODE_FIELDS and key in graph:
+                target_vals = graph[key]
+                if target_vals.dim() == 1:
+                    target_vals = target_vals.unsqueeze(-1)
+                valid_nodes = torch.any(~torch.isnan(target_vals), dim=-1)
+                valid_node_indices = torch.where(valid_nodes)[0]
+                nan_edge_filters.append(torch.isin(edge_index[0], valid_node_indices))
+
+        if nan_edge_filters:
+            edges_to_keep_mask &= torch.any(torch.stack(nan_edge_filters), dim=0)
+
+        # Filter based on excluded center/neighbor types
+        current_node_types = fixed_node_types if fixed_node_types is not None else graph[AtomicDataDict.NODE_TYPE_KEY]
+        if current_node_types is not None:
+            current_node_types = current_node_types.flatten()
+            device = current_node_types.device
+            if exclude_node_types_from_edge_center is not None:
+                center_type_mask = torch.isin(current_node_types[edge_index[0]], exclude_node_types_from_edge_center.to(device))
+                edges_to_keep_mask &= ~center_type_mask
+            
+            if exclude_node_types_from_edge_neigh is not None:
+                neighbor_type_mask = torch.isin(current_node_types[edge_index[1]], exclude_node_types_from_edge_neigh.to(device))
+                edges_to_keep_mask &= ~neighbor_type_mask
+        
+        # 3. Apply the edge filter and prune any resulting isolated nodes
+        if not torch.all(edges_to_keep_mask):
+            if not edges_to_keep_mask.any():
+                continue # Skip if no edges are left
+
+            # The most robust way to remove edges and then resulting isolated nodes
+            # is to identify the nodes in the valid edges and create a final subgraph.
+            nodes_in_kept_edges = edge_index[:, edges_to_keep_mask].unique()
+            
+            if nodes_in_kept_edges.shape[0] == 0:
+                continue
+
+            # Before the final subgraph, we MUST apply the edge mask to all edge attributes.
+            # The subsequent subgraph call will then correctly handle the node attributes.
+            graph.edge_index = edge_index[:, edges_to_keep_mask]
+            for field in _EDGE_FIELDS:
+                if field in graph and graph[field].shape[0] == edges_to_keep_mask.shape[0]:
+                    graph[field] = graph[field][edges_to_keep_mask]
+            
+            # Now, create the final subgraph to remove isolated nodes.
+            graph = graph.subgraph(nodes_in_kept_edges)
+
+        if graph.num_nodes > 0 and graph.num_edges > 0:
+            filtered_data_list.append(graph)
+            original_graph_indices.append(i)
+
+    if not filtered_data_list:
+        return None
+
+    # Re-batch the filtered graphs
+    new_batch = Batch.from_data_list(filtered_data_list, exclude_keys=list(dataset.fixed_fields.keys()))
+
+    # Copy over graph-level attributes from the original graphs that were kept
+    for field in _GRAPH_FIELDS:
+        if field in data:
+            new_batch[field] = data[field][original_graph_indices]
+
+    dataset.data = new_batch
+    if fixed_node_types is not None:
+        dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY] = fixed_node_types
     return dataset

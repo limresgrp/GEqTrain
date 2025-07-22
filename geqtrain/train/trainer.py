@@ -341,7 +341,7 @@ class Trainer:
         validation_batch_size (int): batch size for evaluating the model for validation
         shuffle (bool): parameters for dataloader
         n_train (int): # of frames for training
-        n_val (int): # of frames for validation
+        n_valid (int): # of frames for validation
         exclude_keys (list):  fields from dataset to ignore.
         dataloader_num_workers (int): `num_workers` for the `DataLoader`s
         train_idcs (optional, list|str):  list of frames to use for training,   or path to a txt file with indices (1 per row)
@@ -423,7 +423,7 @@ class Trainer:
         validation_batch_size: int = 5,
         shuffle: bool = True,
         n_train: Optional[Union[List[int], int]] = None,
-        n_val: Optional[Union[List[int], int]] = None,
+        n_valid: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
         train_idcs: Optional[Union[str, List, List[List]]] = None,
         val_idcs  : Optional[Union[str, List, List[List]]] = None,
@@ -1721,7 +1721,7 @@ class Trainer:
         if isinstance(self.val_idcs, str):
             self.val_idcs = parse_idcs_file(self.val_idcs)
             _validation_dataset = validation_dataset if validation_dataset is not None else dataset
-            self.n_val = _validation_dataset.n_observations[self.val_idcs]
+            self.n_valid = _validation_dataset.n_observations[self.val_idcs]
 
         if self.train_idcs is None or self.val_idcs is None:
             # split_dataset to be done before eventual validation_dataset = dataset executed below
@@ -1731,14 +1731,14 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # --- initialize n_train and n_val
+        # --- initialize n_train and n_valid
         assert isinstance(self.n_train, (list, int, type(None))), f"n_train must be of type list, int, or None. It is of type {type(self.n_train)}"
         self.n_train = self.n_train if isinstance(self.n_train, list) or self.n_train is None else [self.n_train]
-        assert isinstance(self.n_val, (list, int, type(None))), f"n_val must be of type list, int, or None. It is of type {type(self.n_val)}"
-        self.n_val = self.n_val if isinstance(self.n_val, list) or self.n_val is None else [self.n_val]
+        assert isinstance(self.n_valid, (list, int, type(None))), f"n_valid must be of type list, int, or None. It is of type {type(self.n_valid)}"
+        self.n_valid = self.n_valid if isinstance(self.n_valid, list) or self.n_valid is None else [self.n_valid]
 
         assert len(self.n_train) == len(dataset.n_observations)
-        assert len(self.n_val) == len(validation_dataset.n_observations)
+        assert len(self.n_valid) == len(validation_dataset.n_observations)
 
         def index_dataset(dataset, indices):
             '''
@@ -1778,7 +1778,7 @@ class Trainer:
         if val_dset not provided: 80/20 split of train set is performed
 
         dset.n_observations: list of ints i.e. list of num_of_obs present in npz
-        self.n_val (and self.n_train): list of ints i.e. list of num_of_obs that have to be put in val_dset out of given npz
+        self.n_valid (and self.n_train): list of ints i.e. list of num_of_obs that have to be put in val_dset out of given npz
         '''
 
         val_dset_provided_in_yaml:bool = True if val_dset is not None else False
@@ -1799,17 +1799,17 @@ class Trainer:
 
             if self.n_train: return self.n_train # if already defined, return
             if val_dset_provided_in_yaml: return train_dset.n_observations.tolist() # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
-            # build n_train as "complmement" of n_val: from each_train_npz[i] drop a self.n_val[i]:int observations out of it
-            if self.n_val: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_val)]
+            # build n_train as "complmement" of n_valid: from each_train_npz[i] drop a self.n_valid[i]:int observations out of it
+            if self.n_valid: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_valid)]
             return split_80_20(train_dset)
 
         def n_val_obs_for_each_npz():
-            if self.n_val: return self.n_val
+            if self.n_valid: return self.n_valid
             if val_dset_provided_in_yaml: return val_dset.n_observations.tolist() # val can be itself since it is an indipendent dset
             return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
 
         self.n_train = list(n_train_obs_for_each_npz())
-        self.n_val   = list(n_val_obs_for_each_npz())
+        self.n_valid   = list(n_val_obs_for_each_npz())
 
         def get_idxs_permuation(n_obs):
             '''
@@ -1824,10 +1824,10 @@ class Trainer:
         val_idcs = []
         if val_dset_provided_in_yaml:
             # sampling observations from val_dset: sample from each npz the amount of obs requested
-            for n_obs, n_val in zip(val_dset.n_observations, self.n_val):
-                if n_val > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_val. n_val: {n_val}, total: {n_obs}")
+            for n_obs, n_valid in zip(val_dset.n_observations, self.n_valid):
+                if n_valid > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_valid. n_valid: {n_valid}, total: {n_obs}")
                 idcs = get_idxs_permuation(n_obs)
-                val_idcs.append(idcs[:n_val])
+                val_idcs.append(idcs[:n_valid])
 
         train_idcs = []
         for _index, (n_obs, n_train) in enumerate(zip(train_dset.n_observations, self.n_train)):
@@ -1838,10 +1838,10 @@ class Trainer:
 
             if not val_dset_provided_in_yaml:
                 # sampling from train_dset also for val_dset
-                assert len(self.n_train) == len(self.n_val)
-                n_val = self.n_val[_index]
-                if (n_train + n_val) > n_obs: raise ValueError(f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {n_obs}")
-                val_idcs.append(idcs[n_train: n_train + n_val])
+                assert len(self.n_train) == len(self.n_valid)
+                n_valid = self.n_valid[_index]
+                if (n_train + n_valid) > n_obs: raise ValueError(f"too little data for training and validation. please reduce n_train and n_valid. n_train: {n_train} n_valid: {n_valid} total: {n_obs}")
+                val_idcs.append(idcs[n_train: n_train + n_valid])
 
         return train_idcs, val_idcs
 
@@ -1884,8 +1884,6 @@ class Trainer:
 
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-
-        dl_kwargs['graph_fields'] = _GRAPH_FIELDS # needed for ddp
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,

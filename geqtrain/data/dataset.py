@@ -197,7 +197,7 @@ class LazyLoadingConcatDataset(Dataset):
         if not first time loads preprocessed_path/file and instanciates the NpzDataset instead of keeping it in mem
         '''
 
-        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of NpzDataset)
+        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of AtomicInMemoryDataset)
         # dataset_idx: index of the npz file that contains the mol requested
         if idx < 0:
             if -idx > len(self):
@@ -205,11 +205,11 @@ class LazyLoadingConcatDataset(Dataset):
             idx = len(self) + idx
         dataset_idx = bisect.bisect_right(self.cumsum, idx)
 
-        # 2) instanciate NpzDataset
+        # 2) instanciate AtomicInMemoryDataset
         instance = self.__getdataset__(dataset_idx)
 
         # 3) index into it: find sample_idx
-        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
+        # sample_idx: index of the mol in the npz file, already handled by the AtomicInMemoryDataset.get_example
         if dataset_idx == 0:
             sample_idx = idx
         else:
@@ -464,6 +464,14 @@ class AtomicInMemoryDataset(AtomicDataset):
             if download_path.endswith(".zip"):
                 extract_zip(download_path, self.raw_dir)
 
+    def save_processed(self):
+        """Save the processed data to disk."""
+        with atomic_write(self.processed_paths[0], binary=True) as f:
+            torch.save((self.data, self.fixed_fields, self.include_frames), f)
+        with atomic_write(self.processed_paths[1], binary=False) as f:
+            yaml.dump(self._get_parameters(), f)
+        logging.info(f"Saved filtered processed data to disk at {self.processed_paths[0]}")
+
     def process(self):
         data = self.get_data()
         if len(data) == 5:
@@ -561,21 +569,12 @@ class AtomicInMemoryDataset(AtomicDataset):
         logging.info(f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
         del total_MBs
 
-        # use atomic writes to avoid race conditions between
-        # different trainings that use the same dataset
-        # since those separate trainings should all produce the same results,
-        # it doesn't matter if they overwrite each others cached'
-        # datasets. It only matters that they don't simultaneously try
-        # to write the _same_ file, corrupting it.
-        with atomic_write(self.processed_paths[0], binary=True) as f:
-            torch.save((data, fixed_fields, self.include_frames), f)
-        with atomic_write(self.processed_paths[1], binary=False) as f:
-            yaml.dump(self._get_parameters(), f)
-
-        logging.info("Cached processed data to disk")
-
         self.data = data
         self.fixed_fields = fixed_fields
+
+        # Save the processed data
+        self.save_processed()
+        logging.info("Cached processed data to disk")
 
     def get(self, idx):
         out = self.data.get_example(idx)
