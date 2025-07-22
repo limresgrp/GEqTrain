@@ -113,7 +113,7 @@ def infer(dataloader, model, device, output_keys=[], per_node_outputs_keys=[], c
         for callback in batch_callbacks:
             callback(batch_index, **kwargs)
 
-def load_model(model: Union[str, Path], device="cpu"):
+def load_model(model: Union[str, Path], device="cpu", freeze=True):
     if isinstance(model, str):
         model = Path(model)
     logger = logging.getLogger("geqtrain-evaluate")
@@ -125,6 +125,7 @@ def load_model(model: Union[str, Path], device="cpu"):
         model, metadata = load_deployed_model(
             model,
             device=device,
+            freeze=freeze,
             set_global_options=True,  # don't warn that setting
         )
         logger.info("loaded deployed model.")
