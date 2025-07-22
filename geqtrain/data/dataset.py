@@ -84,7 +84,8 @@ def parse_attrs(
             embedding_mode = options.get('embedding_mode', 'embedding')
             assert embedding_mode in ['embedding', 'one_hot']
             if attribute_type == 'numerical':
-                input_val = input_val.astype(float)
+                if input_val is not None:
+                    input_val = input_val.astype(float)
             elif attribute_type == 'categorical':
                 if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
                     continue # if 'embedding_mode' is embedding (default) and 'embedding_dimensionality' is missing, this means the field must not be used as input
@@ -107,10 +108,11 @@ def parse_attrs(
                     input_val[input_val > 0] -= 1 # 0<=x<5 fall together with x<0
                 input_val[mask] = num_types # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
                 input_val = val.astype(np.int64)
-            if key in _fields:
-                _fields[key] = torch.from_numpy(input_val)
-            elif key in _fixed_fields:
-                _fixed_fields[key] = torch.from_numpy(input_val)
+            if input_val is not None: # input_val can be None if it is computed by a submodule and is not present in the dataset
+                if key in _fields:
+                    _fields[key] = torch.from_numpy(input_val)
+                elif key in _fixed_fields:
+                    _fixed_fields[key] = torch.from_numpy(input_val)
 
     return _fields, _fixed_fields
 

@@ -10,11 +10,12 @@ from typing import Dict, List, Optional, Union
 from os.path import isdir
 
 import torch
-from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
 from geqtrain import data
 from geqtrain.data import (
     AtomicDataDict,
     AtomicInMemoryDataset,
+    InMemoryConcatDataset,
+    LazyLoadingConcatDataset,
     _NODE_FIELDS,
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
@@ -119,13 +120,17 @@ def node_types_to_keep(config):
         config["keep_node_types"] = torch.tensor(find_matching_indices(config["type_names"], keep_type_names))
     return config.get("keep_node_types", None)
 
-def node_types_to_exclude(config):
+def node_types_to_exclude_from_edges(config):
     # --- exclude edges from center node to specified node types
-    exclude_type_names_from_edges = config.get("exclude_type_names_from_edges", None)
-    if exclude_type_names_from_edges is not None:
+    exclude_type_names_from_edge_center = config.get("exclude_type_names_from_edge_center", None)
+    if exclude_type_names_from_edge_center is not None:
         from geqtrain.train.utils import find_matching_indices
-        config["exclude_node_types_from_edges"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edges))
-    return config.get("exclude_node_types_from_edges", None)
+        config["exclude_node_types_from_edge_center"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edge_center))
+    exclude_type_names_from_edge_neigh = config.get("exclude_type_names_from_edge_neigh", None)
+    if exclude_type_names_from_edge_neigh is not None:
+        from geqtrain.train.utils import find_matching_indices
+        config["exclude_node_types_from_edge_neigh"] = torch.tensor(find_matching_indices(config["type_names"], exclude_type_names_from_edge_neigh))
+    return config.get("exclude_node_types_from_edge_center", None) # , config.get("exclude_node_types_from_edge_neigh", None)
 
 def dataset_from_config(config,
                         prefix: str = "dataset",
@@ -229,7 +234,12 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
             # Filter out nan nodes and nodes with type_names that we don't want to keep
             default_num_threads = torch.get_num_threads() # default is 64 (always?)
             torch.set_num_threads(1)  # torch.argwhere, torch.isin and torch.nonzero may parallelize on many cpus and clutter the machine
-            instance = remove_node_centers_for_NaN_targets_and_edges(instance, key_clean_list, node_types_to_keep(config), node_types_to_exclude(config))
+            instance = remove_node_centers_for_NaN_targets_and_edges(
+                instance,
+                key_clean_list,
+                node_types_to_keep(config),
+                node_types_to_exclude_from_edges(config)
+            )
             torch.set_num_threads(default_num_threads)
         return instance
 
@@ -246,7 +256,7 @@ def remove_node_centers_for_NaN_targets_and_edges(
     dataset: AtomicInMemoryDataset,
     key_clean_list: List[str],
     keep_node_types: Optional[List[str]] = None,
-    exclude_node_types_from_edges: Optional[List[str]] = None,
+    exclude_node_types_from_edge_neigh: Optional[List[str]] = None,
 ):
     data = dataset.data
     if AtomicDataDict.NODE_TYPE_KEY in data:
@@ -305,11 +315,11 @@ def remove_node_centers_for_NaN_targets_and_edges(
     else:
         keep_edges_filter = torch.ones(len(node_center_edge_idcs), dtype=torch.bool)
 
-    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edges'
-    if exclude_node_types_from_edges is not None:
-        exclude_node_types_from_edges_mask = get_node_types_mask(node_types, exclude_node_types_from_edges, data)
+    # - Remove edges which connect center nodes with node types present in 'exclude_node_types_from_edge_neigh'
+    if exclude_node_types_from_edge_neigh is not None:
+        exclude_node_types_from_edge_neigh_mask = get_node_types_mask(node_types, exclude_node_types_from_edge_neigh, data)
         # Here we are performing the INTERSECTION between the edge_idcs we want to keep from previous filtering and a tensor that zeroes out edges we want to exclude
-        keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edges_mask).flatten())
+        keep_edges_filter *= ~torch.isin(data[AtomicDataDict.EDGE_INDEX_KEY][1], torch.nonzero(exclude_node_types_from_edge_neigh_mask).flatten())
 
     keep_nodes_filter = torch.zeros(len(data.pos), dtype=torch.bool) # initialize node filter tensor of dim (n_atoms,)
     keep_nodes_filter[node_center_edge_idcs[keep_edges_filter].unique().flatten()] = True
