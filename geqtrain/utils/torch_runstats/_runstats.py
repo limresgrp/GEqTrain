@@ -28,6 +28,7 @@ class Reduction(enum.Enum):
     MEAN = "mean"
     RMS = "rms"
     LATEST = "latest"
+torch.serialization.add_safe_globals([Reduction])
 
 
 # TODO: impliment counting
