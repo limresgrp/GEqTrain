@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import Config
 from geqtrain.nn import (
@@ -9,11 +10,11 @@ from geqtrain.nn import (
 from geqtrain.model._embedding import buildEmbeddingLayers
 
 
-def HeadlessNodeModel(config:Config) -> SequentialGraphNetwork:
+def HeadlessNodeModel(config: Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
-    layers = buildEmbeddingLayers(config)
+    layers = buildEmbeddingLayers(config, model)
     layers.update(buildNodeModelLayers())
 
     return SequentialGraphNetwork.from_parameters(

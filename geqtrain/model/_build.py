@@ -169,8 +169,6 @@ def model_from_config(
 
         # Wrap return of previous builder (every module listed in model_builders - except the first - must require this param)
         if "model" in pnames:
-            if model is None:
-                raise RuntimeError(f"Builder {builder.__name__} asked for the model as an input, but no previous builder has returned a model")
             params["model"] = model
         else:
             if model is not None:

@@ -9,20 +9,26 @@ from geqtrain.nn import (
 )
 
 
-def buildEmbeddingLayers(config: Config):
+def buildEmbeddingLayers(config: Config, model = None):
     logging.info("--- Building Embeddings ---")
 
     from geqtrain.model.init_utils import update_config
     update_config(config)
 
-    layers = {
+    layers = {}
+    if model is not None:
+        layers.update({
+            "wrapped_model": model,
+        })
+    
+    layers.update({
         "node_input_attrs": (EmbeddingInputAttrs, dict(
             out_field     = AtomicDataDict.NODE_INPUT_ATTRS_KEY,
             eq_out_field  = AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
             attributes    = config.get('node_attributes'),
             eq_attributes = config.get('eq_node_attributes'),
         )),
-    }
+    })
 
     if 'edge_attributes' in config or 'eq_edge_attributes' in config:
         layers["edge_input_attrs"] = (EmbeddingInputAttrs, dict(
