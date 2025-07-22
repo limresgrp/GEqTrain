@@ -17,7 +17,7 @@ from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.data import AtomicDataDict
 
 class FFBlock(torch.nn.Module):
-    def __init__(self, inp_size, out_size:int|None=None, residual:bool=True, group_norm:bool=False):
+    def __init__(self, inp_size, out_size:Optional[int]=None, residual:bool=True, group_norm:bool=False):
         super().__init__()
         self.residual = residual
         out_size = out_size or inp_size

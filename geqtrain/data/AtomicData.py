@@ -419,8 +419,8 @@ def neighbor_list(
     """
 
     if any(pbc):
-        import ase.geometry
-        import ase.neighborlist
+        from ase.geometry import complete_cell
+        from ase.neighborlist import primitive_neighbor_list
 
         if isinstance(pbc, bool):
             pbc = (pbc,) * 3
@@ -447,9 +447,9 @@ def neighbor_list(
             cell_tensor = torch.as_tensor(temp_cell, device=out_device, dtype=out_dtype)
 
         # ASE dependent part
-        temp_cell = ase.geometry.complete_cell(temp_cell)
+        temp_cell = complete_cell(temp_cell)
 
-        first_idex, second_idex, edge_cell_shift = ase.neighborlist.primitive_neighbor_list(
+        first_idex, second_idex, edge_cell_shift = primitive_neighbor_list(
             "ijS",
             pbc,
             temp_cell,

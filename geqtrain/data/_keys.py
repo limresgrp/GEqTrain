@@ -19,11 +19,11 @@ from typing import List, Final
 R_MAX_KEY:             Final[str] = "r_max"           # cutoff radius
 # [n_nodes, 3]
 POSITIONS_KEY:         Final[str] = "pos"             # positions of the nodes in the system
-# [2, n_edge]
+# [2, n_edges]
 EDGE_INDEX_KEY:        Final[str] = "edge_index"      # index tensor giving center -> neighbor relations
 # (bool) | [3]
 PBC_KEY:               Final[str] = "pbc"             # wether to use pbc or not and on which axis
-# [n_edge, 3]
+# [n_edges, 3]
 EDGE_CELL_SHIFT_KEY:   Final[str] = "edge_cell_shift" # tensor of how many periodic cells each edge crosses in each cell vector
 # [n_batches, 3, 3] | [3, 3]
 CELL_KEY:              Final[str] = "cell"            # tensor where rows are the cell vectors

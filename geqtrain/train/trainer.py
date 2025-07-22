@@ -150,15 +150,15 @@ def run_inference(
     # if a module of model has ref_data_keys as attr
     # then take the string associated to that field and
     # write it into ref_data as {str}+_target
-    # try: # TODO check this and make it compatible with all models
-    #     for (name, module) in (model.module if is_ddp else model):
-    #         if hasattr(module, 'ref_data_keys'):
-    #             for k in module.ref_data_keys:
-    #                 target = out[k]
-    #                 key_clean = k.replace("_target", "")
-    #                 ref_data[key_clean] = target
-    # except:
-    #     pass
+    try: # TODO check this and make it compatible with all models
+        for (name, module) in (model.module if is_ddp else model):
+            if hasattr(module, 'ref_data_keys'):
+                for k in module.ref_data_keys:
+                    target = out[k]
+                    key_clean = k.replace("_target", "")
+                    ref_data[key_clean] = target
+    except:
+        pass
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
@@ -452,7 +452,7 @@ class Trainer:
         use_ema: bool = False,
         debug: bool = False,
         dropout_edges: float = 0.,
-        warmup_epochs: int | str = -1,
+        warmup_epochs: int = 0,
         head_wds: float = 0.0,
         accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
         metric_criteria:str='decreasing', # or 'increasing'
@@ -1848,10 +1848,10 @@ class Trainer:
     def init_dataloader(
         self,
         config,
-        sampler                 : Sampler | None=None,
-        validation_sampler      : Sampler | None=None,
-        batch_sampler           : Sampler | None=None,
-        batch_validation_sampler: Sampler | None=None,
+        sampler                 : Optional[Sampler]=None,
+        validation_sampler      : Optional[Sampler]=None,
+        batch_sampler           : Optional[Sampler]=None,
+        batch_validation_sampler: Optional[Sampler]=None,
         ):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
@@ -1966,10 +1966,10 @@ class DistributedTrainer(Trainer):
     def init_dataloader(
         self,
         config,
-        sampler                 : Sampler | None=None,
-        validation_sampler      : Sampler | None=None,
-        batch_sampler           : Sampler | None=None,
-        batch_validation_sampler: Sampler | None=None,
+        sampler                 : Optional[Sampler]=None,
+        validation_sampler      : Optional[Sampler]=None,
+        batch_sampler           : Optional[Sampler]=None,
+        batch_validation_sampler: Optional[Sampler]=None,
     ):
         dataset_mode = config.get("dataset_mode", "single")
         assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
