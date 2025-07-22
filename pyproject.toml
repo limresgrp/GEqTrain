@@ -1,0 +1,42 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geqtrain"
+dynamic = ["version"]
+description = "GEqTrain is an open-source framework for building, training and deplying E(3)-equivariant graph based models."
+authors = [
+    {name = "Daniele Angioletti"},
+]
+requires-python = ">=3.8"
+readme = "README.md"
+dependencies = [
+    "ase",
+    "e3nn>=0.5",
+    "einops",
+    "numpy",
+    "pytorch-warmup",
+    "pyyaml",
+    "torcheval",
+    "torch_ema",
+    "tqdm",
+    "wandb>=0.13",
+]
+
+[project.urls]
+"Repository" = "https://github.com/limresgrp/GEqTrain"
+
+[project.scripts]
+geqtrain-train = "geqtrain.scripts.train:main"
+geqtrain-evaluate = "geqtrain.scripts.evaluate:main"
+geqtrain-test-equivariance = "geqtrain.scripts.test_equivariance:main"
+geqtrain-deploy = "geqtrain.scripts.deploy:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "geqtrain._version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["geqtrain", "geqtrain.*"]
