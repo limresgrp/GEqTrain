@@ -180,7 +180,10 @@ class Metrics(Loss):
                 accumulate_by = torch.tensor(per_target_accumulate_by, device=error.device).long()
                 params["accumulate_by"] = accumulate_by
 
-            metrics[key] = stat.accumulate_batch(error.flatten(), **params)
+            # If error has more than 1 dimension, take mean along all dims > 1
+            if error.dim() > 1:
+                error = error.mean(dim=tuple(range(1, error.dim())))
+            metrics[key] = stat.accumulate_batch(error, **params)
 
         return metrics
 
