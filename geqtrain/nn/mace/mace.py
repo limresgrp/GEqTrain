@@ -1,11 +1,12 @@
 from abc import abstractmethod
 import torch
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple, Union
 
 from e3nn import nn, o3
 from e3nn.util.jit import compile_mode
 # from torch_scatter import scatter_sum
+from geqtrain.utils._model_utils import process_out_irreps
 from geqtrain.utils.pytorch_scatter import scatter_sum
 
 from geqtrain.data import AtomicDataDict
@@ -37,6 +38,9 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         latent_dim:                 int  = 64,
         mlp_latent_dimensions: List[int] = [64, 64, 64],
         avg_num_neighbors:         float = 10.0,
+        # optional params
+        out_irreps: Optional[Union[o3.Irreps, str]] = None, #! out_irreps: if None: (yaml.latent_dim x lmax), else yaml.out_irreps
+        output_ls : Optional[List[int]]             = None,
         # Other:
         irreps_in = None,
         name:str = "",
@@ -60,6 +64,14 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         edge_attrs_irreps  = self.irreps_in[self.edge_equivariant_field]
         edge_attrs_irreps  = self.include_eq_input_irreps(edge_attrs_irreps)
         hidden_irreps      = o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]) # complete_parities(o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]))
+        
+        out_irreps, _, _ = process_out_irreps(
+            out_irreps=out_irreps,
+            output_ls=output_ls,
+            latent_dim=latent_dim,
+            edge_attrs_irreps=edge_attrs_irreps,
+        )
+        
         num_features       = hidden_irreps.count(o3.Irrep(0, 1)) + hidden_irreps.count(o3.Irrep(0, -1))
         node_feats_irreps  = o3.Irreps([(num_features, (0, 1))])
         node_attrs_irreps  = self.irreps_in[self.node_invariant_field]
@@ -97,11 +109,11 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         self.products = torch.nn.ModuleList([prod])
 
         self.readouts = torch.nn.ModuleList()
-        self.readouts.append(LinearReadoutBlock(hidden_irreps))
+        self.readouts.append(LinearReadoutBlock(hidden_irreps, out_irreps))
 
         for i in range(num_layers):
             if i == num_layers - 1:
-                hidden_irreps_out = hidden_irreps[1:2]  # Select only scalars for last layer
+                hidden_irreps_out = out_irreps
             else:
                 hidden_irreps_out = hidden_irreps
             inter = RealAgnosticInteractionBlock(
@@ -125,13 +137,10 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
                 sc=True,
             )
             self.products.append(prod)
-            if i == num_layers - 1:
-                self.readouts.append(LinearReadoutBlock(hidden_irreps_out))
-            else:
-                self.readouts.append(LinearReadoutBlock(hidden_irreps))
+            self.readouts.append(LinearReadoutBlock(hidden_irreps, out_irreps))
 
         # - End build modules - #
-        self.irreps_out.update({self.out_field: o3.Irreps("0e")})
+        self.irreps_out.update({self.out_field: out_irreps})
     
     def include_eq_input_irreps(self, edge_attrs_irreps):
         # concat node eq_input features of each atom pair to spharms vector
@@ -219,7 +228,8 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
             )
             node_energies = readout(node_feats).squeeze(-1)  # [n_nodes, ]
             node_energies_list.append(node_energies)
-        node_energy_contributions = torch.stack(node_energies_list, dim=-1).sum(dim=-1, keepdim=True)
+        node_energy_contributions = torch.stack(node_energies_list, dim=-1)
+        node_energy_contributions = node_energy_contributions.sum(dim=-1, keepdim=node_energy_contributions.dim()==2)
 
         data[self.out_field] = node_energy_contributions
         return data

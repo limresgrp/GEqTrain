@@ -4,8 +4,7 @@ import torch
 import wandb
 
 from typing import Optional, List, Tuple, Union
-# from torch_scatter import scatter
-# from torch_scatter.composite import scatter_softmax
+from geqtrain.utils._model_utils import process_out_irreps
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from einops.layers.torch import Rearrange
 
@@ -162,33 +161,15 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed_irreps     = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
         edge_features_irreps = complete_parities(env_embed_irreps) if parity == "o3_full" else env_embed_irreps
         assert (edge_features_irreps[0].ir == SCALAR) or (edge_features_irreps[0].ir == PSEUDO_SCALAR), "edge_features_irreps must start with scalars"
+        
+        out_irreps, output_ls, output_mul = process_out_irreps(
+            out_irreps=out_irreps,
+            output_ls=output_ls,
+            output_mul=output_mul,
+            latent_dim=latent_dim,
+            edge_attrs_irreps=edge_features_irreps,
+        )
 
-        # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
-        if out_irreps is None:
-            out_irreps = o3.Irreps([(self.latent_dim, ir) for _, ir in edge_features_irreps])
-        else:
-            out_irreps = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
-
-        if 0 not in out_irreps.ls: # add scalar (l=0) if missing from out_irreps
-            mul = out_irreps[0].mul
-            out_irreps = o3.Irreps([(mul, (0, 1)), (mul, (0, -1))]) + out_irreps
-
-        # - [optional] filter out_irreps l degrees
-        if output_ls is None:
-            output_ls = out_irreps.ls
-        assert isinstance(output_ls, List)
-        assert all([(l in edge_features_irreps.ls) for l in output_ls]), \
-            f"Required output ls {output_ls} cannot be computed using l_max={max(edge_features_irreps.ls)}"
-
-        # [optional] set out_irreps multiplicity
-        if output_mul is None:
-            output_mul = out_irreps[0].mul
-        if isinstance(output_mul, str):
-            if output_mul == 'hidden':
-                output_mul = self.latent_dim
-
-        #! the interaction layer always keeps l=0, even if requested out is: l>0
-        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in edge_features_irreps if ir.l in output_ls])
         self.out_multiplicity = output_mul
 
         # Initially, we have the B(r)Y(\vec{r})-projection of the edges (possibly embedded)
@@ -616,6 +597,7 @@ class InteractionLayer(torch.nn.Module):
         expanded_features_per_active_atom: torch.Tensor = self.product(
             node_feats=local_env_per_active_atom,
             node_attrs=node_invariants[active_node_centers],
+            sc=None,
         )
         # updated local_env_per_active_atom
         return self.reshape_in_module(expanded_features_per_active_atom)
