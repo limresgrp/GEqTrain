@@ -280,6 +280,27 @@ def filter_dataset(
     data = dataset.data
     if data is None or data.num_graphs == 0:
         return None
+    
+    has_to_filter = False
+    if keep_node_types is not None:
+        logging.info(f"Filtering nodes: keeping only node types {keep_node_types.tolist()}")
+        has_to_filter = True
+    if exclude_node_types_from_edge_center is not None or exclude_node_types_from_edge_neigh is not None:
+        logging.info(
+            f"Filtering edges: "
+            f"excluding center node types {exclude_node_types_from_edge_center.tolist() if exclude_node_types_from_edge_center is not None else '[]'}, "
+            f"excluding neighbor node types {exclude_node_types_from_edge_neigh.tolist() if exclude_node_types_from_edge_neigh is not None else '[]'}"
+        )
+        has_to_filter = True
+    # Before skipping, be sure that there are no NaN node targets, otherwise it is necessary to filter edges from those central nodes
+    for key in key_clean_list:
+        if key in _NODE_FIELDS and key in data:
+            if torch.isnan(graph[key]).any():
+                has_to_filter = True
+                logging.info(f"NaN detected in node target '{key}' for a graph. Excluding center nodes with NaN targets from graph.")
+    # If no filtering is necessary, skip to save time
+    if not has_to_filter:
+        return dataset
 
     # Deconstruct the batch into a list of individual graphs to filter them one by one
     data_list = data.to_data_list()
