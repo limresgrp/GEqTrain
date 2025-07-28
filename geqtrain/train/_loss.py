@@ -200,18 +200,17 @@ class RMSDLoss(SimpleLossWithNaNsFilter):
         mean: bool = True,
         **kwargs,
     ):
+        if mean:
+            raise Exception("RMSDLoss should be used only as a Metric. Please use MSELoss instead.")
+        
         pred_key, not_nan_pred_filter, ref_key, not_nan_ref_filter = self.prepare(pred, ref, key, **kwargs)
         not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
-
         loss = torch.sum(self.func(pred_key, ref_key) * not_nan_filter, dim=-1)
 
-        if mean:
-            return torch.sqrt(loss.sum() / not_nan_filter.sum())
-        else:
-            # The accumulate_batch() method used by metrics first squares the loss, then computes the average and then extracts the root.
-            # Thus, we need to pass the sqrt(loss) to obtain the RMSD as output.
-            loss[~not_nan_filter[:, 0].bool()] = torch.nan
-            return torch.sqrt(loss)
+        # The accumulate_batch() method used by metrics first squares the loss, then computes the average and then extracts the root.
+        # Thus, we need to pass the sqrt(loss) to obtain the RMSD as output.
+        loss[~not_nan_filter[:, 0].bool()] = torch.nan
+        return torch.sqrt(loss)
     
     def __str__(self):
         return "RMSD"

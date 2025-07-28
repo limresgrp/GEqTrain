@@ -417,7 +417,7 @@ class Trainer:
         learning_rate: float = 1e-2,
         lr_scheduler_name: str = "none",
         optimizer_name: str = "Adam",
-        max_gradient_norm: float = float("inf"),
+        max_gradient_norm: Optional[float] = None,
         exclude_keys: list = [],
         batch_size: int = 5,
         validation_batch_size: int = 5,
@@ -1424,10 +1424,11 @@ class Trainer:
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
-                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, self.is_master)
-                    if self.is_master:
-                        self.gradnorms.append(grad_norm.item())
-                        self.gradnorms_clip.append(float(max_grad_norm))
+                    if self.max_gradient_norm is not None:
+                        grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, self.is_master)
+                        if self.is_master:
+                            self.gradnorms.append(grad_norm.item())
+                            self.gradnorms_clip.append(float(max_grad_norm))
 
                     self.optim.step()
                     if self.use_ema:
@@ -1879,7 +1880,6 @@ class Trainer:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
-                # timeout=0,
             ))
 
         if using_multiple_workers:

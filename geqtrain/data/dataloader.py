@@ -1,11 +1,8 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from typing import List
-from functools import reduce
-
 import torch
-
+from typing import List
 from geqtrain.utils.torch_geometric import Batch, Data
 
 
