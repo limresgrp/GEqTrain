@@ -3,7 +3,9 @@
 Original authors: Albert Musaelian
 """
 
+import json
 import logging
+import os
 from typing import Union, Dict, Set, Sequence
 from collections.abc import Mapping
 
@@ -23,6 +25,7 @@ _DEFAULT_LONG_FIELDS: Set[str] = {
     AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.EDGE_INDEX_KEY,
     AtomicDataDict.EDGE_TYPE_KEY,
+    AtomicDataDict.EDGE_CELL_SHIFT_KEY,
     AtomicDataDict.BATCH_KEY,
 }
 _DEFAULT_NODE_FIELDS: Set[str] = {
@@ -53,12 +56,29 @@ _DEFAULT_FIXED_FIELDS: Set[str] = {
     AtomicDataDict.PBC_KEY
 }
 
-_NODE_FIELDS:  Set[str] = set(_DEFAULT_NODE_FIELDS)
-_EDGE_FIELDS:  Set[str] = set(_DEFAULT_EDGE_FIELDS)
-_GRAPH_FIELDS: Set[str] = set(_DEFAULT_GRAPH_FIELDS)
-_EXTRA_FIELDS: Set[str] = set(_DEFAULT_EXTRA_FIELDS)
-_FIXED_FIELDS: Set[str] = set(_DEFAULT_FIXED_FIELDS)
-_LONG_FIELDS:  Set[str] = set(_DEFAULT_LONG_FIELDS)
+class FieldSet(set):
+    """
+    A custom set that automatically checks for field keys with a '__mask__' suffix.
+
+    If a key like 'pos__mask__' is checked for containment, this class will
+    also check for the presence of the root key ('pos'). This avoids the need
+    to manually register every possible mask.
+    """
+    def __contains__(self, key: object) -> bool:
+        if super().__contains__(key):
+            return True
+        if isinstance(key, str) and key.endswith('__mask__'):
+            root_key = key[:-8]  # Remove '__mask__' suffix
+            return super().__contains__(root_key)
+        return False
+
+# Use FieldSet to dynamically handle '__mask__' keys.
+_NODE_FIELDS:  Set[str] = FieldSet(_DEFAULT_NODE_FIELDS)
+_EDGE_FIELDS:  Set[str] = FieldSet(_DEFAULT_EDGE_FIELDS)
+_GRAPH_FIELDS: Set[str] = FieldSet(_DEFAULT_GRAPH_FIELDS)
+_EXTRA_FIELDS: Set[str] = FieldSet(_DEFAULT_EXTRA_FIELDS)
+_FIXED_FIELDS: Set[str] = FieldSet(_DEFAULT_FIXED_FIELDS)
+_LONG_FIELDS:  Set[str] = FieldSet(_DEFAULT_LONG_FIELDS)
 
 
 def register_fields(
@@ -70,43 +90,56 @@ def register_fields(
     long_fields:  Sequence[str] = [],
 ) -> None:
     r"""
+    Register fields and synchronize them across DDP processes.
 
-    Called during instantiation of the dataset using the cfg,
-    updates global dicts:
-    - _NODE_FIELDS
-    - _EDGE_FIELDS
-    - _GRAPH_FIELDS
-    - _EXTRA_FIELDS
-    - _FIXED_FIELDS
-    - _LONG_FIELDS
-    that are used to parse the yaml and thus the data from source.
-
-
-    Register fields as being per-node, per-edge, or per-graph.
-    with this function we can register custom keys in the AtomicData/AtomicDataDict
-    register as key in the AtomicDataDict the values of the following yaml keys:
-        - node_fields
-        - edge_fields
-        - graph_fields
-        - extra_fields
-        - long_fields
+    This function updates the global field sets and then serializes them
+    to environment variables. This ensures that when DDP spawns new
+    processes, they will inherit the complete field configuration from the
+    main process, solving state synchronization issues.
     """
-    node_fields:  set = set(node_fields)
-    edge_fields:  set = set(edge_fields)
-    graph_fields: set = set(graph_fields)
-    fixed_fields: set = set(fixed_fields)
-    extra_fields: set = set(extra_fields)
-    allfields = node_fields.union(edge_fields, graph_fields, extra_fields)
-    assert len(allfields) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields)
+    node_fields_set:  set = set(node_fields)
+    edge_fields_set:  set = set(edge_fields)
+    graph_fields_set: set = set(graph_fields)
+    extra_fields_set: set = set(extra_fields)
+    allfields = node_fields_set.union(edge_fields_set, graph_fields_set, extra_fields_set)
+    assert len(allfields) == len(node_fields_set) + len(edge_fields_set) + len(graph_fields_set) + len(extra_fields_set)
 
     _NODE_FIELDS.update(node_fields)
     _EDGE_FIELDS.update(edge_fields)
     _GRAPH_FIELDS.update(graph_fields)
-    _EXTRA_FIELDS.update(extra_fields)
     _FIXED_FIELDS.update(fixed_fields)
+    _EXTRA_FIELDS.update(extra_fields)
     _LONG_FIELDS.update(long_fields)
     if len(set.union(_NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _EXTRA_FIELDS)) < (len(_NODE_FIELDS) + len(_EDGE_FIELDS) + len(_GRAPH_FIELDS) + len(_EXTRA_FIELDS)):
         raise ValueError("At least one key was registered as more than one of node, edge, graph or extra!")
+    
+    # Serialize the final state of fields to environment variables for DDP synchronization.
+    prefix = 'GEQTRAIN_REGISTERED_FIELDS_'
+    os.environ[prefix + 'NODE'] = json.dumps(list(_NODE_FIELDS))
+    os.environ[prefix + 'EDGE'] = json.dumps(list(_EDGE_FIELDS))
+    os.environ[prefix + 'GRAPH'] = json.dumps(list(_GRAPH_FIELDS))
+    os.environ[prefix + 'EXTRA'] = json.dumps(list(_EXTRA_FIELDS))
+    os.environ[prefix + 'FIXED'] = json.dumps(list(_FIXED_FIELDS))
+    os.environ[prefix + 'LONG'] = json.dumps(list(_LONG_FIELDS))
+
+
+def _initialize_fields_from_env():
+    """
+    On module import, overwrite default fields with any found in env vars.
+    
+    This function is critical for DDP. When a child process is spawned, it
+    imports this module and this function will run, ensuring the child process
+    has the same field configuration as the parent.
+    """
+    prefix = 'GEQTRAIN_REGISTERED_FIELDS_'
+    if prefix + 'NODE' in os.environ:
+        global _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _EXTRA_FIELDS, _FIXED_FIELDS, _LONG_FIELDS
+        _NODE_FIELDS  = FieldSet(json.loads(os.environ[prefix + 'NODE']))
+        _EDGE_FIELDS  = FieldSet(json.loads(os.environ[prefix + 'EDGE']))
+        _GRAPH_FIELDS = FieldSet(json.loads(os.environ[prefix + 'GRAPH']))
+        _EXTRA_FIELDS = FieldSet(json.loads(os.environ[prefix + 'EXTRA']))
+        _FIXED_FIELDS = FieldSet(json.loads(os.environ[prefix + 'FIXED']))
+        _LONG_FIELDS  = FieldSet(json.loads(os.environ[prefix + 'LONG']))
 
 
 def _process_dict(kwargs, ignore_fields):
@@ -368,7 +401,7 @@ class AtomicData(Data):
         # Process '__mask__' arguments in kwargs
         mask_keys = [key for key in kwargs.keys() if key.endswith('__mask__')]
         for mask_key in mask_keys:
-            root_key = mask_key[:-8]  # Remove '_mask' suffix to get the root key
+            root_key = mask_key[:-8]  # Remove '__mask__' suffix to get the root key
             mask = torch.as_tensor(kwargs[mask_key], dtype=torch.bool)
             if root_key in kwargs:
                 kwargs[root_key] = kwargs[root_key][mask]
@@ -376,7 +409,7 @@ class AtomicData(Data):
                 pos = pos[mask]
             else:
                 raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
-            # Remove the '_mask' key from kwargs
+            # Remove the '__mask__' key from kwargs
             del kwargs[mask_key]
 
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
@@ -542,3 +575,6 @@ def neighbor_list(
         edge_cell_shift, cell_tensor = None, None
 
     return edge_index, edge_cell_shift, cell_tensor
+
+# Run the initializer on module import to handle DDP.
+_initialize_fields_from_env()
