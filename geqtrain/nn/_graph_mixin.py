@@ -216,6 +216,16 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
 
         super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version
 
+        # Store key that are computed by the model and must be predicted (e.g. noise for diffusion)
+        self._ref_data_keys = set()
+        for module in self.modules():
+            if hasattr(module, 'ref_data_keys'):
+                self._ref_data_keys.update(module.ref_data_keys)
+
+    @property
+    def ref_data_keys(self):
+        return self._ref_data_keys
+
     @classmethod
     def from_parameters(
         cls,
