@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from e3nn import o3
@@ -48,6 +48,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         scalar_attnt: bool = True,
         num_heads: int = 32,
         dataset_mode: str = 'single', # single|ensemble
+        bias: Optional[Union[float, List]] = None,
     ):
         super().__init__()
         
@@ -170,6 +171,21 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
             self.ensemble_attnt1 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key, update_mlp=True)
             self.ensemble_attnt2 = L0IndexedAttention(irreps_in=irreps_in, field=field, out_field=field, num_heads=num_heads, idx_key=idx_key)
+        
+        # bias for scalar output
+        self.bias = None
+        if self.n_scalars_out > 0:
+            if bias is not None:
+                if isinstance(bias, float):
+                    bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.float32)
+                elif isinstance(bias, list):
+                    bias_init = torch.tensor(bias, dtype=torch.float32)
+                    assert bias_init.shape[0] == self.n_scalars_out, "Bias list length must match number of scalar outputs"
+                else:
+                    raise ValueError("Bias must be float or list")
+                self.bias = nn.Parameter(bias_init)
+            else:
+                self.bias = nn.Parameter(torch.zeros(self.n_scalars_out, dtype=torch.float32))
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         #! ----------- COMMENT TO JIT COMPILE --------------- #
@@ -197,6 +213,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         if self.resnet: # eq. 2 from https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-023-36329-y/MediaObjects/41467_2023_36329_MOESM1_ESM.pdf
             out_features = self._apply_residual_update(out_features, data)
 
+        if self.bias is not None:
+            out_features[active_nodes, :self.n_scalars_out] += self.bias
         data[self.out_field] = out_features
         return data
 
@@ -273,6 +291,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
         scalar_attnt: bool = True,
         num_heads: int = 32,
         dataset_mode: str = 'single', # single|ensemble
+        bias: Optional[Union[float, List]] = None,
     ):
         super().__init__(
             field=field,
@@ -289,6 +308,7 @@ class ReadoutModuleWithConditioning(ReadoutModule):
             scalar_attnt=scalar_attnt,
             num_heads=num_heads,
             dataset_mode=dataset_mode,
+            bias=bias,
         )
 
         self.conditioning_field = conditioning_field
