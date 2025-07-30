@@ -908,10 +908,6 @@ class Trainer:
     @property
     def stop_cond(self):
         """kill the training early"""
-
-        if not self.is_master:
-            return
-
         if self.early_stopping_conds is not None and hasattr(self, "mae_dict") and self._is_warmup_period_over():
             early_stop, early_stop_args, debug_args = self.early_stopping_conds(self.mae_dict)
             if debug_args is not None:
@@ -1190,21 +1186,20 @@ class Trainer:
         model = kwargs.get("model")
         self._set_model(model=model)
         self._init_model_dependent_objects()
+        self.logger.info(model)
 
     def _set_model(self, model):
         self.model = model
         self.model.to(self.torch_device)
 
         # register hook to clamp gradients
-        for p in self.model.parameters():
-
-            if self.sanitize_gradients:
-
-                def sanitize_fn(grad):
-                    # Replace NaN values in the gradient with zero
-                    grad[torch.isnan(grad)] = 0
-                    return grad
-
+        if self.sanitize_gradients:
+            def sanitize_fn(grad):
+                # Replace NaN values in the gradient with zero
+                grad[torch.isnan(grad)] = 0
+                return grad
+            
+            for p in self.model.parameters():
                 p.register_hook(sanitize_fn)
 
         self.num_weights = sum(p.numel() for p in self.model.parameters())
