@@ -30,6 +30,7 @@ _DEFAULT_LONG_FIELDS: Set[str] = {
 }
 _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.POSITIONS_KEY,
+    AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
     AtomicDataDict.NODE_TYPE_KEY,
