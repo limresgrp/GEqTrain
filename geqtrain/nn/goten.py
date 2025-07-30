@@ -4,10 +4,8 @@ import torch
 
 from typing import Callable, Optional, Tuple, Union
 
-from torch_scatter import scatter_softmax
 from geqtrain.nn._embedding import BaseEmbedding
-from geqtrain.utils.pytorch_scatter import scatter_sum
-from einops.layers.torch import Rearrange
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
