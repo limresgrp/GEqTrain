@@ -295,7 +295,7 @@ def filter_dataset(
     # Before skipping, be sure that there are no NaN node targets, otherwise it is necessary to filter edges from those central nodes
     for key in key_clean_list:
         if key in _NODE_FIELDS and key in data:
-            if torch.isnan(graph[key]).any():
+            if torch.isnan(data[key]).any():
                 has_to_filter = True
                 logging.info(f"NaN detected in node target '{key}' for a graph. Excluding center nodes with NaN targets from graph.")
     # If no filtering is necessary, skip to save time
