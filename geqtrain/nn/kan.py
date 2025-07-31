@@ -67,8 +67,7 @@ class KANLinear(torch.nn.Module):
                     noise,
                 )
             )
-            self.spline_weight.data = self.spline_weight.data / self.spline_weight.data.std()#.pow(1/3)
-            torch.nn.init.kaiming_uniform_(self.spline_scaler, a=1./math.sqrt(self.in_features))
+            torch.nn.init.xavier_normal_(self.spline_scaler, gain=math.sqrt(self.out_features))
 
     def b_splines(self, x: torch.Tensor):
         """
@@ -236,12 +235,12 @@ class KAN(torch.nn.Module):
         mlp_input_dimension: Optional[int],
         mlp_latent_dimensions: List[int],
         mlp_output_dimension: Optional[int],
-        grid_size=16,
+        grid_size=5,
         spline_order=3,
         scale_noise=0.1,
-        grid_eps=0.1,
-        grid_range=[-1., 1.],
-        use_layer_norm: bool = False,
+        grid_eps=0.01,
+        grid_range=[-3.14, 3.14],
+        use_layer_norm: bool = True,
         has_bias: bool = False,
         bias: Optional[List] = None,
         **kwargs,

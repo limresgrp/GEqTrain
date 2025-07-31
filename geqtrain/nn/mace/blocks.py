@@ -19,9 +19,11 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         node_feats_irreps: o3.Irreps,
         target_irreps: o3.Irreps,
         correlation: int,
+        sc: bool = False,
         num_elements: Optional[int] = None,
     ) -> None:
         super().__init__()
+        self.sc = sc
 
         self.symmetric_contractions = SymmetricContraction(
             irreps_in=node_feats_irreps,
@@ -30,10 +32,21 @@ class EquivariantProductBasisBlock(torch.nn.Module):
             num_elements=num_elements,
         )
 
+        # Update linear
+        self.linear = o3.Linear(
+            target_irreps,
+            target_irreps,
+            internal_weights=True,
+            shared_weights=True,
+        )
+
     def forward(
         self,
         node_feats: torch.Tensor,
         node_attrs: torch.Tensor,
+        sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
         node_feats = self.symmetric_contractions(node_feats, node_attrs)
-        return node_feats
+        if self.sc and sc is not None:
+            return self.linear(node_feats) + sc
+        return self.linear(node_feats)

@@ -1,13 +1,11 @@
 import re
 from typing import Union, List, Dict
-
 import torch.nn
-
 from geqtrain.train.utils import parse_loss_metrics_dict
 from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
-from torch_runstats import RunningStats, Reduction
+from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
 
 
 class Loss:
@@ -93,6 +91,12 @@ class Loss:
 
         return loss, contrib
 
+    def reset_loss(self):
+        for key in self.keys:
+            _loss = self.funcs[key]
+            if callable(getattr(_loss, "reset", None)):
+                _loss.reset()
+
     def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = {}):
         '''
         given the loss-func-name given in yaml, it registers the associated loss-coeff in self.coeffs[key] dict
@@ -105,7 +109,9 @@ class Loss:
         key = self.suffix_key(key)
         self.keys.append(key)
         self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
-        self.funcs[key] = instantiate_loss_function(func, func_params)
+        func = instantiate_loss_function(func, func_params)
+        self.funcs[key] = func
+        func_params.update(getattr(func, 'extra_params', {}))
         self.func_params[key] = func_params
 
     def suffix_key(self, key):

@@ -226,10 +226,10 @@ def check_for_config_updates(config):
     if old_config.get("fine_tune", False):
         raise ValueError("Cannot restart training of a fine-tuning run")
 
-    modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components", "log_batch_freq",
-                        "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads",
-                        "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms",
-                        "report_init_validation", "metrics_key", "max_gradient_norm", "dropout_edges", "optimizer_params", "head_wds"
+    modifiable_params = ["max_epochs", "loss_coeffs", "learning_rate", "device", "metrics_components", "log_batch_freq", "use_ema",
+                        "noise", "use_dt", "wandb", "batch_size", "validation_batch_size", "train_dloader_n_workers", "heads", "avg_num_neighbors",
+                        "val_dloader_n_workers", "dloader_prefetch_factor", "dataset_num_workers", "inmemory", "transforms", "use_grokfast",
+                        "report_init_validation", "metrics_key", "max_gradient_norm", "dropout", "dropout_edges", "optimizer_params", "head_wds"
                     ] # todo: "num_types" should be added here after moving binning functionality away from dataset creation
 
     for k,v in config.items():

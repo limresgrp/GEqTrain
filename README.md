@@ -1,29 +1,49 @@
 # GEqTrain
-GEqTrain if a framework to dynamically build, train and deploy Equivariant Graph based models using pytorch and e3nn
 
-Acknowledgments
----------------
+GEqTrain is a framework to dynamically build, train, and deploy E(3)-equivariant graph-based models using PyTorch and e3nn.
 
-GEqTrain is based on the work of [`nequip`](https://github.com/mir-group/nequip) [1] by mir-group and takes advantage
-of the excellent [`e3nn`](https://github.com/e3nn/e3nn) general framework for building E(3)-equivariant neural networks [2,3].
+## Installation
 
-We have adapted the code to work on generic Equivariant Graphs, detaching from NequIP original purpose of learning interatomic potentials.
-To improve generalizability and to simplify installation, we include and modify here a subset of `nequip` that is neccessary for our code.
+GEqTrain requires PyTorch. Since PyTorch must be installed for your specific hardware (CPU or a particular CUDA version), you need to install it manually before installing GEqTrain.
 
-To use first create a conda environment:
+### For Users (from PyPI)
 
-```
-conda create --name geqtrain python=3.10
-conda activate geqtrain
-```
-then run:
-```
-chmod +x install.sh
-./install.sh
-```
+1.  **Install PyTorch**: Visit the [official PyTorch website](https://pytorch.org/get-started/locally/) and run the installation command that matches your system. For example, for CUDA 12.1:
+    ```bash
+    pip install torch --index-url https://download.pytorch.org/whl/cu121
+    ```
 
-We are grateful for their contribution to the open-source community.
+2.  **Install GEqTrain**: Once PyTorch is installed, you can install this package from PyPI:
+    ```bash
+    pip install geqtrain
+    ```
 
-  [1] Batzner, S., Musaelian, A., Sun, L. et al. E(3)-equivariant graph neural networks for data-efficient and accurate interatomic potentials. Nat Commun 13, 2453 (2022). https://doi.org/10.1038/s41467-022-29939-5
-  [2] https://e3nn.org/
-  [3] https://zenodo.org/records/7430260
+### For Developers (from source)
+
+1.  **Clone the repository**:
+    ```bash
+    git clone [https://github.com/limresgrp/GEqTrain.git](https://github.com/limresgrp/GEqTrain.git)
+    cd GEqTrain
+    ```
+
+2.  **Create and activate a virtual environment**:
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    ```
+
+3.  **Install PyTorch**: Follow step 1 from the user installation guide above.
+
+4.  **Install GEqTrain in editable mode**:
+    ```bash
+    pip install -e .
+    ```
+
+***
+
+## Quick Start
+
+After installation, you can use the command-line scripts provided by GEqTrain. For example, to start a training run with a configuration file:
+
+```bash
+geqtrain-train --config path/to/your/config.yaml -d cuda:0

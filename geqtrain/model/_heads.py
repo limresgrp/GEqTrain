@@ -1,17 +1,16 @@
 import logging
-from typing import Optional, Dict
+from typing import Dict
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import SequentialGraphNetwork
 
 from geqtrain.utils import Config
 from geqtrain.data import AtomicDataDict
-from torch.utils.data import ConcatDataset
 
 from importlib import import_module
 
 
-def Heads(model, config: Config, initialize: bool, dataset: Optional[ConcatDataset] = None) -> SequentialGraphNetwork:
+def Heads(config: Config, model: SequentialGraphNetwork) -> SequentialGraphNetwork:
     '''
     instanciates a layer with multiple ReadoutModules
     '''

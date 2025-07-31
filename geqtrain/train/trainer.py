@@ -1,23 +1,24 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
-from collections import defaultdict
-from e3nn import o3
-
+import re
+import math
 import inspect
 import logging
 import wandb
 import contextlib
-from copy import deepcopy
-from os.path import isfile
-from time import perf_counter
-from typing import Callable, Optional, Union, Tuple, List, Dict
-from pathlib import Path
-import torch.distributed as dist
-import numpy as np
 import torch
-import re
+import numpy as np
+import torch.distributed as dist
+
+from typing import Callable, Optional, Union, Tuple, List, Dict
+from collections import defaultdict
+from pathlib import Path
+from e3nn import o3
+from copy import deepcopy
+from time import perf_counter
+from os.path import isfile
+
 from torch.utils.data import DistributedSampler, Sampler
-import math
 from geqtrain.data import (
     DataLoader,
     AtomicData,
@@ -41,19 +42,18 @@ from geqtrain.utils import (
     atomic_write_group,
     gradfilter_ema,
 )
-
 from geqtrain.model import model_from_config
+from geqtrain.train import sync_tensor_across_GPUs, sync_dict_of_tensors_across_GPUs
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train.sampler import EnsembleSampler, EnsembleDistributedSampler
-from geqtrain.train import sync_tensor_across_GPUs, sync_dict_of_tensors_across_GPUs
+from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
 from .loss import Loss, LossStat
 from .metrics import Metrics
 from ._key import ABBREV, LOSS_KEY, TRAIN, VALIDATION
 from .early_stopping import EarlyStopping
 
-from geqtrain.train.grad_clipping_utils import Queue, gradient_clipping
-from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
 
 def get_latest_lr(optimizer, model, param_name: str) -> float:
@@ -71,6 +71,11 @@ def set_seed(seed):
     torch.backends.cudnn.enabled = False
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+def parse_idcs_file(filename):
+    with open(filename, "r") as f:
+        lines = f.readlines()
+    return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
 
 def get_output_keys(loss_func: Loss):
     '''
@@ -107,25 +112,21 @@ def run_inference(
     #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available(
     ) else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
-    # AtomicDataDict is the dstruct that is taken as input from each forward
     batch = AtomicData.to_AtomicDataDict(data.to(device))
-
-    batch_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
-    num_batch_center_nodes = len(batch_index[0].unique())
+    batch_center_nodes = batch[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+    num_batch_center_nodes = len(batch_center_nodes)
 
     if skip_chunking:
         input_data = {
             k: v.requires_grad_() if requires_grad and torch.is_floating_point(v) else v
             for k, v in batch.items()
-            # if k not in output_keys
+            if k not in output_keys
         }
         ref_data = batch
-        batch_center_nodes = batch_index[0].unique()
     else:
         input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
-            already_computed_nodes=already_computed_nodes,
             batch=batch,
-            data=data,
+            already_computed_nodes=already_computed_nodes,
             output_keys=output_keys,
             per_node_outputs_keys=per_node_outputs_keys,
             batch_max_atoms=batch_max_atoms,
@@ -137,7 +138,7 @@ def run_inference(
         for slices_key, slices in data.__slices__.items():
             val = torch.tensor(slices, dtype=torch.long, device=device)
             input_data[f"{slices_key}_slices"] = val
-            ref_data[f"{slices_key}_slices"] = val
+            ref_data  [f"{slices_key}_slices"] = val
 
     if dropout_edges > 0:
         apply_dropout_edges(dropout_edges, input_data)
@@ -146,18 +147,14 @@ def run_inference(
         out = model(input_data)
         del input_data
 
-    # if a module of model has ref_data_keys as attr
-    # then take the string associated to that field and
-    # write it into ref_data as {str}+_target
-    try: # TODO check this and make it compatible with all models
-        for (name, module) in (model.module if is_ddp else model):
-            if hasattr(module, 'ref_data_keys'):
-                for k in module.ref_data_keys:
-                    target = out[k]
-                    key_clean = k.replace("_target", "")
-                    ref_data[key_clean] = target
-    except:
-        pass
+    # If the model has ref_data_keys, update ref_data with the corresponding outputs.
+    model_to_check = model.module if is_ddp else model
+    if hasattr(model_to_check, 'ref_data_keys'):
+        for k in model_to_check.ref_data_keys:
+            if k in out:
+                target = out[k]
+                key_clean = k.replace("_target", "")
+                ref_data[key_clean] = target
 
     return out, ref_data, batch_center_nodes, num_batch_center_nodes
 
@@ -186,9 +183,8 @@ def apply_dropout_edges(dropout_edges, input_data):
         input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
 
 def prepare_chunked_input_data(
-    already_computed_nodes: Optional[torch.Tensor],
     batch: AtomicDataDict.Type,
-    data: AtomicDataDict.Type,
+    already_computed_nodes: Optional[torch.Tensor],
     output_keys: List[str] = [],
     per_node_outputs_keys: List[str] = [],
     batch_max_atoms: int = 1000,
@@ -197,37 +193,35 @@ def prepare_chunked_input_data(
 ):
     # === Limit maximum batch size to avoid CUDA Out of Memory === #
 
-    chunk = already_computed_nodes is not None
     batch_chunk = deepcopy(batch)
-    batch_chunk_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+    batch_chunk_edge_index = batch_chunk[AtomicDataDict.EDGE_INDEX_KEY]
+
+    chunk = already_computed_nodes is not None
+    if chunk:
+        batch_chunk_edge_index = batch_chunk_edge_index[:, ~torch.isin(batch_chunk_edge_index[0], already_computed_nodes)]
+    if len(batch_chunk_edge_index[0].unique()) == 0:
+        return None, None, None
+
+    # = Iteratively remove edges from batch_chunk = #
+    # = ----------------------------------------- = #
     edge_fields_dict = {
         edge_field: batch[edge_field]
         for edge_field in _EDGE_FIELDS
         if edge_field in batch
     }
-
-    if chunk:
-        batch_chunk_index = batch_chunk_index[:, ~torch.isin(batch_chunk_index[0], already_computed_nodes)]
-    batch_chunk_center_node_idcs = batch_chunk_index[0].unique()
-    if len(batch_chunk_center_node_idcs) == 0:
-        return None, None, None
-
-    # = Iteratively remove edges from batch_chunk = #
-    # = ----------------------------------------- = #
-
     offset = 0
-    while len(batch_chunk_index.unique()) > batch_max_atoms:
+    while len(batch_chunk_edge_index.unique()) > batch_max_atoms:
 
-        def get_node_center_idcs(batch_chunk_index: torch.Tensor, batch_max_atoms: int, offset: int):
+        def get_node_center_idcs(batch_chunk_edge_index: torch.Tensor, batch_max_atoms: int, offset: int):
             unique_set = set()
 
-            for i, num in enumerate(batch_chunk_index[1]):
+            for i, num in enumerate(batch_chunk_edge_index[1]):
                 unique_set.add(num.item())
 
                 if len(unique_set) >= batch_max_atoms:
-                    node_center_idcs = batch_chunk_index[0, :i+1].unique()
+                    node_center_idcs = batch_chunk_edge_index[0, :i+1].unique()
                     if len(node_center_idcs) == 1:
-                        num_nodes = torch.isin(batch_chunk_index[0], node_center_idcs).sum()
+                        num_nodes = torch.isin(batch_chunk_edge_index[0], node_center_idcs).sum()
                         if num_nodes > batch_max_atoms:
                             raise ValueError(
                                 f"At least one node in the graph has more neighbors ({num_nodes}) "
@@ -236,33 +230,32 @@ def prepare_chunked_input_data(
                             )
                         return node_center_idcs
                     return node_center_idcs[:-offset]
-            return batch_chunk_index[0].unique()
+            return batch_chunk_edge_index[0].unique()
 
-        def get_edge_filter(batch_chunk_index: torch.Tensor, offset: int):
-            node_center_idcs = get_node_center_idcs(batch_chunk_index, batch_max_atoms, offset)
-            edge_filter = torch.isin(batch_chunk_index[0], node_center_idcs)
+        def get_edge_filter(batch_chunk_edge_index: torch.Tensor, offset: int):
+            node_center_idcs = get_node_center_idcs(batch_chunk_edge_index, batch_max_atoms, offset)
+            edge_filter = torch.isin(batch_chunk_edge_index[0], node_center_idcs)
             return edge_filter
 
         chunk = True
         offset += 1
-        fltr = get_edge_filter(batch_chunk_index, offset)
-        batch_chunk_index = batch_chunk_index[:, fltr]
+        fltr = get_edge_filter(batch_chunk_edge_index, offset)
+        batch_chunk_edge_index = batch_chunk_edge_index[:, fltr]
         for k, v in edge_fields_dict.items():
             edge_fields_dict[k] = v[fltr]
 
     # = ----------------------------------------- = #
 
     if chunk:
-        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_index
-        batch_chunk[AtomicDataDict.BATCH_KEY] = data[AtomicDataDict.BATCH_KEY][batch_chunk_index.unique()]
+        batch_chunk_node_indices = batch_chunk_edge_index.unique()
+        batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = batch_chunk_edge_index
+        batch_chunk[AtomicDataDict.BATCH_KEY]      = batch[AtomicDataDict.BATCH_KEY][batch_chunk_node_indices]
         for k, v in edge_fields_dict.items():
-            batch[k] = v
-        if AtomicDataDict.EDGE_CELL_SHIFT_KEY in batch:
-            batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = batch[AtomicDataDict.EDGE_CELL_SHIFT_KEY][batch_chunk_index.unique()]
+            batch_chunk[k] = v
         for per_node_output_key in per_node_outputs_keys:
             chunk_per_node_outputs_value = batch[per_node_output_key].clone()
             mask = torch.ones_like(chunk_per_node_outputs_value, dtype=torch.bool)
-            mask[batch_chunk_index[0].unique()] = False
+            mask[batch_chunk_edge_index[0].unique()] = False
             chunk_per_node_outputs_value[mask] = torch.nan
             batch_chunk[per_node_output_key] = chunk_per_node_outputs_value
 
@@ -300,7 +293,7 @@ def prepare_chunked_input_data(
             updated_edge_index[edge_index >= idx] -= idx - last_idx - 1
         last_idx = idx
     batch_chunk[AtomicDataDict.EDGE_INDEX_KEY] = updated_edge_index
-    batch_chunk_center_nodes = edge_index[0].unique()
+    batch_chunk_center_nodes = edge_index[0].unique() # original center node indices
 
     del edge_index
     del node_index
@@ -337,20 +330,18 @@ class Trainer:
 
         learning_rate (float): initial learning rate
         lr_scheduler_name (str): scheduler name
-        lr_scheduler_kwargs (dict): parameters to initialize the scheduler
 
         optimizer_name (str): name for optimizer
-        optimizer_kwargs (dict): parameters to initialize the optimizer
 
         batch_size (int): size of each batch
         validation_batch_size (int): batch size for evaluating the model for validation
         shuffle (bool): parameters for dataloader
         n_train (int): # of frames for training
-        n_val (int): # of frames for validation
+        n_valid (int): # of frames for validation
         exclude_keys (list):  fields from dataset to ignore.
         dataloader_num_workers (int): `num_workers` for the `DataLoader`s
-        train_idcs (optional, list):  list of frames to use for training, or path to a txt file with indices (1 per row)
-        val_idcs   (optional, list):  list of frames to use for validation
+        train_idcs (optional, list|str):  list of frames to use for training,   or path to a txt file with indices (1 per row)
+        val_idcs   (optional, list|str):  list of frames to use for validation, or path to a txt file with indices (1 per row)
         train_val_split (str):  "random" or "sequential"
 
         init_callbacks (list): list of callback function at the begining of the training
@@ -403,8 +394,6 @@ class Trainer:
 
     stop_keys = ["max_epochs", "early_stopping", "early_stopping_kwargs"]
     object_keys = ["lr_sched", "optim", "early_stopping_conds", "warmup_scheduler"]
-    lr_scheduler_module = torch.optim.lr_scheduler
-    optim_module = torch.optim
 
     def __init__(
         self,
@@ -423,19 +412,17 @@ class Trainer:
         max_epochs: int = 10000,
         learning_rate: float = 1e-2,
         lr_scheduler_name: str = "none",
-        lr_scheduler_kwargs: Optional[dict] = None,
         optimizer_name: str = "Adam",
-        optimizer_kwargs: Optional[dict] = None,
-        max_gradient_norm: float = float("inf"),
+        max_gradient_norm: Optional[float] = None,
         exclude_keys: list = [],
         batch_size: int = 5,
         validation_batch_size: int = 5,
         shuffle: bool = True,
         n_train: Optional[Union[List[int], int]] = None,
-        n_val: Optional[Union[List[int], int]] = None,
+        n_valid: Optional[Union[List[int], int]] = None,
         dataloader_num_workers: int = 0,
-        train_idcs: Optional[Union[List, List[List]]] = None,
-        val_idcs:   Optional[Union[List, List[List]]] = None,
+        train_idcs: Optional[Union[str, List, List[List]]] = None,
+        val_idcs  : Optional[Union[str, List, List[List]]] = None,
         train_val_split: str = "random",  # ['random', 'sequential']
         skip_chunking: bool = False,
         batch_max_atoms: int = 1000,
@@ -461,7 +448,7 @@ class Trainer:
         use_ema: bool = False,
         debug: bool = False,
         dropout_edges: float = 0.,
-        warmup_epochs: int | str = -1,
+        warmup_epochs: int = 0,
         head_wds: float = 0.0,
         accumulation_steps: int = 1, # default: 1 -> standard behavior of updating weights at each batch step
         metric_criteria:str='decreasing', # or 'increasing'
@@ -604,7 +591,9 @@ class Trainer:
         """Initialize callbacks."""
         self._initial_callbacks      = [load_callable(callback) for callback in self.initial_callbacks]
         self._end_of_batch_callbacks = [load_callable(callback) for callback in self.end_of_batch_callbacks]
+        self.end_of_train_callbacks.append("geqtrain.train.trainer.reset_loss")
         self._end_of_train_callbacks = [load_callable(callback) for callback in self.end_of_train_callbacks]
+        self.end_of_valid_callbacks.append("geqtrain.train.trainer.reset_loss")
         self._end_of_valid_callbacks = [load_callable(callback) for callback in self.end_of_valid_callbacks]
         self._end_of_epoch_callbacks = [load_callable(callback) for callback in self.end_of_epoch_callbacks]
         self._final_callbacks        = [load_callable(callback) for callback in self.final_callbacks]
@@ -787,7 +776,6 @@ class Trainer:
             prefix="optimizer",
             positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
-            optional_args=self.optimizer_kwargs,
         )
 
     def _init_scheduler(self):
@@ -800,9 +788,8 @@ class Trainer:
         ), f"{self.lr_scheduler_name} cannot be used unless callback functions are defined"
 
         self.lr_sched = None
-        self.lr_scheduler_kwargs = {}
         if self.lr_scheduler_name != "none":
-            # note: lr_scheduler_T_max is used for schedulers that require max num of steps
+            # note: T_max is used for schedulers that require max num of steps
             # e.g. T_max in https://pytorch.org/docs/stable/generated/torch.optim.lr_scheduler.CosineAnnealingLR.html#cosineannealinglr
             self._init_warmup()
 
@@ -810,15 +797,15 @@ class Trainer:
                 total_number_of_steps = self.num_optim_steps * self.max_epochs
                 if self.warmup_epochs > 0:
                     total_number_of_steps -= self.warmup_steps
-                self.kwargs['lr_scheduler_T_max'] = total_number_of_steps
-                self.kwargs['eta_min'] = self.lr_scheduler_min_lr if hasattr(self, "lr_scheduler_min_lr") else self.learning_rate*.1
+                self.kwargs['T_max'] = total_number_of_steps
+                if 'eta_min' not in self.kwargs:
+                    self.kwargs['eta_min'] = self.learning_rate * 1e-2
 
             self.lr_sched, self.lr_scheduler_kwargs = instantiate_from_cls_name(
                 module=torch.optim.lr_scheduler,
                 class_name=self.lr_scheduler_name,
                 prefix="lr_scheduler",
                 positional_args=dict(optimizer=self.optim),
-                optional_args=self.lr_scheduler_kwargs,
                 all_args=self.kwargs,
             )
 
@@ -831,6 +818,7 @@ class Trainer:
             else:
                 raise ValueError(f"Invalid {match.string} format provided, it must be eg: '7.1%' in yaml, with ''")
 
+        self.warmup_steps = 0
         if self.warmup_epochs > 0:
             import pytorch_warmup as warmup
             self.warmup_steps = self.num_optim_steps * self.warmup_epochs
@@ -916,10 +904,6 @@ class Trainer:
     @property
     def stop_cond(self):
         """kill the training early"""
-
-        if not self.is_master:
-            return
-
         if self.early_stopping_conds is not None and hasattr(self, "mae_dict") and self._is_warmup_period_over():
             early_stop, early_stop_args, debug_args = self.early_stopping_conds(self.mae_dict)
             if debug_args is not None:
@@ -1037,25 +1021,6 @@ class Trainer:
 
         return filename
 
-    @classmethod
-    def from_file(
-        cls, filename: str, format: Optional[str] = None, append: Optional[bool] = None
-    ):
-        """load a model from file
-
-        Args:
-
-        filename (str): name of the file
-        append (bool): if True, append the old model files and append the same logfile
-        """
-
-        dictionary = load_file(
-            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
-            filename=filename,
-            enforced_format=format,
-        )
-        return cls.from_dict(dictionary, append)
-
     def load_state_dicts_for_restart(self, config: Config):
         dictionary: dict = config.as_dict()
 
@@ -1103,6 +1068,25 @@ class Trainer:
 
         if self.stop_cond:
             raise RuntimeError(f"The previous run has properly stopped with {stop_arg}. Please either increase the max_epoch or change early stop criteria")
+
+    @classmethod
+    def from_file(
+        cls, filename: str, format: Optional[str] = None, append: Optional[bool] = None
+    ):
+        """load a model from file
+
+        Args:
+
+        filename (str): name of the file
+        append (bool): if True, append the old model files and append the same logfile
+        """
+
+        dictionary = load_file(
+            supported_formats=dict(torch=["pth", "pt"], yaml=["yaml"], json=["json"]),
+            filename=filename,
+            enforced_format=format,
+        )
+        return cls.from_dict(dictionary, append)
 
     @classmethod
     def from_config(cls, config: Config, append: Optional[bool] = None):
@@ -1198,21 +1182,20 @@ class Trainer:
         model = kwargs.get("model")
         self._set_model(model=model)
         self._init_model_dependent_objects()
+        self.logger.info(model)
 
     def _set_model(self, model):
         self.model = model
         self.model.to(self.torch_device)
 
         # register hook to clamp gradients
-        for p in self.model.parameters():
-
-            if self.sanitize_gradients:
-
-                def sanitize_fn(grad):
-                    # Replace NaN values in the gradient with zero
-                    grad[torch.isnan(grad)] = 0
-                    return grad
-
+        if self.sanitize_gradients:
+            def sanitize_fn(grad):
+                # Replace NaN values in the gradient with zero
+                grad[torch.isnan(grad)] = 0
+                return grad
+            
+            for p in self.model.parameters():
                 p.register_hook(sanitize_fn)
 
         self.num_weights = sum(p.numel() for p in self.model.parameters())
@@ -1344,6 +1327,8 @@ class Trainer:
         # when this returns true -> start normal lr_scheduler.step() call
         if self.warmup_epochs == -1:
             return True
+        if not hasattr(self, "warmup_scheduler"):
+            return True
         n_warmup_steps_already_done = self.warmup_scheduler.last_step
         return n_warmup_steps_already_done + 1 >= self.warmup_steps
 
@@ -1359,6 +1344,8 @@ class Trainer:
         self.batch_losses = self.loss_stat(loss, loss_contrib)
 
     def lr_sched_step(self, batch_lvl:bool) -> None:
+        if self.lr_sched is None:
+            return
         if batch_lvl:
             if not self._is_warmup_period_over():
                 with self.warmup_scheduler.dampening():  # @ entering of this cm lrs are dampened iff warmup steps are not over
@@ -1397,14 +1384,13 @@ class Trainer:
                 with torch.no_grad():
                     # only master logs its features
                     model = self.model.module if self.is_ddp else self.model
-                    irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
-                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
-                    split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+                    irreps = model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]
                     reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
-                    reprs = torch.split(node_reprs, split_sizes, dim=1)
-                    for l, repr in enumerate(reprs):
-                        norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                        self.node_features_norms[f'node_repr_l_{l}_mean'].append(norm)
+                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
+                    reprs = [node_reprs[:, slice] for slice in irreps.slices()]
+                    for (_, ir), repr, reshaper in zip(irreps, reprs, reshapers):
+                        norm = torch.mean(torch.norm(reshaper(repr).squeeze(), dim=-1)) / math.sqrt(repr.shape[-1])
+                        self.node_features_norms[f'node_repr_{ir}_mean'].append(norm)
 
             # normalized wrt self.accumulation_steps: https://gist.github.com/thomwolf/ac7a7da6b1888c2eeac8ac8b9b05d3d3?permalink_comment_id=2907818#gistcomment-2907818
             # also https://discuss.pytorch.org/t/accumulate-gradient/129309/4 [look at referecend post aswell]
@@ -1429,10 +1415,11 @@ class Trainer:
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
                     # returns norms; their expected trend is from high to low and stabilize
-                    grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, self.is_master)
-                    if self.is_master:
-                        self.gradnorms.append(grad_norm.item())
-                        self.gradnorms_clip.append(float(max_grad_norm))
+                    if self.max_gradient_norm is not None:
+                        grad_norm, max_grad_norm = gradient_clipping(self.model, self.gradnorms_queue, self.max_gradient_norm, self.is_master)
+                        if self.is_master:
+                            self.gradnorms.append(grad_norm.item())
+                            self.gradnorms_clip.append(float(max_grad_norm))
 
                     self.optim.step()
                     if self.use_ema:
@@ -1506,7 +1493,7 @@ class Trainer:
                 TRAIN:      self._end_of_train_callbacks,
             }
             for callback in _end_of_category_callbacks.get(category, []):
-                    callback(self)
+                callback(self)
 
         self.iepoch += 1
         self.end_of_epoch_log()
@@ -1720,6 +1707,14 @@ class Trainer:
         validation_dataset: Union[InMemoryConcatDataset, LazyLoadingConcatDataset]
     ) -> None: # TODO rename method
 
+        if isinstance(self.train_idcs, str):
+            self.train_idcs = parse_idcs_file(self.train_idcs)
+            self.n_train = dataset.n_observations[self.train_idcs]
+        if isinstance(self.val_idcs, str):
+            self.val_idcs = parse_idcs_file(self.val_idcs)
+            _validation_dataset = validation_dataset if validation_dataset is not None else dataset
+            self.n_valid = _validation_dataset.n_observations[self.val_idcs]
+
         if self.train_idcs is None or self.val_idcs is None:
             # split_dataset to be done before eventual validation_dataset = dataset executed below
             self.train_idcs, self.val_idcs = self.split_dataset(dataset, validation_dataset)
@@ -1728,14 +1723,14 @@ class Trainer:
         if validation_dataset is None:
             validation_dataset = dataset
 
-        # --- initialize n_train and n_val
+        # --- initialize n_train and n_valid
         assert isinstance(self.n_train, (list, int, type(None))), f"n_train must be of type list, int, or None. It is of type {type(self.n_train)}"
         self.n_train = self.n_train if isinstance(self.n_train, list) or self.n_train is None else [self.n_train]
-        assert isinstance(self.n_val, (list, int, type(None))), f"n_val must be of type list, int, or None. It is of type {type(self.n_val)}"
-        self.n_val = self.n_val if isinstance(self.n_val, list) or self.n_val is None else [self.n_val]
+        assert isinstance(self.n_valid, (list, int, type(None))), f"n_valid must be of type list, int, or None. It is of type {type(self.n_valid)}"
+        self.n_valid = self.n_valid if isinstance(self.n_valid, list) or self.n_valid is None else [self.n_valid]
 
         assert len(self.n_train) == len(dataset.n_observations)
-        assert len(self.n_val) == len(validation_dataset.n_observations)
+        assert len(self.n_valid) == len(validation_dataset.n_observations)
 
         def index_dataset(dataset, indices):
             '''
@@ -1775,7 +1770,7 @@ class Trainer:
         if val_dset not provided: 80/20 split of train set is performed
 
         dset.n_observations: list of ints i.e. list of num_of_obs present in npz
-        self.n_val (and self.n_train): list of ints i.e. list of num_of_obs that have to be put in val_dset out of given npz
+        self.n_valid (and self.n_train): list of ints i.e. list of num_of_obs that have to be put in val_dset out of given npz
         '''
 
         val_dset_provided_in_yaml:bool = True if val_dset is not None else False
@@ -1796,17 +1791,17 @@ class Trainer:
 
             if self.n_train: return self.n_train # if already defined, return
             if val_dset_provided_in_yaml: return train_dset.n_observations.tolist() # train can be itself since val is an indipendent dset (i.e. return all idxs of train)
-            # build n_train as "complmement" of n_val: from each_train_npz[i] drop a self.n_val[i]:int observations out of it
-            if self.n_val: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_val)]
+            # build n_train as "complmement" of n_valid: from each_train_npz[i] drop a self.n_valid[i]:int observations out of it
+            if self.n_valid: return [n - val_i for n, val_i in zip(train_dset.n_observations, self.n_valid)]
             return split_80_20(train_dset)
 
         def n_val_obs_for_each_npz():
-            if self.n_val: return self.n_val
+            if self.n_valid: return self.n_valid
             if val_dset_provided_in_yaml: return val_dset.n_observations.tolist() # val can be itself since it is an indipendent dset
             return [n - train_i for n, train_i in zip(train_dset.n_observations, self.n_train)]
 
         self.n_train = list(n_train_obs_for_each_npz())
-        self.n_val   = list(n_val_obs_for_each_npz())
+        self.n_valid   = list(n_val_obs_for_each_npz())
 
         def get_idxs_permuation(n_obs):
             '''
@@ -1821,10 +1816,10 @@ class Trainer:
         val_idcs = []
         if val_dset_provided_in_yaml:
             # sampling observations from val_dset: sample from each npz the amount of obs requested
-            for n_obs, n_val in zip(val_dset.n_observations, self.n_val):
-                if n_val > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_val. n_val: {n_val}, total: {n_obs}")
+            for n_obs, n_valid in zip(val_dset.n_observations, self.n_valid):
+                if n_valid > n_obs: raise ValueError(f"Too little data for validation. Please reduce n_valid. n_valid: {n_valid}, total: {n_obs}")
                 idcs = get_idxs_permuation(n_obs)
-                val_idcs.append(idcs[:n_val])
+                val_idcs.append(idcs[:n_valid])
 
         train_idcs = []
         for _index, (n_obs, n_train) in enumerate(zip(train_dset.n_observations, self.n_train)):
@@ -1835,20 +1830,20 @@ class Trainer:
 
             if not val_dset_provided_in_yaml:
                 # sampling from train_dset also for val_dset
-                assert len(self.n_train) == len(self.n_val)
-                n_val = self.n_val[_index]
-                if (n_train + n_val) > n_obs: raise ValueError(f"too little data for training and validation. please reduce n_train and n_val. n_train: {n_train} n_val: {n_val} total: {n_obs}")
-                val_idcs.append(idcs[n_train: n_train + n_val])
+                assert len(self.n_train) == len(self.n_valid)
+                n_valid = self.n_valid[_index]
+                if (n_train + n_valid) > n_obs: raise ValueError(f"too little data for training and validation. please reduce n_train and n_valid. n_train: {n_train} n_valid: {n_valid} total: {n_obs}")
+                val_idcs.append(idcs[n_train: n_train + n_valid])
 
         return train_idcs, val_idcs
 
     def init_dataloader(
         self,
         config,
-        sampler                 : Sampler | None=None,
-        validation_sampler      : Sampler | None=None,
-        batch_sampler           : Sampler | None=None,
-        batch_validation_sampler: Sampler | None=None,
+        sampler                 : Optional[Sampler]=None,
+        validation_sampler      : Optional[Sampler]=None,
+        batch_sampler           : Optional[Sampler]=None,
+        batch_validation_sampler: Optional[Sampler]=None,
         ):
         # based on recommendations from
         # https://pytorch.org/tutorials/recipes/recipes/tuning_guide.html#enable-async-data-loading-and-augmentation
@@ -1876,13 +1871,10 @@ class Trainer:
             dl_kwargs.update(dict(
                 batch_size=self.batch_size,
                 shuffle=(sampler is None) and self.shuffle,
-                # timeout=0,
             ))
 
         if using_multiple_workers:
             dl_kwargs['prefetch_factor'] = config.get('dloader_prefetch_factor', 2)
-
-        dl_kwargs['graph_fields'] = _GRAPH_FIELDS # needed for ddp
 
         self.dl_train = DataLoader(
             num_workers=train_dloader_n_workers,
@@ -1910,7 +1902,6 @@ class Trainer:
             batch_sampler=batch_validation_sampler,
             **dl_kwargs,
         )
-
 
 class TrainerWandB(Trainer):
     """Trainer class that adds WandB features"""
@@ -1964,10 +1955,10 @@ class DistributedTrainer(Trainer):
     def init_dataloader(
         self,
         config,
-        sampler                 : Sampler | None=None,
-        validation_sampler      : Sampler | None=None,
-        batch_sampler           : Sampler | None=None,
-        batch_validation_sampler: Sampler | None=None,
+        sampler                 : Optional[Sampler]=None,
+        validation_sampler      : Optional[Sampler]=None,
+        batch_sampler           : Optional[Sampler]=None,
+        batch_validation_sampler: Optional[Sampler]=None,
     ):
         dataset_mode = config.get("dataset_mode", "single")
         assert dataset_mode in ["single", "ensemble"], f"Expected 'single' or 'ensemble', got {dataset_mode}"
@@ -2034,3 +2025,8 @@ class DistributedTrainerWandB(TrainerWandB, DistributedTrainer):
         if not self.is_master:
             return
         super().end_of_epoch_log()
+
+
+def reset_loss(trainer: Trainer):
+    trainer.loss.reset_loss()
+    trainer.metrics.reset_loss()

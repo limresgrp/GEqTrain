@@ -1,3 +1,4 @@
+import copy
 import inspect
 from typing import Optional
 from torch.nn import Module
@@ -60,7 +61,7 @@ def parse_model_builders(config) -> Dict[str, Dict[str, str]]:
             _callable = add_suffix(builder, i)
             builders_and_params[_callable] = dict()
 
-    return builders_and_params
+    return copy.deepcopy(builders_and_params)
 
 def flatten_list(nested_list):
     """
@@ -168,8 +169,6 @@ def model_from_config(
 
         # Wrap return of previous builder (every module listed in model_builders - except the first - must require this param)
         if "model" in pnames:
-            if model is None:
-                raise RuntimeError(f"Builder {builder.__name__} asked for the model as an input, but no previous builder has returned a model")
             params["model"] = model
         else:
             if model is not None:

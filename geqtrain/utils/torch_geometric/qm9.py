@@ -7,11 +7,10 @@ import sys
 from typing import Any, List, Optional
 import zipfile
 import numpy as np
-
 import fsspec
 import torch
 from torch import Tensor
-from torch_scatter import scatter
+from geqtrain.utils.pytorch_scatter import scatter_sum
 from tqdm import tqdm
 import urllib
 
@@ -338,7 +337,7 @@ class QM9:
 
             row, col = edge_bond
             hs = (atomic_number == 1).to(torch.float)
-            num_hs = scatter(hs[row], col, dim_size=N, reduce='sum').int()
+            num_hs = scatter_sum(hs[row], col, dim_size=N, reduce='sum').int()
 
             # Create all2all edge_index (including self-loops)
             N = mol.GetNumAtoms()

@@ -178,7 +178,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 torch.nn.init.normal_(lin_layer.weight, mean=0, std=std)
                 if lin_layer.bias is not None:
                     if is_last_layer and bias is not None:
-                        lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
+                        try:
+                            lin_layer.bias.data = torch.tensor(bias).reshape(*lin_layer.bias.data.shape)
+                        except:
+                            # If provided bias does not match, it means that the bias is not meant for this MLP.
+                            # Multiple MLPs can have common kwargs in a module, but only one is the output with the desired shape.
+                            torch.nn.init.zeros_(lin_layer.bias)    
                     else:
                         torch.nn.init.zeros_(lin_layer.bias)
 

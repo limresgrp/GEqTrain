@@ -27,7 +27,8 @@ from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
 
 
 import geqtrain
-from geqtrain.utils import load_callable
+from geqtrain.utils import load_callable, instantiate
+from torch.utils.data import ConcatDataset
 from geqtrain.data import (
     AtomicData,
     AtomicDataDict,
@@ -35,16 +36,10 @@ from geqtrain.data import (
     _EDGE_FIELDS,
     _GRAPH_FIELDS,
     _EXTRA_FIELDS,
+    _FIXED_FIELDS,
 )
 from geqtrain.utils.savenload import atomic_write
 from .AtomicData import _process_dict
-from torch.utils.data import ConcatDataset
-
-from geqtrain.utils import (
-    instantiate,
-    get_w_prefix,
-    Config
-)
 
 
 def fix_batch_dim(arr):
@@ -83,40 +78,41 @@ def parse_attrs(
             elif key in _fixed_fields:
                 val: Optional[np.ndarray] = _fixed_fields[key]
 
-            if options.get('attribute_type', 'categorical') == 'numerical':
-                _input_type = val
-            else:
-                if "embedding_dimensionality" not in options:  # this is not an attribute to parse
-                    continue
-                if val is None:
-                    val = np.array([np.nan])
+            input_val = val
+            attribute_type = options.get('attribute_type', 'categorical')
+            assert attribute_type in ['categorical', 'numerical']
+            embedding_mode = options.get('embedding_mode', 'embedding')
+            assert embedding_mode in ['embedding', 'one_hot']
+            if attribute_type == 'numerical':
+                if input_val is not None:
+                    input_val = input_val.astype(float)
+            elif attribute_type == 'categorical':
+                if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
+                    continue # if 'embedding_mode' is embedding (default) and 'embedding_dimensionality' is missing, this means the field must not be used as input
+                if val is None: val = np.array([np.nan])
                 num_types = int(options['num_types'])
                 can_be_undefined = options.get('can_be_undefined', False)
-                if 'min_value' in options or 'max_value' in options:
-                    mask = np.isnan(val)
-                    if np.any(mask) and not can_be_undefined:
+                mask = np.isnan(val)
+                if np.any(mask):
+                    if not can_be_undefined:
                         raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
-                    val[mask] = float(options['max_value'])
+                    assert num_types + 1 == options.get('actual_num_types')
+                if 'min_value' in options or 'max_value' in options:
                     # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
                     # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
                     # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
                     # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
-                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types)
-                    _input_type = np.digitize(val, bins)
-                    _input_type[_input_type == num_types] -= 1
-                    _input_type[_input_type > 0] -= 1
-                    _input_type[mask] = num_types
-                else:
-                    mask = np.isnan(val)
-                    if np.any(mask) and not can_be_undefined:
-                        raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
-                    _input_type = val.astype(np.int64)
-                    _input_type[mask] = num_types
-                    # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
-            if key in _fields:
-                _fields[key] = torch.from_numpy(_input_type)
-            elif key in _fixed_fields:
-                _fixed_fields[key] = torch.from_numpy(_input_type)
+                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types + 1)
+                    input_val = np.digitize(val, bins) # x < min_value -> 0, x >= max_value -> num_types + 1 (total of num_types + 2 bins)
+                    input_val[input_val == num_types + 1] -= 1 # x>=20 fall together 15<=x<20
+                    input_val[input_val > 0] -= 1 # 0<=x<5 fall together with x<0
+                input_val[mask] = num_types # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
+                input_val = val.astype(np.int64)
+            if input_val is not None: # input_val can be None if it is computed by a submodule and is not present in the dataset
+                if key in _fields:
+                    _fields[key] = torch.from_numpy(input_val)
+                elif key in _fixed_fields:
+                    _fixed_fields[key] = torch.from_numpy(input_val)
 
     return _fields, _fixed_fields
 
@@ -201,7 +197,7 @@ class LazyLoadingConcatDataset(Dataset):
         if not first time loads preprocessed_path/file and instanciates the NpzDataset instead of keeping it in mem
         '''
 
-        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of NpzDataset)
+        # 1) Find dataset_idx to index in _datasets_list (_datasets_list: list of AtomicInMemoryDataset)
         # dataset_idx: index of the npz file that contains the mol requested
         if idx < 0:
             if -idx > len(self):
@@ -209,11 +205,11 @@ class LazyLoadingConcatDataset(Dataset):
             idx = len(self) + idx
         dataset_idx = bisect.bisect_right(self.cumsum, idx)
 
-        # 2) instanciate NpzDataset
+        # 2) instanciate AtomicInMemoryDataset
         instance = self.__getdataset__(dataset_idx)
 
         # 3) index into it: find sample_idx
-        # sample_idx: index of the mol in the npz file, already handled by the NpzDataset.get_example
+        # sample_idx: index of the mol in the npz file, already handled by the AtomicInMemoryDataset.get_example
         if dataset_idx == 0:
             sample_idx = idx
         else:
@@ -359,7 +355,6 @@ class AtomicInMemoryDataset(AtomicDataset):
         self,
         root: str,
         ensemble_index: int,
-        pbc: bool = False,
         file_name: Optional[str] = None,
         url: Optional[str] = None,
         ignore_fields: List = [],
@@ -373,7 +368,6 @@ class AtomicInMemoryDataset(AtomicDataset):
         extra_attributes: Dict = {},
         transforms: Optional[List[Callable]] = None,
     ):
-        self.pbc = pbc
         self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         self.url = getattr(type(self), "URL", url)
 
@@ -470,6 +464,14 @@ class AtomicInMemoryDataset(AtomicDataset):
             if download_path.endswith(".zip"):
                 extract_zip(download_path, self.raw_dir)
 
+    def save_processed(self):
+        """Save the processed data to disk."""
+        with atomic_write(self.processed_paths[0], binary=True) as f:
+            torch.save((self.data, self.fixed_fields, self.include_frames), f)
+        with atomic_write(self.processed_paths[1], binary=False) as f:
+            yaml.dump(self._get_parameters(), f)
+        logging.info(f"Saved filtered processed data to disk at {self.processed_paths[0]}")
+
     def process(self):
         data = self.get_data()
         if len(data) == 5:
@@ -545,7 +547,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                         **{f: v[i] for f, v in graph_fields.items() if v is not None},
                         **{f: v[i] for f, v in extra_fields.items() if v is not None},
                         **fixed_fields,
-                    }, pbc=self.pbc, ignore_fields=self.ignore_fields)
+                    }, ignore_fields=self.ignore_fields)
                 for i in include_frames
             ]
 
@@ -567,21 +569,12 @@ class AtomicInMemoryDataset(AtomicDataset):
         logging.info(f"Loaded data: {data}\n    processed data size: ~{total_MBs:.2f} MB")
         del total_MBs
 
-        # use atomic writes to avoid race conditions between
-        # different trainings that use the same dataset
-        # since those separate trainings should all produce the same results,
-        # it doesn't matter if they overwrite each others cached'
-        # datasets. It only matters that they don't simultaneously try
-        # to write the _same_ file, corrupting it.
-        with atomic_write(self.processed_paths[0], binary=True) as f:
-            torch.save((data, fixed_fields, self.include_frames), f)
-        with atomic_write(self.processed_paths[1], binary=False) as f:
-            yaml.dump(self._get_parameters(), f)
-
-        logging.info("Cached processed data to disk")
-
         self.data = data
         self.fixed_fields = fixed_fields
+
+        # Save the processed data
+        self.save_processed()
+        logging.info("Cached processed data to disk")
 
     def get(self, idx):
         out = self.data.get_example(idx)
@@ -633,7 +626,6 @@ class NpzDataset(AtomicInMemoryDataset):
         self,
         root: str,
         ensemble_index: int,
-        pbc: bool = False,
         key_mapping: Dict[str, str] = {},
         file_name: Optional[str] = None,
         url: Optional[str] = None,
@@ -652,7 +644,6 @@ class NpzDataset(AtomicInMemoryDataset):
 
         try:
             super().__init__(
-                pbc=pbc,
                 file_name=file_name,
                 ensemble_index=ensemble_index,
                 url=url,
@@ -709,6 +700,7 @@ class NpzDataset(AtomicInMemoryDataset):
             or  self.edge_attributes.get(k, {}).get('fixed', False)
             or self.graph_attributes.get(k, {}).get('fixed', False)
             or self.extra_attributes.get(k, {}).get('fixed', False)
+            or k in _FIXED_FIELDS
         }
 
         node_fields = {

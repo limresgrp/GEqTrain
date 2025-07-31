@@ -191,6 +191,28 @@ class Config(object):
     def __contains__(self, key):
         return key in self._items
 
+    def __getstate__(self):
+        """
+        This method is called by pickle to get the object's state.
+        We return a dictionary of all the essential attributes to save.
+        """
+        state = {
+            "_items": self._items,
+            "_item_types": self._item_types,
+            "_allow_list": self._allow_list,
+            "_allow_all": self._allow_all,
+            "filepath": getattr(self, "filepath", None),
+        }
+        return state
+
+    def __setstate__(self, state):
+        """
+        This method is called by pickle to restore the object's state.
+        We take the dictionary from __getstate__ and restore the attributes.
+        """
+        for key, value in state.items():
+            object.__setattr__(self, key, value)
+
     def pop(self, *args):
         return self._items.pop(*args)
 

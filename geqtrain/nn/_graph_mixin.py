@@ -24,6 +24,8 @@ class GraphModuleMixin:
         Explanation of Mixin classes: https://medium.com/@yanxingyang/usage-of-mixin-class-in-python-932b940db80
     """
 
+    _name: str
+
     def _init_irreps(
         self,
         irreps_in: Dict[str, Any] = {},
@@ -46,6 +48,7 @@ class GraphModuleMixin:
             irreps_out (dict): mapping names of fields that are modified/output by
                 this graph module to their irreps.
         """
+        self._name = 'MissingName'
         # Coerce
         irreps_in = {} if irreps_in is None else irreps_in
         irreps_in = AtomicDataDict._fix_irreps_dict(irreps_in)
@@ -82,9 +85,24 @@ class GraphModuleMixin:
                 )
         # Save stuff
         self.irreps_in = irreps_in
+
+        for out_field, out_irreps in irreps_out.items():
+            if isinstance(out_irreps, o3.Irreps):
+                continue
+            elif isinstance(out_irreps, str):
+                try:
+                    out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
+                except ValueError:
+                    assert out_irreps in irreps_in, f"'out_irreps' param is behaving like a key, but '{out_irreps}' is missing from irreps_in"
+                    out_irreps = irreps_in[out_irreps] # othewise we expect it to be key for irreps_in[key]
+            elif out_field in irreps_in:
+                out_irreps = irreps_in[out_field] # outs same irreps of irreps_in[out_field]
+            irreps_out[out_field] = out_irreps
+
         # The output irreps of any graph module are whatever inputs it has, overwritten with whatever outputs it has.
         new_out = irreps_in.copy()
         new_out.update(irreps_out)
+
         self.irreps_out = new_out
 
     def _add_independent_irreps(self, irreps: Dict[str, Any]):
@@ -127,6 +145,13 @@ class GraphModuleMixin:
             )
         return out
 
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
 
 class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
     r"""A ``torch.nn.Sequential`` of ``GraphModuleMixin``s.
@@ -185,9 +210,21 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             if isinstance(module, SequentialGraphNetwork):
                 recursive_flatten(self)
             else:
+                if hasattr(module, 'name'):
+                    module.name = name
                 flat_modules[name] = module
 
         super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version
+
+        # Store key that are computed by the model and must be predicted (e.g. noise for diffusion)
+        self._ref_data_keys = set()
+        for module in self.modules():
+            if hasattr(module, 'ref_data_keys'):
+                self._ref_data_keys.update(module.ref_data_keys)
+
+    @property
+    def ref_data_keys(self):
+        return self._ref_data_keys
 
     @classmethod
     def from_parameters(
@@ -424,3 +461,64 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         for name, module in self.named_children():
             input = module(input)
         return input
+
+    def __repr__(self) -> str:
+        """
+        Provides a detailed, plain-text string representation of the SequentialGraphNetwork
+        that avoids being misinterpreted by code editors.
+        """
+        # Start with the main class name and a clear separator
+        main_str = f"Model: {self.__class__.__name__}\n"
+        main_str += "=" * 40 + "\n\n"
+
+        for name, module in self.named_children():
+            # Module header
+            module_lines = [f"Module '{name}': {module.__class__.__name__}"]
+
+            # 1. Get and format saved arguments
+            args = self._get_module_args(module)
+            if args:
+                module_lines.append("  > Arguments:")
+                for key, value in args.items():
+                    if isinstance(value, dict) and ('irreps' in key or 'irreps_in' in key or 'irreps_out' in key):
+                        value_str = f"dict({len(value)} keys)"
+                    else:
+                        value_str = str(value)
+                    module_lines.append(f"    - {key}: {value_str}")
+
+            # 2. Get and format parameters
+            params = list(module.named_parameters(recurse=False))
+            if params:
+                module_lines.append("  > Parameters:")
+                for p_name, p_tensor in params:
+                    module_lines.append(f"    - {p_name} (shape): {list(p_tensor.shape)}")
+
+            # 3. Get and format buffers
+            buffers = list(module.named_buffers(recurse=False))
+            if buffers:
+                module_lines.append("  > Buffers:")
+                for b_name, b_tensor in buffers:
+                    module_lines.append(f"    - {b_name} (shape): {list(b_tensor.shape)}")
+
+            # Add the formatted lines for this module to the main string with indentation
+            main_str += "\n".join("  " + line for line in module_lines) + "\n\n"
+        
+        main_str += "=" * 40 + "\n"
+        return main_str
+
+    def _get_module_args(self, module: torch.nn.Module) -> dict:
+        """
+        Helper to extract relevant saved arguments from a module for printing.
+        """
+        args = {}
+        # Attributes from GraphModuleMixin
+        if hasattr(module, 'irreps_in'):
+            args['irreps_in'] = module.irreps_in
+        if hasattr(module, 'irreps_out'):
+            args['irreps_out'] = module.irreps_out
+
+        # Find other public attributes that are not modules, tensors, or callables
+        for key, value in vars(module).items():
+            if not key.startswith('_') and key not in args and not isinstance(value, (torch.nn.Module, torch.Tensor, torch.device)) and not callable(value):
+                args[key] = value
+        return args

@@ -1,6 +1,7 @@
 import torch
 from torch.nn import Module, Parameter
-from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_add
+# from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_add
+from geqtrain.utils.pytorch_scatter import scatter_mean, scatter_sum, scatter_max
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.data import AtomicDataDict
 from typing import Optional, List
@@ -54,14 +55,14 @@ class WeightedEnsembleAggregator(GraphModuleMixin, Module):
         weights = self.weight_mlp(features).squeeze(-1)
 
         # Normalize weights within each ensemble
-        normalized_weights = scatter_add(weights, ensemble_indices, dim=0, dim_size=features.size(0))
+        normalized_weights = scatter_sum(weights, ensemble_indices, dim=0, dim_size=features.size(0))
         normalized_weights = weights / normalized_weights[ensemble_indices]
 
         # Apply weights to features
         weighted_features = features * normalized_weights.unsqueeze(-1)
 
         # Use torch_scatter for weighted sum aggregation
-        aggregated_features = scatter_add(weighted_features, ensemble_indices, dim=0)
+        aggregated_features = scatter_sum(weighted_features, ensemble_indices, dim=0)
 
         # Update the data dictionary with the aggregated features
         data[self.out_field] = aggregated_features

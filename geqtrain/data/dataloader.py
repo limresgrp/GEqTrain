@@ -1,11 +1,8 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from typing import List
-from functools import reduce
-
 import torch
-
+from typing import List
 from geqtrain.utils.torch_geometric import Batch, Data
 
 
@@ -19,9 +16,8 @@ class Collater(object):
         exclude_keys: keys to ignore in the input, not copying to the output
     """
 
-    def __init__(self, graph_fields:set, exclude_keys: List[str] = []):
+    def __init__(self, exclude_keys: List[str] = []):
         self._exclude_keys = set(exclude_keys)
-        self.graph_fields=graph_fields
 
     def collate(self, batch: List[Data]) -> Batch:
         """Collate a list of data"""
@@ -31,7 +27,7 @@ class Collater(object):
         for graph in batch:
             batch_ensemble_index.append(graph.ensemble_index)
 
-        batch_graphs = Batch.from_data_list(batch, graph_fields=self.graph_fields, exclude_keys=self._exclude_keys.union(["ensemble_index"]))
+        batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(["ensemble_index"]))
         _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
 
         return batch_graphs
@@ -57,15 +53,10 @@ class DataLoader(torch.utils.data.DataLoader):
         if "collate_fn" in kwargs:
             del kwargs["collate_fn"]
 
-        self.graph_fields = set()
-        if "graph_fields" in kwargs:
-            self.graph_fields = kwargs["graph_fields"]
-            del kwargs["graph_fields"]
-
         super(DataLoader, self).__init__(
             dataset,
             batch_size,
             shuffle,
-            collate_fn=Collater(graph_fields=self.graph_fields, exclude_keys=exclude_keys),
+            collate_fn=Collater(exclude_keys=exclude_keys),
             **kwargs,
         )
