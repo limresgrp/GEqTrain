@@ -23,7 +23,7 @@ After submitting the job, you can check its status using the following commands:
 
 1. **List all jobs for your user**:  
     ```bash  
-    squeue -u $USER  
+    squeue -u $USER
     ```  
 
 2. **Filter jobs by job name**:  
