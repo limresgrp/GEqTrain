@@ -48,6 +48,8 @@ class Loss:
         self._parse_components_from_yaml(components)
 
     def _parse_components_from_yaml(self, components):
+        if components is None:
+            return
         if isinstance(components, str):
             self.register_coeffs_and_loss(key=components, coeff=1.0, func="MSELoss", func_params={})
         elif isinstance(components, list):
