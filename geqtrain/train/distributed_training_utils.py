@@ -13,9 +13,9 @@ def get_distributed_env():
         local_rank = int(os.environ["LOCAL_RANK"])
     except KeyError:
         # fallback to SLURM
-        rank = int(os.environ["SLURM_PROCID"])
-        world_size = int(os.environ["SLURM_NTASKS"])
-        local_rank = int(os.environ["SLURM_LOCALID"])
+        rank = int(os.environ.get("SLURM_PROCID", 0))
+        world_size = int(os.environ.get("SLURM_NTASKS", 1))
+        local_rank = int(os.environ.get("SLURM_LOCALID", 0))
     return rank, world_size, local_rank
 
 def setup_distributed_training():
