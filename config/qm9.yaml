@@ -1,6 +1,6 @@
 # general
 root: results/qm9
-run_name: del.mu
+run_name: mu
 experiment_description: "Mu - 100k train samples. 19.4k valid samples."
 
 seed: 1
@@ -21,16 +21,16 @@ model_builders:
     field: mu
 
 # - general - #
-use_weight_norm: true # Cannot jit compile when using this
+use_weight_norm: false # Cannot jit compile when using this
 strict_irreps: false
 scalar_attnt: false
-use_attention: false
+use_attention: true
 head_dim: 32
 latent_zero_init_last_layer_weights: true
 readout_latent_zero_init_last_layer_weights: true
 
 # - cutoffs - #
-r_max: 7.0
+r_max: 5.0
 
 # - radial basis - #
 edge_radial_attrs_basis: geqtrain.nn.BesselBasisVec
@@ -214,7 +214,7 @@ optimizer_params:
 # max_gradient_norm: 10.
 
 lr_scheduler_name: CosineAnnealingLR
-lr_scheduler_min_lr: 1.e-8
+lr_scheduler_eta_min: 1.e-8
 
 # # lr scheduler, drop lr if no improvement for tot epochs
 # lr_scheduler_name: ReduceLROnPlateau
