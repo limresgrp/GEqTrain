@@ -504,9 +504,6 @@ class Trainer:
         Optimization Step: After the specified number of accumulation steps, the gradients are used to update the model parameters, and the accumulation counter is reset.'''
         self.accumulation_counter = 0  # Counter for gradient accumulation
 
-        if hasattr(self, 'rank'):
-            assert self.device == self.rank
-
         self.torch_device = torch.device(self.device)
 
     def _init_randomness(self):
@@ -518,31 +515,44 @@ class Trainer:
             self.dataset_rng.manual_seed(self.dataset_seed)
 
     def _init_output_paths(self):
-        # --- get I/O handler
-        self.output = Output.get_output(dict(**self._local_kwargs, **self.kwargs))
-
         """Initialize output paths for saving logs and models."""
-        if not hasattr(self, "output"):
-            raise ValueError("Output handler is required for initialization.")
-        self.logfile           = self.output.open_logfile("log", propagate=True)
-        self.epoch_log         = self.output.open_logfile("metrics_epoch.csv", propagate=False)
-        self.init_epoch_log    = self.output.open_logfile("metrics_initialization.csv", propagate=False)
+        
+        # This whole block deals with creating directories and files.
+        # It should only be executed by the master process to avoid race conditions.
+        if self.is_master:
+            self.output = Output.get_output(dict(**self._local_kwargs, **self.kwargs))
+            self.logfile           = self.output.open_logfile("log", propagate=True)
+            self.epoch_log         = self.output.open_logfile("metrics_epoch.csv", propagate=False)
+            self.init_epoch_log    = self.output.open_logfile("metrics_initialization.csv", propagate=False)
 
-        # --- add filenames if not defined
-        self.config_path       = self.output.generate_file("config.yaml")
-        self.best_model_path   = self.output.generate_file("best_model.pth")
-        self.last_model_path   = self.output.generate_file("last_model.pth")
-        self.trainer_save_path = self.output.generate_file("trainer.pth")
+            # --- add filenames if not defined
+            self.config_path       = self.output.generate_file("config.yaml")
+            self.best_model_path   = self.output.generate_file("best_model.pth")
+            self.last_model_path   = self.output.generate_file("last_model.pth")
+            self.trainer_save_path = self.output.generate_file("trainer.pth")
 
-        # logs for weights update and gradient
-        if self.debug:
-            self.log_updates   = self.output.open_logfile("log_updates", propagate=False)
-            self.log_ratio     = self.output.open_logfile("log_ratio", propagate=False)
+            # logs for weights update and gradient
+            if self.debug:
+                self.log_updates   = self.output.open_logfile("log_updates", propagate=False)
+                self.log_ratio     = self.output.open_logfile("log_ratio", propagate=False)
 
-        self.batch_log = {
-            TRAIN:      self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
-            VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
-        }
+            self.batch_log = {
+                TRAIN:      self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+                VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
+            }
+        else:
+            # For non-master ranks, define dummy attributes to prevent AttributeErrors later.
+            self.output = None
+            self.logfile = None
+            self.epoch_log = None
+            self.init_epoch_log = None
+            self.config_path = None
+            self.best_model_path = None
+            self.last_model_path = None
+            self.trainer_save_path = None
+            self.log_updates = None
+            self.log_ratio = None
+            self.batch_log = {TRAIN: None, VALIDATION: None}
 
     def _init_loss(self):
         """Initialize loss functions."""
@@ -777,6 +787,7 @@ class Trainer:
             positional_args=dict(params=optim_groups, lr=self.learning_rate),
             all_args=self.kwargs,
         )
+        self.logger.info(f"Using optimizer: {self.optimizer_name}")
 
     def _init_scheduler(self):
         assert (
@@ -808,6 +819,7 @@ class Trainer:
                 positional_args=dict(optimizer=self.optim),
                 all_args=self.kwargs,
             )
+            self.logger.info(f"Using scheduler: {self.lr_scheduler_name}")
 
     def _init_warmup(self):
         """Parse warmup period from configuration."""
@@ -891,14 +903,23 @@ class Trainer:
 
     @property
     def logger(self):
+        # Return a dummy logger for non-master ranks that does nothing.
+        if not self.is_master:
+            return logging.getLogger("dummy")
         return logging.getLogger(self.logfile)
 
     @property
     def epoch_logger(self):
+        # Return a dummy logger for non-master ranks
+        if not self.is_master:
+            return logging.getLogger("dummy")
         return logging.getLogger(self.epoch_log)
 
     @property
     def init_epoch_logger(self):
+        # Return a dummy logger for non-master ranks
+        if not self.is_master:
+            return logging.getLogger("dummy")
         return logging.getLogger(self.init_epoch_log)
 
     @property
@@ -1177,12 +1198,24 @@ class Trainer:
         self.init_dataloader(config)
         self._init_num_of_optim_steps_per_epoch()
 
+         # This check should only be run if you are debugging DDP
+        if self.is_ddp:
+            logging.info(f"--> [Rank {self.rank}] Dataset initialized. "
+                         f"Train dataset length: {len(self.dataset_train)}, "
+                         f"Train DataLoader length (num batches): {len(self.dl_train)}")
+            logging.info(f"--> [Rank {self.rank}] Validation dataset length: {len(self.dataset_val)}, "
+                         f"Validation DataLoader length (num batches): {len(self.dl_val)}")
+            if self.debug:
+                from geqtrain.train.distributed_training_utils import check_dataloader_split
+                check_dataloader_split(self)
+
     def init_model(self, **kwargs):
         assert "model" in kwargs
         model = kwargs.get("model")
         self._set_model(model=model)
         self._init_model_dependent_objects()
-        self.logger.info(model)
+        if self.is_master:
+            self.logger.info(model)
 
     def _set_model(self, model):
         self.model = model
@@ -1206,6 +1239,9 @@ class Trainer:
         """Training"""
         if getattr(self, "dl_train", None) is None:
             raise RuntimeError("You must call `set_dataset()` before calling `train()`")
+        
+        _rank = self.rank if hasattr(self, 'rank') else 0
+        logging.info(f"--> [Rank {_rank}] Reached the train() method. Beginning training loop...")
 
         for callback in self._initial_callbacks:
             callback(self)
@@ -1409,8 +1445,12 @@ class Trainer:
                 if self.use_grokfast:
                     self.grads = gradfilter_ema(self.model, grads=self.grads)
 
-                # if self.debug:
-                #     self._log_updates()
+                if self.debug:
+                    self._log_updates()
+                    # Check gradients only on the first batch of the first epoch
+                    if self.is_ddp and self.ibatch == 0 and self.iepoch == 0:
+                        from geqtrain.train.distributed_training_utils import check_gradient_synchronization
+                        check_gradient_synchronization(self)
 
                 if self.accumulation_counter == self.accumulation_steps:
                     # grad clipping: avoid "shocks" to the model (params) during optimization;
@@ -1940,10 +1980,23 @@ class TrainerWandB(Trainer):
 class DistributedTrainer(Trainer):
 
     def __init__(self, rank: int, world_size: int, *args, **kwargs):
-        kwargs["device"] = rank
+        import os
+        import torch
+
+        # This logic is portable between SLURM and torchrun.
+        # It checks for torchrun's variables first, then falls back to SLURM's.
+        try:
+            local_rank = int(os.environ["LOCAL_RANK"])
+        except KeyError:
+            local_rank = int(os.environ.get("SLURM_LOCALID", 0))
+
+        # This robustly calculates the correct device index for both environments.
+        device_id = local_rank % torch.cuda.device_count()
+        kwargs["device"] = device_id
+        
         self.rank = rank
         self.world_size = world_size
-        if 'is_master' in kwargs: # to avoid passing it twice to super().__init__
+        if 'is_master' in kwargs:
             kwargs.pop('is_master')
         super().__init__(is_master=rank == 0, *args, **kwargs)
 
@@ -1991,7 +2044,9 @@ class DistributedTrainer(Trainer):
     def _set_model(self, model):
         super()._set_model(model)
         from geqtrain.nn import DDP
-        self.model = DDP(self.model, device_ids=[self.rank]) #, find_unused_parameters=True) # is for debug purposes only, heavy hit on performance
+
+        # It should use the local device id, which is stored in self.torch_device
+        self.model = DDP(self.model, device_ids=[self.torch_device.index]) #, find_unused_parameters=True) # is for debug purposes only, heavy hit on performance
 
     def save_model(self, path, blocking: bool = True):
         with atomic_write(path, blocking=blocking, binary=True) as write_to:
