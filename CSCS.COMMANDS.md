@@ -47,3 +47,24 @@ After submitting the job, you can check its status using the following commands:
     ```bash
     scancel <job_id>
     ```
+
+## UENV Commands
+
+1. **Show all downloadable images from the registry**
+```bash
+uenv image find pytorch@daint
+```
+2. **Pull an image from the registry**
+```bash
+uenv image pull pytorch/v2.6.0:v1
+```
+3. **Show all downloaded and available uenvs**
+```bash
+uenv image ls
+```
+4. **Execute a command in an environments**
+```bash
+uenv run   --view=default pytorch/v2.6.0:v1 -- bash
+uenv start --view=default pytorch/v2.6.0:v1
+```
+These two are equivalent, but with 'run' you can call any command

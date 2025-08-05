@@ -106,8 +106,9 @@ Refer to the article for detailed explanations.
 
 1. Start the container:
     ```bash
-    srun --environment=geqtrain --container-workdir=$PWD --pty bash
+    srun -n4 -N1 --uenv=pytorch/v2.6.0:v1 --view=default ls--pty bash
     ```
+    Run 4MPI Ranks on 1 Node, mounting uenv pytorch/v2.6.0:v1 with default view
 
 2. Verify that PyTorch is installed:
     ```bash
