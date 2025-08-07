@@ -1,9 +1,3 @@
-Of course. It's a great idea to add instructions for distributed training to your `README.md`. This makes the framework much more accessible for users who want to scale up their experiments.
-
-Here is the updated version of your `README.md` file, including the original content and the new sections for `torchrun` and SLURM.
-
------
-
 # GEqTrain
 
 GEqTrain is a framework to dynamically build, train, and deploy E(3)-equivariant graph-based models using PyTorch and e3nn.

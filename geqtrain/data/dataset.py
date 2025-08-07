@@ -518,7 +518,8 @@ class AtomicInMemoryDataset(AtomicDataset):
             num_examples = set([len(x) for x in [val for val in node_fields.values() if val is not None]])
             if not len(num_examples) == 1:
                 err_dict = {f: v.shape for f, v in node_fields.items()}
-                raise ValueError(f"This dataset is invalid: expected all node_fields to have same length (same number of examples), but they had shapes {err_dict}")
+                _dir = self.raw_dir + "/" + self.raw_file_names[0]
+                raise ValueError(f"Dataset {_dir} is invalid: expected all node_fields to have same length (same number of examples), but they had shapes {err_dict}")
             num_examples = next(iter(num_examples))
 
             # Check that the number of frames is consistent for all node and edge fields
