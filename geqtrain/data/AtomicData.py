@@ -389,7 +389,6 @@ class AtomicData(Data):
                 logging.info("A cell was provided, assuming PBC on all dimensions.")
                 pbc = True
             else:
-                # there are no PBC if cell and pbc are not provided
                 pbc = False
 
         if isinstance(pbc, bool):
@@ -397,12 +396,16 @@ class AtomicData(Data):
         else:
             assert len(pbc) == 3
 
+        # Handle numpy masked array for pos
+        if hasattr(pos, 'mask'):
+            pos = pos[~pos.mask].reshape(-1, pos.shape[-1]) if pos.mask.any() else pos
+
         pos = torch.as_tensor(pos, dtype=torch.float32)
 
         # Process '__mask__' arguments in kwargs
         mask_keys = [key for key in kwargs.keys() if key.endswith('__mask__')]
         for mask_key in mask_keys:
-            root_key = mask_key[:-8]  # Remove '__mask__' suffix to get the root key
+            root_key = mask_key[:-8] # Remove '__mask__' suffix to get the root key
             mask = torch.as_tensor(kwargs[mask_key], dtype=torch.bool)
             if root_key in kwargs:
                 kwargs[root_key] = kwargs[root_key][mask]
@@ -410,9 +413,20 @@ class AtomicData(Data):
                 pos = pos[mask]
             else:
                 raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
-            # Remove the '__mask__' key from kwargs
-            del kwargs[mask_key]
+            del kwargs[mask_key] # Remove the '__mask__' key from kwargs
 
+        # Handle numpy masked arrays in kwargs
+        for k in list(kwargs.keys()):
+            v = kwargs[k]
+            if hasattr(v, 'mask'):
+                # v is a numpy masked array
+                valid = ~v.mask
+                if v.ndim > 1:
+                    valid_idx = np.where(valid.any(axis=tuple(range(1, v.ndim))))
+                    kwargs[k] = v[valid_idx]
+                else:
+                    kwargs[k] = v[valid]
+        
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
 

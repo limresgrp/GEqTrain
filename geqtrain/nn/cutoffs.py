@@ -64,7 +64,7 @@ class PolynomialCutoff(torch.nn.Module):
 
 @torch.jit.script
 def _tanh_cutoff(x: torch.Tensor, n: float = 6.0) -> torch.Tensor:
-    return torch.tanh(1 - torch.pow(x, n)) / math.tanh(1)
+    return torch.maximum(torch.zeros_like(x), torch.tanh(1 - torch.pow(x, n)) / math.tanh(1))
 
 @torch.jit.script
 def tanh_cutoff(

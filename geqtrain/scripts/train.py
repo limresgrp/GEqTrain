@@ -84,14 +84,14 @@ def parse_command_line(args=None) -> Tuple[argparse.Namespace, Config]:
 def main(args=None):
     # --- WORKAROUND FOR NCCL P2P ISSUES ON NON-SLURM SYSTEMS ---
     # Check if we are running in a SLURM environment by looking for a SLURM-specific variable.
-    if 'SLURM_JOB_ID' not in os.environ:
+    # if 'SLURM_JOB_ID' not in os.environ:
         # If not in SLURM, we are likely on a local workstation/server that might have
         # driver or IOMMU issues interfering with NCCL's P2P communication.
         # We disable P2P to force a more robust communication path via system memory.
         # This is NOT set for SLURM jobs, allowing them to use the optimal path if the
         # cluster is configured correctly.
-        logging.info("Not in a SLURM environment, setting NCCL_P2P_DISABLE=1 as a workaround for potential hangs.")
-        os.environ['NCCL_P2P_DISABLE'] = '1'
+        # logging.info("Not in a SLURM environment, setting NCCL_P2P_DISABLE=1 as a workaround for potential hangs.")
+        # os.environ['NCCL_P2P_DISABLE'] = '1'
     # --- END WORKAROUND ---
 
     args, config = parse_command_line(args)
