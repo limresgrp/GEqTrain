@@ -169,12 +169,6 @@ def fresh_start(rank: int, world_size: int, config: dict):
         config = Config.from_dict(config)
         _set_global_options(config)
 
-        # Initialize the process group FIRST. Communication is needed for the fix.
-        if config.use_dt:
-            logging.info(f"[Rank {rank}] Setting up distributed training...")
-            setup_distributed_training()
-            logging.info(f"[Rank {rank}] Distributed training setup complete.")
-
         # This will be a fast read operation for everyone.
         logging.info(f"[Rank {rank}] Loading dataset from cache...")
         train_dataset, validation_dataset = instanciate_train_val_dsets(config)
@@ -240,9 +234,6 @@ def restart(rank, world_size, config: dict, progress_config: dict):
         progress_config = Config.from_dict(progress_config)
 
         train_dataset, validation_dataset = instanciate_train_val_dsets(config)
-
-        if config.use_dt:
-            setup_distributed_training()
 
         trainer, model = load_trainer_and_model(rank, world_size, progress_config, is_restart=True)
         trainer.init_dataset(config, train_dataset, validation_dataset)
