@@ -82,6 +82,7 @@ def parse_command_line(args=None) -> Tuple[argparse.Namespace, Config]:
     return args, config
 
 def main(args=None):
+    
     # --- WORKAROUND FOR NCCL P2P ISSUES ON NON-SLURM SYSTEMS ---
     # Check if we are running in a SLURM environment by looking for a SLURM-specific variable.
     # if 'SLURM_JOB_ID' not in os.environ:
@@ -96,38 +97,60 @@ def main(args=None):
 
     args, config = parse_command_line(args)
     set_up_script_logger(config.verbose)
-    found_restart_file = isdir(f"{config.root}/{config.run_name}")
-    if found_restart_file and not (config.append):
-        raise RuntimeError(
-            f"Training instance exists at {config.root}/{config.run_name}; "
-            "either set append to True or use a different root or runname"
-        )
 
-    # Necessary to disable high-speed Peer-to-Peer (P2P) communication (GPUDirect)
-    # Which block
-    os.environ['NCCL_P2P_DISABLE'] = '1'
-    
-    config: Config  # Explicitly annotate the type of `config` to help the linter
-    if found_restart_file:
-        config, progress_config = check_for_config_updates(config)
-        logging.info("--- Restart ---")
+    # --- REFACTORED DDP-SAFE RESTART LOGIC ---
+
+    # 1. Initialize the process group first. Communication is essential for a clean restart.
+    rank = 0
+    world_size = 1
+    if config.use_dt:
+        logging.info(f"[Rank {rank}] Setting up distributed training...")
+        configure_dist_training(args)
+        setup_distributed_training()
+        logging.info(f"[Rank {rank}] Distributed training setup complete.")
+        rank, world_size, _ = get_distributed_env()
+
+    # 2. Only the master process (Rank 0) checks the file system for a restart checkpoint.
+    checkpoint_info = {} # Use a dictionary to hold restart data
+    if rank == 0:
+        found_restart_file = isdir(f"{config.root}/{config.run_name}")
+        if found_restart_file:
+            logging.info(f"[Rank 0] Found restart file at {config.root}/{config.run_name}. Preparing to resume.")
+            # The master loads the updated config and progress from the checkpoint file.
+            updated_config, progress_config = check_for_config_updates(config)
+            checkpoint_info = {
+                "is_restart": True,
+                "config_dict": updated_config.as_dict(),
+                "progress_config_dict": progress_config.as_dict()
+            }
+        else:
+            checkpoint_info = {"is_restart": False}
+
+    # 3. Broadcast the decision and data from Rank 0 to all other processes.
+    if config.use_dt:
+        import torch.distributed as dist
+        # Use a list for broadcast_object_list, which is robust for complex objects
+        broadcast_list = [checkpoint_info]
+        dist.broadcast_object_list(broadcast_list, src=0)
+        checkpoint_info = broadcast_list[0]
+
+    # 4. All processes now act on the synchronized information.
+    if checkpoint_info.get("is_restart", False):
+        # All ranks now have the correct, updated config from the master.
+        logging.info(f"[Rank {rank}] Resuming training from checkpoint.")
+        config = Config(checkpoint_info["config_dict"])
+        progress_config = Config(checkpoint_info["progress_config_dict"])
         func = partial(restart, progress_config=progress_config.as_dict())
     else:
-        if config.get("fine_tune", False):
-            logging.info("--- Fine-Tuning ---")
-        else:
-            logging.info("--- Fresh Start ---")
-        progress_config = None
+        logging.info(f"[Rank {rank}] Starting a fresh training run.")
         func = fresh_start
 
     _set_global_options(config)
 
-    if config.use_dt:
-        configure_dist_training(args)
-        rank, world_size, local_rank = get_distributed_env()
-        func(rank, world_size, config=config.as_dict())
-    else:
-        func(rank=0, world_size=1, config=config.as_dict())
+    # 5. Execute the determined function (fresh_start or restart) on all ranks.
+    # We pass the config dictionary, which is now consistent across all processes.
+    func(rank=rank, world_size=world_size, config=config.as_dict())
+
     return
 
 
