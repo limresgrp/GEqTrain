@@ -10,19 +10,19 @@ from geqtrain.nn import (
 )
 from geqtrain.model._embedding import buildEmbeddingLayers
 
-def HeadlessGraphModel(config:Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
+def GraphModel(config:Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
     layers = buildEmbeddingLayers(config, model)
-    layers.update(buildHeadlessGraphModelLayers())
+    layers.update(buildGraphModelLayers())
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
         layers=layers,
     )
 
-def buildHeadlessGraphModelLayers():
+def buildGraphModelLayers():
     logging.info("--- Building Graph Model ---")
 
     layers = {

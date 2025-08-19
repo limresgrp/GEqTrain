@@ -777,7 +777,7 @@ class Trainer:
         # tag setted at model_from_config execution
         # parse all params with tag freeze and set thier req grad to F
         # check that head has req grad to T
-        # in  - HeadlessGlobalNodeModel: load # {lr, freeze} <- apply tags here, needed to be set
+        # in  - GlobalNodeModel: load # {lr, freeze} <- apply tags here, needed to be set
         # another tag for trunk 1e-6
 
         self.optim, self.optimizer_kwargs = instantiate_from_cls_name(
