@@ -36,7 +36,7 @@ def buildGlobalNodeModelLayers():
             out_irreps=None,
             output_ls=[0],
         )),
-        "local_pooling": (EdgewiseReduce, dict(
+        "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
