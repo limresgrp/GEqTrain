@@ -4,7 +4,7 @@ from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._embedding_attrs import EmbeddingInputAttrs, EmbeddingAttrs
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, BaseEdgeEmbedding
+from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, BaseEdgeEmbedding, BaseEdgeEqEmbedding
 from ._graph import EmbeddingGraphAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
@@ -32,6 +32,7 @@ __all__ = [
     SphericalHarmonicEdgeAngularAttrs,
     BasisEdgeRadialAttrs,
     BaseEdgeEmbedding,
+    BaseEdgeEqEmbedding,
     EmbeddingGraphAttrs,
     EdgewiseReduce,
     InteractionModule,
