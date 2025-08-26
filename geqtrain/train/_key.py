@@ -8,7 +8,7 @@ VALUE_KEY = "value"
 CONTRIB = "contrib"
 
 VALIDATION = "validation"
-TRAIN = "training"
+TRAIN = "train"
 
 ABBREV = {
     AtomicDataDict.NODE_FEATURES_KEY: "h",

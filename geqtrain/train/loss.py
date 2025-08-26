@@ -93,7 +93,7 @@ class Loss:
 
         return loss, contrib
 
-    def reset_loss(self):
+    def reset(self):
         for key in self.keys:
             _loss = self.funcs[key]
             if callable(getattr(_loss, "reset", None)):
@@ -134,79 +134,53 @@ class Loss:
         return f"{key}_{str(suffix_id)}"
 
 
-
 class LossStat:
-    """
-    The class that accumulate the loss function values over all batches
-    for each loss component.
-
-    Args:
-
-    loss_instance: the instance of Loss instancitaed by the trainer
-
-    """
-
-    def __init__(self, loss_instance=None):
-        self.loss_stat = {
-            "total": RunningStats(
-                dim=tuple(), reduction=Reduction.MEAN, ignore_nan=False
-            )
-        }
-        # if the wrapper of the torch.nn does not have the "ignore_nan" field set (i.e. not provided in yaml then it is False)
+    """Accumulates loss values over batches for epoch-level statistics."""
+    def __init__(self, loss_instance: Loss = None):
+        self.loss_stat = {"total": RunningStats(reduction=Reduction.MEAN, dim=tuple())}
         self.ignore_nan = {}
         if loss_instance is not None:
             for key, func in loss_instance.funcs.items():
-                self.ignore_nan[key] = (
-                    func.ignore_nan if hasattr(func, "ignore_nan") else False
-                )
+                self.ignore_nan[key] = getattr(func, "ignore_nan", False)
 
-    def __call__(self, loss, loss_contrib):
-        """
-        Args:
-
-        loss (torch.Tensor): the value of the total loss function for the current batch
-        loss (Dict(torch.Tensor)): the dictionary which contain the loss components
-        """
-
+    def __call__(self, loss: torch.Tensor, loss_contrib: Dict[str, torch.Tensor]):
+        """Update stats with the loss from the current batch and return per-batch values."""
         results = {}
-
+        
+        # Update total loss
         results["loss"] = self.loss_stat["total"].accumulate_batch(loss).item()
 
-        # go through each component
+        # Update each loss component
         for k, v in loss_contrib.items():
-
-            # initialize for the 1st batch
             if k not in self.loss_stat:
+                device = v.device
                 self.loss_stat[k] = RunningStats(
                     dim=tuple(),
                     reduction=Reduction.MEAN,
                     ignore_nan=self.ignore_nan.get(k, False),
                 )
-                device = v.get_device()
-                self.loss_stat[k].to(device="cpu" if device == -1 else device)
-
-            results["loss_" + ABBREV.get(k, k)] = (
-                self.loss_stat[k].accumulate_batch(v).item()
-            )
+                # As in the original, move to the correct device upon initialization
+                self.loss_stat[k].to("cpu" if device == -1 else device)
+            
+            results["loss_" + ABBREV.get(k, k)] = self.loss_stat[k].accumulate_batch(v).item()
+            
         return results
 
     def reset(self):
-        """
-        Reset all the counters to zero
-        """
-
+        """Reset all running statistics."""
         for v in self.loss_stat.values():
             v.reset()
 
     def to(self, device):
+        """Move all running statistics to a specified device."""
         for v in self.loss_stat.values():
             v.to(device=device)
 
     def current_result(self):
+        """Get the current accumulated results for the epoch."""
         results = {
             "loss_" + ABBREV.get(k, k): v.current_result().item()
-            for k, v in self.loss_stat.items()
-            if k != "total"
+            for k, v in self.loss_stat.items() if k != "total"
         }
         results["loss"] = self.loss_stat["total"].current_result().item()
         return results

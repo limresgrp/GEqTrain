@@ -78,7 +78,7 @@ For larger models and datasets, you can train in parallel across multiple GPUs u
 
     ```bash
     # This example will launch 2 processes, one for each visible GPU (0 and 2)
-    torchrun --nproc_per_node=2 geqtrain/script/train.py --ddp path/to/your/config.yaml
+    torchrun --nproc_per_node=2 geqtrain/scripts/train.py --ddp path/to/your/config.yaml
     ```
 
 ### Using SLURM on an HPC Cluster

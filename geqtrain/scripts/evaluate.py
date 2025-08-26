@@ -14,7 +14,7 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.scripts.deploy import load_deployed_model, CONFIG_KEY
 from geqtrain.train import Trainer
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import get_output_keys, run_inference, _init
+from geqtrain.train.trainer_old import get_output_keys, run_inference, _init
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, INVERSE_ATOMIC_NUMBER_MAP
 from geqtrain.utils.auto_init import instantiate

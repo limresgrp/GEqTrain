@@ -1,0 +1,152 @@
+# components/setup.py
+import torch
+import numpy as np
+import logging
+import pytorch_warmup as warmup
+
+from geqtrain.utils import instantiate, instantiate_from_cls_name
+from geqtrain.data import _NODE_FIELDS, _GRAPH_FIELDS, _EDGE_FIELDS
+from geqtrain.train._key import VALIDATION, TRAIN
+from geqtrain.train.loss import Loss, LossStat
+from geqtrain.train.metrics import Metrics
+from geqtrain.train.components.early_stopping import EarlyStopping
+from torch_ema import ExponentialMovingAverage
+
+def set_seed(seed):
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.cuda.manual_seed_all(seed)
+
+def parse_idcs_file(filename):
+    with open(filename, "r") as f:
+        lines = f.readlines()
+    return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
+
+def get_output_keys(loss_func: Loss):
+    output_keys, per_node_outputs_keys = [], []
+    if loss_func is not None:
+        for key in loss_func.keys:
+            key_clean = loss_func.remove_suffix(key)
+            if key_clean in _NODE_FIELDS.union(_GRAPH_FIELDS).union(_EDGE_FIELDS):
+                output_keys.append(key_clean)
+            if key_clean in _NODE_FIELDS:
+                per_node_outputs_keys.append(key_clean)
+    return output_keys, per_node_outputs_keys
+
+def setup_loss(config):
+    loss, _ = instantiate(
+        builder=Loss,
+        prefix="loss",
+        positional_args=dict(components=config.get('loss_coeffs')),
+        all_args=config,
+    )
+    loss_stat = LossStat(loss)
+    return loss, loss_stat
+
+def setup_metrics(config):
+    metrics, _ = instantiate(
+        builder=Metrics,
+        prefix="metrics",
+        positional_args=dict(components=config.get('metrics_components')),
+        all_args=config,
+    )
+    return metrics
+
+def setup_optimizer(model, config):
+    optim, _ = instantiate_from_cls_name(
+        module=torch.optim,
+        class_name=config.get('optimizer_name', 'Adam'),
+        prefix="optimizer",
+        positional_args=dict(params=model.parameters(), lr=config.get('learning_rate', 1e-3)),
+        all_args=config,
+    )
+    return optim
+
+def setup_scheduler(optimizer, config, steps_per_epoch):
+    scheduler_name = config.get('lr_scheduler_name', 'none')
+    if scheduler_name == 'none':
+        return None, None
+
+    # Handle Warmup
+    warmup_scheduler = None
+    warmup_steps = 0
+    warmup_epochs = config.get('warmup_epochs', 0)
+    if warmup_epochs > 0:
+        warmup_steps = warmup_epochs * steps_per_epoch
+        warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_steps)
+
+    # Add specific logic for schedulers that need dynamic parameters
+    if scheduler_name == "CosineAnnealingLR":
+        total_number_of_steps = steps_per_epoch * config.get('max_epochs', 1000)
+        # Account for warmup steps
+        if warmup_epochs > 0:
+            total_number_of_steps -= warmup_steps
+        
+        # Set T_max in the config so it's picked up by the instantiation function
+        config['T_max'] = total_number_of_steps
+        
+        # Set a default for eta_min if not provided
+        if 'eta_min' not in config:
+            config['eta_min'] = config.get('learning_rate', 1e-3) * 1e-2
+        
+        logging.info(f"CosineAnnealingLR scheduler configured with T_max = {config['T_max']}")
+
+    # Main Scheduler Instantiation
+    lr_scheduler, _ = instantiate_from_cls_name(
+        module=torch.optim.lr_scheduler,
+        class_name=scheduler_name,
+        prefix="lr_scheduler",
+        positional_args=dict(optimizer=optimizer),
+        all_args=config,
+    )
+    logging.info(f"Using scheduler: {scheduler_name}")
+    return lr_scheduler, warmup_scheduler
+
+def setup_early_stopping(config):
+    """
+    Initialize early stopping conditions, gathering all `early_stopping_*` arguments
+    from the config, including the new `metric_criteria`.
+    """
+    _, kwargs = instantiate(
+        EarlyStopping,
+        prefix="early_stopping",
+        optional_args=config.get('early_stopping_kwargs', {}),
+        all_args=config,
+        return_args_only=True,
+    )
+
+    # The `instantiate` helper will find `early_stopping_patiences`, 
+    # `early_stopping_criteria`, etc., and put them in kwargs.
+    
+    # Rename 'metric_criteria' to 'criteria' for the constructor
+    if 'metric_criteria' in kwargs:
+        kwargs['criteria'] = kwargs.pop('metric_criteria')
+
+    n_args = 0
+    # Prepend "validation_" to metric keys if they don't have a prefix
+    for arg_name, arg_dict in kwargs.items():
+        if isinstance(arg_dict, dict):
+            new_dict = {}
+            for k, v in arg_dict.items():
+                k_lower = k.lower()
+                if (
+                    k_lower.startswith(VALIDATION)
+                    or k_lower.startswith(TRAIN)
+                    or k_lower in ["lr", "wall", "cumulative_wall"]
+                ):
+                    new_dict[k] = v
+                else:
+                    new_dict[f"{VALIDATION}_{k}"] = v
+            kwargs[arg_name] = new_dict
+            n_args += len(new_dict)
+            
+    return EarlyStopping(**kwargs) if n_args > 0 else None
+
+def setup_ema(model, config):
+    if not config.get('use_ema', False):
+        return None
+    logging.info("Using Exponential Moving Average for model parameters")
+    return ExponentialMovingAverage(model.parameters(), decay=0.999)
