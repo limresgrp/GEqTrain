@@ -78,24 +78,31 @@ class Logger(Callback):
         batch_logger = logging.getLogger(self.trainer.batch_log[batch_type])
         
         mat_str = f"{self.trainer.iepoch+1:5d}, {self.trainer.ibatch+1:5d}"
-        log_str = f"  {self.trainer.iepoch+1:5d} {self.trainer.ibatch+1:5d}"
+        log_str = f" {self.trainer.iepoch+1:8d} {self.trainer.ibatch+1:8d}"
         header = "epoch, batch"
-        log_header = "# Epoch batch"
+        log_header = " " + " ".join([f"{s:>8s}" for s in ["Epoch", "Batch"]])
 
         for name, value in self.trainer.batch_losses.items():
-            mat_str += f", {value:16.5g}"; header += f", {name}"; log_str += f" {value:12.3g}"; log_header += f" {name:>12.12}"
+            mat_str += f", {value:16.5g}"
+            header += f", {name:>12.12}"
+            log_str += f" {value:12.3g}"
+            log_header += f" {name:>12.12}"
 
         metrics = self.trainer.metrics.flatten_metrics(metrics=self.trainer.batch_metrics, metrics_metadata=self.trainer.metrics_metadata)
         for key, value in metrics.items():
-            mat_str += f", {value:16.5g}"; header += f", {key}"; log_str += f" {value:12.3g}"; log_header += f" {key:>12.12}"
+            mat_str += f", {value:16.5g}"
+            header += f", {key:>12.12}"
+            log_str += f" {value:12.3g}"
+            log_header += f" {key:>12.12}"
         
         if self.trainer.ibatch == 0:
-            if (self.trainer.iepoch in [-1, 0]): batch_logger.info(header)
+            batch_logger.info(header)
         batch_logger.info(mat_str)
 
+        if self.trainer.ibatch == 0:
+            logger.info(f"\n### {batch_type}")
+            logger.info(log_header)
         if (self.trainer.ibatch + 1) % self.trainer.log_batch_freq == 0 or (self.trainer.ibatch + 1) == self.trainer.n_batches:
-            if self.trainer.ibatch == 0:
-                logger.info(f"\n{batch_type}"); logger.info(log_header)
             logger.info(log_str)
 
     def _log_epoch(self):
@@ -119,9 +126,13 @@ class Logger(Callback):
             wall = train_wall if category == TRAIN else validation_wall
             header = " ".join([f"{s:>12s}" for s in ["Epoch", "LR", "Wall"]])
             log_str = f"{epoch:12d} {lr:12.3g} {wall:12.3f}"
-            for key in self.trainer.loss_dict[category]: header += f" {key:>12.12}"; log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
+            for key in self.trainer.loss_dict[category]:
+                header += f" {key:>12.12}"
+                log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
             metrics = self.trainer.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
-            for key in metrics: header += f" {key:>12.12}"; log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
+            for key in metrics:
+                header += f" {key:>12.12}"
+                log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
             log_headers_console[category] = header; log_strs_console[category] = log_str
         
         header_to_print = log_headers_console[VALIDATION]
@@ -140,8 +151,6 @@ class Logger(Callback):
         
         csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in self.trainer.mae_dict.values()]
         epoch_logger.info(",".join(csv_values))
-
-# In components/callbacks.py, replace the existing WandbCallback
 
 class WandbCallback(Callback):
     """Handles all logging and initialization for Weights & Biases."""
