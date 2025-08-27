@@ -1,4 +1,5 @@
 # components/setup.py
+from typing import Dict, List
 import torch
 import numpy as np
 import logging
@@ -56,13 +57,76 @@ def setup_metrics(config):
     return metrics
 
 def setup_optimizer(model, config):
+    """
+    Sets up the optimizer, creating parameter groups with custom hyperparameters
+    based on tags assigned to model parameters.
+    """
+    # Get all params that require grad
+    param_dict = {name: param for name, param in model.named_parameters() if param.requires_grad}
+
+    # This dict maps tags to custom optimizer keyword arguments
+    param_groups_dict = {
+        'dampen': {'lr': config.get('learning_rate', 1e-3) * 1.e-2},
+        'nowd':   {'weight_decay': 0.0},
+        '_wd':    {'weight_decay': config.get('head_wds', 0.0)},
+    }
+    if 'fine_tune_lr' in config:
+        param_groups_dict.update({'tune': {'lr': config.get('fine_tune_lr')}})
+
+    # Helper to create a new group template for a parameter
+    def merge_groups(param, tags: list):
+        merged_kwargs = {}
+        for tag in tags:
+            if tag in param_groups_dict:
+                merged_kwargs.update(param_groups_dict[tag])
+        return {'params': [param], **merged_kwargs}
+
+    # Helper to combine parameters into the minimum number of groups to optimize performance
+    def merge_or_create_group(optim_groups: List[Dict], group_to_add: Dict):
+        # Check if a group with the exact same hyperparameters already exists
+        for existing_group in optim_groups:
+            existing_keys = set(existing_group.keys()) - {'params'}
+            new_keys = set(group_to_add.keys()) - {'params'}
+            if existing_keys == new_keys:
+                if all(existing_group[k] == group_to_add[k] for k in existing_keys):
+                    # If so, append the parameter to the existing group
+                    existing_group['params'].extend(group_to_add['params'])
+                    return
+        # Otherwise, create a new group
+        optim_groups.append(group_to_add)
+
+    # Main logic to build the final list of parameter groups
+    optim_groups = []
+    for param in param_dict.values():
+        tags = []
+        # Add any user-defined tags from the model parameter
+        if hasattr(param, 'tags'):
+            tags.extend(param.tags)
+        # Automatically add 'nowd' (no weight decay) for bias and 1D parameters
+        if param.dim() < 2:
+            tags.append('nowd')
+        
+        # Create a group for this parameter
+        group = merge_groups(param, list(set(tags)))
+        # Merge it into the final list
+        merge_or_create_group(optim_groups, group)
+
+    # Instantiate the optimizer with the generated parameter groups
     optim, _ = instantiate_from_cls_name(
         module=torch.optim,
         class_name=config.get('optimizer_name', 'Adam'),
         prefix="optimizer",
-        positional_args=dict(params=model.parameters(), lr=config.get('learning_rate', 1e-3)),
+        positional_args=dict(params=optim_groups, lr=config.get('learning_rate', 1e-3)),
         all_args=config,
     )
+    
+    # Log the parameter groups for debugging and verification
+    logging.info(f"Optimizer {type(optim).__name__} initialized with {len(optim.param_groups)} parameter groups:")
+    for i, group in enumerate(optim.param_groups):
+        group_info = {k: v for k, v in group.items() if k != 'params'}
+        num_params = sum(p.numel() for p in group['params'])
+        logging.info(f"  Group {i}: {group_info}, num_params={num_params}")
+
     return optim
 
 def setup_scheduler(optimizer, config, steps_per_epoch):
