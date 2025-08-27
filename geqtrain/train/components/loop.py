@@ -1,7 +1,8 @@
 # components/loop.py
 import torch
 import contextlib
-from geqtrain.train.components.inference import run_inference
+
+from .inference import run_inference
 from geqtrain.train.grad_clipping_utils import gradient_clipping
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train._key import TRAIN, VALIDATION
@@ -18,15 +19,19 @@ class TrainingLoop:
         self.metrics = trainer.metrics
         self.ema = trainer.ema
         self.dist = trainer.dist
+        self.lr_sched = trainer.lr_sched
+        self.warmup_sched = trainer.warmup_sched
 
     def run_epoch(self, validation_only=False):
         """Runs a full training and validation epoch."""
         if not validation_only:
             self.run_phase(TRAIN)
-        
+
         ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
         with ema_cm:
             self.run_phase(VALIDATION)
+
+        self._lr_sched_step(batch_lvl=False)
 
     def run_phase(self, phase: str):
         """Runs a single phase (training or validation)."""
@@ -34,7 +39,7 @@ class TrainingLoop:
         
         is_train = phase == TRAIN
         dataloader = self.trainer.dl_train if is_train else self.trainer.dl_val
-        self.trainer.n_batches = len(dataloader)  # Set n_batches for the current phase
+        self.trainer.n_batches = len(dataloader)
         self.model.train(is_train)
         
         self.loss_stat.reset()
@@ -56,21 +61,20 @@ class TrainingLoop:
         self.trainer.loss_dict[phase] = self.loss_stat.current_result()
         self.trainer.metrics_dict[phase] = self.metrics.current_result()
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
-    
+
     def _run_batch(self, data, is_train: bool):
         """Runs a single batch with all original logic."""
         already_computed_nodes = None
-        
         while True:
-            cm = contextlib.nullcontext() if is_train else torch.no_grad()
+            # Conditionally apply `torch.no_grad()` during validation.
+            # It will be skipped if `model_requires_grads` is true in the config.
+            use_no_grad = (not is_train) and (not self.trainer.config.get('model_requires_grads', False))
+            cm = torch.no_grad() if use_no_grad else contextlib.nullcontext()
             with cm:
                 out, ref_data, batch_chunk_center_nodes, _ = run_inference(
                     model=self.model, data=data, device=self.dist.device,
-                    output_keys=self.trainer.output_keys,
-                    per_node_outputs_keys=self.trainer.per_node_outputs_keys,
-                    already_computed_nodes=already_computed_nodes,
-                    config=self.trainer.config,
-                    chunking=self.trainer.chunking,
+                    output_keys=self.trainer.output_keys, per_node_outputs_keys=self.trainer.per_node_outputs_keys,
+                    already_computed_nodes=already_computed_nodes, config=self.trainer.config,
                 )
                 loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
@@ -97,13 +101,15 @@ class TrainingLoop:
                     self.optim.step()
                     if self.ema:
                         self.ema.update()
+                    
+                    self._lr_sched_step(batch_lvl=True)
                     self.optim.zero_grad(set_to_none=True)
                     self.trainer.accumulation_counter = 0
 
             # --- Update and Sync Metrics/Losses ---
             syncd_loss = self.dist.sync_tensor(loss.detach())
             syncd_loss_contrib = self.dist.sync_dict_of_tensors(loss_contrib)
-            
+
             # Call loss_stat and store the result for the logger
             # The call itself updates the epoch-level stats internally.
             batch_losses = self.loss_stat(syncd_loss, syncd_loss_contrib)
@@ -115,10 +121,48 @@ class TrainingLoop:
             
             # --- Evaluate chunking condition ---
             if not self.trainer.chunking:
-                break 
+                break
             
             already_computed_nodes = evaluate_end_chunking_condition(
                 already_computed_nodes, batch_chunk_center_nodes, len(batch_chunk_center_nodes)
             )
             if already_computed_nodes is None:
                 break
+
+    def _lr_sched_step(self, batch_lvl: bool):
+        """Handle LR scheduler steps for both warmup and main phases."""
+        if self.lr_sched is None:
+            return
+
+        if batch_lvl:
+            # Handle warmup for batch-level schedulers
+            if self.warmup_sched and not self._is_warmup_period_over():
+                with self.warmup_sched.dampening():
+                    self.lr_sched.step()
+            else:
+                self._batch_lvl_lrscheduler_step()
+        else: # Epoch level
+            # We only step epoch-level schedulers after the warmup period is over
+            if self._is_warmup_period_over():
+                self._epoch_lvl_lrscheduler_step()
+    
+    def _is_warmup_period_over(self):
+        """Check if the warmup period is finished."""
+        if self.warmup_sched is None:
+            return True
+        warmup_steps = self.warmup_sched.warmup_params[0]["warmup_period"]
+        return self.warmup_sched.last_step >= warmup_steps - 1
+
+    def _batch_lvl_lrscheduler_step(self):
+        """Step schedulers that update on every optimization step."""
+        scheduler_name = self.trainer.config.get('lr_scheduler_name')
+        if scheduler_name in ("CosineAnnealingLR", "CosineAnnealingWarmRestarts"):
+            self.lr_sched.step()
+
+    def _epoch_lvl_lrscheduler_step(self):
+        """Step schedulers that update based on end-of-epoch metrics."""
+        scheduler_name = self.trainer.config.get('lr_scheduler_name')
+        if scheduler_name == "ReduceLROnPlateau":
+            metric = self.trainer.mae_dict.get(self.trainer.metrics_key)
+            if metric is not None:
+                self.lr_sched.step(metrics=metric)
