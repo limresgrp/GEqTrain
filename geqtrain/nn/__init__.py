@@ -18,7 +18,7 @@ from .AdaLN import AdaLN
 from ._norm import Norm
 from ._combine import CombineModule
 from ._ddp import DDP
-from ._grad_output import SetRequireGradsOutput, GradientOutput
+from ._gradient import EnableGradients, ComputeGradient
 from .mace import MACEModule
 
 __all__ = [
@@ -55,8 +55,8 @@ __all__ = [
     Norm,
     CombineModule,
     DDP,
-    SetRequireGradsOutput,
-    GradientOutput,
+    EnableGradients,
+    ComputeGradient,
     GotenInteractionModule,
     MACEModule,
 ]

@@ -5,7 +5,6 @@ import logging
 from time import perf_counter
 import torch
 
-from geqtrain.nn._graph_mixin import GraphModuleMixin
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
 from geqtrain.train.components.splitter import DatasetSplitter
 from geqtrain.utils import Config, Output, load_callable
@@ -20,7 +19,7 @@ from .components.distributed import DistributedManager
 from .components.callbacks import Logger, CheckpointCallback, EarlyStoppingCallback
 from .components.setup import (
     setup_loss, setup_metrics, setup_optimizer, setup_scheduler, setup_ema,
-    parse_idcs_file, get_output_keys, set_seed, setup_early_stopping
+    get_output_keys, set_seed, setup_early_stopping
 )
 from .components.checkpointing import CheckpointHandler
 from .components.loop import TrainingLoop

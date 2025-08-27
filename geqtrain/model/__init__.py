@@ -5,7 +5,7 @@ from ._global_node_model import GlobalNodeModel
 from ._heads import Heads
 from ._scale import PerNodeAttrsScale, PerTypeScale
 from ._combine import Combine
-from ._grads import GradOutput
+from ._gradients import WithGradients
 from ._module import Module
 from ._goten_model import GotenModel
 from ._build import model_from_config
@@ -21,7 +21,7 @@ __all__ = [
     PerTypeScale,
     model_from_config,
     moreGNNLayers,
-    GradOutput,
+    WithGradients,
     Combine,
     Module,
     GotenModel,
