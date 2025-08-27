@@ -70,6 +70,7 @@ class TrainingLoop:
                     per_node_outputs_keys=self.trainer.per_node_outputs_keys,
                     already_computed_nodes=already_computed_nodes,
                     config=self.trainer.config,
+                    chunking=self.trainer.chunking,
                 )
                 loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
@@ -113,7 +114,7 @@ class TrainingLoop:
                 self.trainer.batch_metrics = self.metrics(pred=out, ref=ref_data)
             
             # --- Evaluate chunking condition ---
-            if self.trainer.config.get('skip_chunking', True):
+            if not self.trainer.chunking:
                 break 
             
             already_computed_nodes = evaluate_end_chunking_condition(

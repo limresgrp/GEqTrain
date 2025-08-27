@@ -96,7 +96,7 @@ class Trainer:
             ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
             ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
             ("n_valid", None), ("train_val_split", "random"), ("shuffle", True),
-            ("metrics_metadata", {})
+            ("metrics_metadata", {}), ("chunking", False)
         ]
         for param, default in params_to_extract:
             setattr(self, param, self.config.get(param, default))

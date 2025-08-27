@@ -1,11 +1,10 @@
+import logging
 import contextlib
 from copy import deepcopy
 from typing import List, Optional
-
 import numpy as np
 import torch
-
-from geqtrain.data import AtomicData, AtomicDataDict, _EDGE_FIELDS
+from geqtrain.data import AtomicData, AtomicDataDict, _EDGE_FIELDS, _GRAPH_FIELDS
 
 
 def run_inference(
@@ -17,7 +16,7 @@ def run_inference(
     per_node_outputs_keys: List[str] = [],
     cm=contextlib.nullcontext(),
     mixed_precision: bool = False,
-    skip_chunking: bool = False,
+    chunking: bool = False,
     batch_max_atoms: int = 1000,
     ignore_chunk_keys: List[str] = [],
     dropout_edges: float = 0.,
@@ -25,14 +24,29 @@ def run_inference(
     is_ddp: bool = False,
     **kwargs,
 ):
-    #! IMPO keep torch.bfloat16 for AMP: https://discuss.pytorch.org/t/why-bf16-do-not-need-loss-scaling/176596
-    precision = torch.autocast(device_type='cuda' if torch.cuda.is_available(
-    ) else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
+    # Check if any of the required outputs for the loss are graph-level properties.
+    has_graph_level_loss = any(key in _GRAPH_FIELDS for key in output_keys)
+    
+    # Only use chunking if it's enabled AND there are no graph-level losses.
+    effective_chunking = chunking and not has_graph_level_loss
+
+    if chunking and has_graph_level_loss:
+        # Inform the user that chunking is being temporarily disabled.
+        graph_keys = [k for k in output_keys if k in _GRAPH_FIELDS]
+        logging.warning(
+            f"Chunking was enabled, but a graph-level loss was detected ({graph_keys}). "
+            "Disabling chunking for this batch to ensure correctness."
+        )
+    # =================================================
+
+    precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() 
+                               else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
+    
     batch = AtomicData.to_AtomicDataDict(data.to(device))
     batch_center_nodes = batch[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
     num_batch_center_nodes = len(batch_center_nodes)
 
-    if skip_chunking:
+    if not effective_chunking:
         input_data = {
             k: v.requires_grad_() if requires_grad and torch.is_floating_point(v) else v
             for k, v in batch.items()
@@ -40,6 +54,7 @@ def run_inference(
         }
         ref_data = batch
     else:
+        # This part remains the same, as it's only called when chunking is valid.
         input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
             batch=batch,
             already_computed_nodes=already_computed_nodes,
@@ -56,14 +71,13 @@ def run_inference(
             input_data[f"{slices_key}_slices"] = val
             ref_data  [f"{slices_key}_slices"] = val
 
-    if dropout_edges > 0:
+    if dropout_edges > 0 and model.training:
         apply_dropout_edges(dropout_edges, input_data)
 
     with cm, precision:
         out = model(input_data)
         del input_data
 
-    # If the model has ref_data_keys, update ref_data with the corresponding outputs.
     model_to_check = model.module if is_ddp else model
     if hasattr(model_to_check, 'ref_data_keys'):
         for k in model_to_check.ref_data_keys:
