@@ -117,20 +117,37 @@ class CheckpointHandler:
         logging.info(f"Successfully loaded state. Resuming from epoch {self.trainer.iepoch + 1}.")
 
     def _load_indices_from_run(self, config, traindir):
+        """
+        Load train/validation indices from a previous run's checkpoint and
+        directly update the trainer's state.
+        """
         load_train = config.get('n_train') == 'load'
         load_val = config.get('n_valid') == 'load'
+
         if load_train or load_val:
             original_trainer_path = traindir / "trainer.pth"
             assert isfile(original_trainer_path), f"trainer.pth not found in {traindir}, required for loading dataset indices."
+            
             original_state = load_file(supported_formats=dict(torch=["pt", "pth"]), filename=str(original_trainer_path), enforced_format="torch")
+            
             if load_train:
                 assert 'train_idcs' in original_state, "Key 'train_idcs' not found in the original trainer state."
-                config['train_idcs'] = original_state['train_idcs']
-                config.pop('n_train')
+                
+                # Directly update the trainer's attributes
+                self.trainer.train_idcs = original_state['train_idcs']
+                self.trainer.n_train = [len(t) for t in self.trainer.train_idcs]
+                
+                config.pop('n_train') # Remove the 'load' keyword
                 logging.info("Successfully loaded 'train_idcs' from previous run.")
+            
             if load_val:
                 assert 'val_idcs' in original_state, "Key 'val_idcs' not found in the original trainer state."
-                config['val_idcs'] = original_state['val_idcs']
-                config.pop('n_valid')
+
+                # Directly update the trainer's attributes
+                self.trainer.val_idcs = original_state['val_idcs']
+                self.trainer.n_valid = [len(t) for t in self.trainer.val_idcs]
+                
+                config.pop('n_valid') # Remove the 'load' keyword
                 logging.info("Successfully loaded 'val_idcs' from previous run.")
+                
         return config
