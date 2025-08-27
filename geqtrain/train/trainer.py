@@ -7,6 +7,7 @@ import torch
 
 from geqtrain.nn._graph_mixin import GraphModuleMixin
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
+from geqtrain.train.components.splitter import DatasetSplitter
 from geqtrain.utils import Config, Output, load_callable
 from geqtrain.data import (
     DataLoader, InMemoryConcatDataset, LazyLoadingConcatDataset
@@ -33,7 +34,7 @@ class Trainer:
         model (Grap, optional): An existing model. If None, a model is built from the config.
     """
 
-    def __init__(self, config: dict, model: GraphModuleMixin = None):
+    def __init__(self, config: dict, model: torch.nn.Module = None):
         # 1. Initial Setup
         self.config = Config.from_dict(config) if not isinstance(config, Config) else config
         self.dist = DistributedManager(config=self.config)
@@ -50,8 +51,7 @@ class Trainer:
         # 5. Initialize training state variables
         self._initialize_training_state()
         
-        # 6. Handle fine-tuning by loading an EXTERNAL model and updating the config
-        #    This happens BEFORE the main model and dataset are built.
+        # 6. Handle fine-tuning. This will now directly update self.train_idcs etc.
         if self.config.get('fine_tune'):
             model, self.config = self.checkpoint_handler.load_model_for_resume()
         
@@ -59,12 +59,11 @@ class Trainer:
         self.dataset_train, self.dataset_val = self._load_and_split_datasets()
         self._init_dataloaders()
         
-        # 8. Setup model and training-related objects (optimizer, scheduler, etc.)
+        # 8. Setup model and training-related objects
         self.model = self._setup_model(model)
         self._setup_training_components()
 
         # 9. If restarting, load the state INTO the components we just built.
-        #    This happens AFTER all components are initialized.
         if self.config.get('restart'):
              self.checkpoint_handler.load_for_restart()
         
@@ -96,7 +95,7 @@ class Trainer:
             ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
             ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
             ("n_valid", None), ("train_val_split", "random"), ("shuffle", True),
-            ("metrics_metadata", {}), ("chunking", False)
+            ("metrics_metadata", {}), ("chunking", False),
         ]
         for param, default in params_to_extract:
             setattr(self, param, self.config.get(param, default))
@@ -114,20 +113,32 @@ class Trainer:
         self.gradnorms_queue = Queue()
 
     def _load_and_split_datasets(self):
-        """Load raw datasets and apply train/validation splits."""
+        """Load raw datasets and delegate splitting to the DatasetSplitter component."""
         train_dset, val_dset = instanciate_train_val_dsets(self.config)
         
-        if isinstance(self.train_idcs, str): self.train_idcs = parse_idcs_file(self.train_idcs)
-        if isinstance(self.val_idcs, str): self.val_idcs = parse_idcs_file(self.val_idcs)
+        splitter = DatasetSplitter(self)
+        self.train_idcs, self.val_idcs = splitter.split(train_dset, val_dset)
 
-        if self.train_idcs is None or self.val_idcs is None:
-            self.train_idcs, self.val_idcs = self.split_dataset(train_dset, val_dset)
-
-        final_train_dset = self.index_dataset(train_dset, self.train_idcs)
-        final_val_dset = self.index_dataset(val_dset if val_dset else train_dset, self.val_idcs)
+        final_train_dset = self._index_dataset(train_dset, self.train_idcs)
+        final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, self.val_idcs)
 
         self.logger.info(f"Training data points: {len(final_train_dset)} | Validation data points: {len(final_val_dset)}")
         return final_train_dset, final_val_dset
+    
+    def _index_dataset(self, dataset, indices):
+        """Selects a subset of a ConcatDataset using a list of lists of indices."""
+        indexed_subdatasets = []
+        if not isinstance(indices, list) or not all(isinstance(i, (list, torch.Tensor)) for i in indices):
+            raise TypeError(f"indices must be a list of lists/tensors, but got {type(indices)}")
+        
+        for d, idcs in zip(dataset.datasets, indices):
+            if len(idcs) > 0: indexed_subdatasets.append(d.index_select(idcs))
+        
+        if isinstance(dataset, InMemoryConcatDataset):
+            return InMemoryConcatDataset(indexed_subdatasets)
+        if isinstance(dataset, LazyLoadingConcatDataset):
+            return dataset.from_indexed_dataset(indices)
+        raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")
 
     def _init_dataloaders(self):
         use_ensemble = self.config.get("dataset_mode") == "ensemble"
@@ -163,7 +174,9 @@ class Trainer:
             cb.set_trainer(self)
         return callbacks
 
-    # In trainer.py, replace this method in the Trainer class
+    def _dispatch_callbacks(self, event: str, **kwargs):
+        for cb in self.callbacks:
+            getattr(cb, event)(**kwargs)
 
     def train(self):
         """Main training entry point."""
@@ -177,12 +190,7 @@ class Trainer:
             self._dispatch_callbacks('on_epoch_end')
             self.iepoch += 1
         
-        # All cleanup is handled by the main script's finally block
         self._dispatch_callbacks('on_trainer_end')
-        
-    def _dispatch_callbacks(self, event: str, **kwargs):
-        for cb in self.callbacks:
-            getattr(cb, event)(**kwargs)
 
     @property
     def best_model_path(self):
@@ -195,43 +203,3 @@ class Trainer:
     @property
     def trainer_save_path(self):
         return self.checkpoint_handler.trainer_save_path
-
-    def split_dataset(self, train_dset, val_dset=None):
-        if self.n_train is not None and not isinstance(self.n_train, list): self.n_train = [self.n_train]
-        if self.n_valid is not None and not isinstance(self.n_valid, list): self.n_valid = [self.n_valid]
-        val_dset_provided = val_dset is not None
-        def get_n_train_list():
-            if self.n_train: return self.n_train
-            if val_dset_provided: return train_dset.n_observations.tolist()
-            if self.n_valid: return [n - v for n, v in zip(train_dset.n_observations, self.n_valid)]
-            self.logger.warning("No 'n_train' or 'n_valid' provided; using default 80/20 split.")
-            return (train_dset.n_observations * 0.8).astype(int).tolist()
-        def get_n_valid_list():
-            if self.n_valid: return self.n_valid
-            source_dset = val_dset if val_dset_provided else train_dset
-            if val_dset_provided: return source_dset.n_observations.tolist()
-            return [n - t for n, t in zip(source_dset.n_observations, self.n_train)]
-        self.n_train = get_n_train_list(); self.n_valid = get_n_valid_list()
-        train_idcs, val_idcs = [], []
-        for i, (n_obs, n_t) in enumerate(zip(train_dset.n_observations, self.n_train)):
-            if n_t > n_obs: raise ValueError(f"n_train[{i}]={n_t} is > n_observations[{i}]={n_obs}")
-            permutation = torch.randperm(n_obs, generator=self.dataset_rng)
-            train_idcs.append(permutation[:n_t])
-            if not val_dset_provided:
-                n_v = self.n_valid[i]
-                if n_t + n_v > n_obs: raise ValueError("n_train + n_valid > n_observations")
-                val_idcs.append(permutation[n_t : n_t + n_v])
-        if val_dset_provided:
-            for i, (n_obs, n_v) in enumerate(zip(val_dset.n_observations, self.n_valid)):
-                 if n_v > n_obs: raise ValueError(f"n_valid[{i}]={n_v} is > n_observations[{i}]={n_obs}")
-                 permutation = torch.randperm(n_obs, generator=self.dataset_rng)
-                 val_idcs.append(permutation[:n_v])
-        return train_idcs, val_idcs
-
-    def index_dataset(self, dataset, indices):
-        indexed_subdatasets = []
-        for d, idcs in zip(dataset.datasets, indices):
-            if len(idcs) > 0: indexed_subdatasets.append(d.index_select(idcs))
-        if isinstance(dataset, InMemoryConcatDataset): return InMemoryConcatDataset(indexed_subdatasets)
-        elif isinstance(dataset, LazyLoadingConcatDataset): return dataset.from_indexed_dataset(indices)
-        else: raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")
