@@ -38,7 +38,6 @@ def run_inference(
     dropout_edges = config.get('dropout_edges', 0.0)
     requires_grad = config.get('model_requires_grads', False)
     is_ddp = config.get('ddp', False)
-    print(is_ddp)
 
     # Compute keys on-the-fly
     output_keys, per_node_outputs_keys = get_output_keys(loss_fn)

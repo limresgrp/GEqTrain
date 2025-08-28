@@ -1,3 +1,4 @@
+# geqtrain/utils/_global_options.py
 """ Code adapted from https://github.com/mir-group/nequip
 """
 
