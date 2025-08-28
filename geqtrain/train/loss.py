@@ -154,7 +154,9 @@ class LossStat:
         for v in self.loss_stat.values(): v.reset()
 
     def to(self, device):
-        for v in self.loss_stat.values(): v.to(device=device)
+        for v in self.loss_stat.values():
+            v.to(device=device)
+        return self
 
     def current_result(self):
         results = {"loss_" + ABBREV.get(k, k): v.current_result().item() for k, v in self.loss_stat.items() if k != "total"}
