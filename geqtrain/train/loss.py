@@ -1,51 +1,56 @@
+import importlib
 import re
 from typing import Union, List, Dict
-import torch.nn
+
+import torch
+from geqtrain.train._loss import StatefulMetric
 from geqtrain.train.utils import parse_loss_metrics_dict
-from ._loss import instantiate_loss_function
 from ._key import ABBREV
 
 from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
+from geqtrain.train import LossWrapper
+
+
+def _instantiate_from_path(path: str):
+    """Dynamically imports and returns a class from a full path string."""
+    try:
+        module_path, class_name = path.rsplit('.', 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)
+    except (ImportError, AttributeError, ValueError) as e:
+        raise ImportError(f"Could not import class '{path}'. Reason: {e}")
 
 
 class Loss:
     """
-    assemble loss function based on key(s) and coefficient(s)
-
-    Args:
-        coeffs (dict, str): keys with coefficient and loss function name
-
-    Example input dictionaries
-
-    ```python
-    'total_energy'
-    ['total_energy', 'forces']
-    {'total_energy': 1.0}
-    {'total_energy': (1.0)}
-    {'total_energy': (1.0, 'MSELoss'), 'forces': (1.0, 'L1Loss', param_dict)}
-    {'total_energy': (1.0, user_define_callables), 'force': (1.0, 'L1Loss', param_dict)}
-    {'total_energy': (1.0, 'MSELoss'),
-     'force': (1.0, 'Weighted_L1Loss', param_dict)}
-    ```
-
-    The loss function can be a loss class name that is exactly the same (case sensitive) to the ones defined in torch.nn.
-    It can also be a user define class type that
-        - takes "reduction=none" as init argument
-        - uses prediction tensor and reference tensor for its call functions,
-        - outputs a vector with the same shape as pred/ref
+    A self-contained class that computes the training loss and tracks its statistics.
     """
-
-    def __init__(
-        self,
-        components: Union[str, List[str], List[dict]],
-    ):
-        self.keys: List = [] # loss names
-        self.coeffs: Dict  = {} # coefficients to weight losses
-        self.funcs: Dict = {} # call key-associated (custom) callable defined in _loss.py. Classes in _loss.py acts as wrapper of torch.nn loss func (to provide further options)
-        self.func_params = {}
+    def __init__(self, components: Union[str, List[str], List[dict]]):
+        self.keys: List[str] = []
+        self.coeffs: Dict[str, torch.Tensor] = {}
+        self.funcs: Dict[str, torch.nn.Module] = {}
+        self.func_params: Dict[str, dict] = {}
         self.key_pattern = r"\_\d+"
 
         self._parse_components_from_yaml(components)
+        
+        # The Loss class owns its own statistics tracker.
+        self.loss_stat = LossStat(self)
+
+    def __call__(self, pred: dict, ref: dict, **kwargs):
+        """Computes the total weighted loss and contributions from each component."""
+        total_loss = 0.0
+        contributions = {}
+        for key in self.keys:
+            clean_key = self.remove_suffix(key)
+            try:
+                loss_val = self.funcs[key](pred=pred, ref=ref, key=clean_key, mean=True, **kwargs)
+                contributions[key] = loss_val
+                total_loss += self.coeffs[key].to(loss_val.device) * loss_val
+            except Exception as e:
+                raise RuntimeError(f"Error computing loss for key '{clean_key}': {e}") from e
+
+        return total_loss, contributions
 
     def _parse_components_from_yaml(self, components):
         if components is None:
@@ -60,60 +65,37 @@ class Loss:
                     for key, coeff, func, func_params in parse_loss_metrics_dict(elem):
                         self.register_coeffs_and_loss(key=key, coeff=coeff, func=func, func_params=func_params)
                 else:
-                    raise NotImplementedError(
-                        f"loss_coeffs can only a list of str or dict. got {type(components)}"
-                    )
+                    raise NotImplementedError(f"loss_coeffs can only a list of str or dict. got {type(components)}")
         else:
-            raise NotImplementedError(
-                f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}"
-            )
-
-    def __call__(self, pred: dict, ref: dict, **kwargs):
-        '''
-        returns:
-        total loss for this batch
-        hash map of non-weighted contributions to loss in this batch
-        '''
-        loss = 0.0
-        contrib = {} # hash map of non-weighted contributions to loss in this batch
-        try:
-            for key in self.keys: # for k in "losses-keys" (i.e. the losses names as listed in yaml) that have to be evaluated
-                _loss = self.funcs[key]( # call key-associated (custom) callable defined in _loss.py
-                    pred=pred,
-                    ref=ref,
-                    key=self.remove_suffix(key),
-                    mean=True,
-                    **kwargs,
-                )
-                contrib[key] = _loss
-                loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
-        except:
-            print(f'Error while computing loss for key: {key}')
-            raise
-
-        return loss, contrib
-
-    def reset(self):
-        for key in self.keys:
-            _loss = self.funcs[key]
-            if callable(getattr(_loss, "reset", None)):
-                _loss.reset()
+            raise NotImplementedError(f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}")
 
     def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = {}):
-        '''
-        given the loss-func-name given in yaml, it registers the associated loss-coeff in self.coeffs[key] dict
-        where key is the loss-func-name given in yaml
-        it also stores the associated callable loss function in self.funcs[key]
-
-        Args:
-        func_params: Dict dictionary of kwarded args to be passed
-        '''
         key = self.suffix_key(key)
         self.keys.append(key)
         self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
-        func = instantiate_loss_function(func, func_params)
-        self.funcs[key] = func
-        func_params.update(getattr(func, 'extra_params', {}))
+
+        instance = None
+        # 1. Try to instantiate as a standard torch.nn loss via the wrapper
+        try:
+            # The LossWrapper's __init__ will fail if `func` is not in `torch.nn`
+            instance = LossWrapper(func_name=func, params=func_params)
+        except NameError:
+            # 2. If it's not a torch.nn loss, treat it as a custom one
+            try:
+                from . import _loss
+                # Try loading from our custom _loss.py module first
+                loss_class = getattr(_loss, func)
+            except NameError:
+                # If not found locally, assume it's a full path to a user's class
+                loss_class = _instantiate_from_path(func)
+            
+            # Instantiate the custom class. We assume a constructor that accepts params.
+            instance = loss_class(**func_params)
+
+        if instance is None:
+            raise NotImplementedError(f"Could not instantiate loss/metric function '{func}'")
+
+        self.funcs[key] = instance
         self.func_params[key] = func_params
 
     def suffix_key(self, key):
@@ -133,54 +115,48 @@ class Loss:
             raise AssertionError(f"Loss name must not contain '_[$int]' in name: {key}")
         return f"{key}_{str(suffix_id)}"
 
+    # --- Methods delegated to the internal LossStat ---
+    def reset(self):
+        """Resets all stateful loss functions and the statistics tracker."""
+        self.loss_stat.reset()
+        for key in self.keys:
+            if isinstance(self.funcs[key], StatefulMetric):
+                self.funcs[key].reset()
+
+    def to(self, device):
+        """Moves the statistics tracker to the specified device."""
+        self.loss_stat.to(device)
+
+    def current_result(self) -> Dict[str, float]:
+        """Gets the current accumulated results for the epoch."""
+        return self.loss_stat.current_result()
 
 class LossStat:
-    """Accumulates loss values over batches for epoch-level statistics."""
-    def __init__(self, loss_instance: Loss = None):
+    """Accumulates loss values. Used internally by the Loss class."""
+    def __init__(self, loss_instance: Loss):
         self.loss_stat = {"total": RunningStats(reduction=Reduction.MEAN, dim=tuple())}
-        self.ignore_nan = {}
-        if loss_instance is not None:
-            for key, func in loss_instance.funcs.items():
-                self.ignore_nan[key] = getattr(func, "ignore_nan", False)
+        self.ignore_nan = {key: getattr(func, "ignore_nan", False) for key, func in loss_instance.funcs.items()}
 
     def __call__(self, loss: torch.Tensor, loss_contrib: Dict[str, torch.Tensor]):
-        """Update stats with the loss from the current batch and return per-batch values."""
-        results = {}
-        
-        # Update total loss
-        results["loss"] = self.loss_stat["total"].accumulate_batch(loss).item()
-
-        # Update each loss component
+        """Update stats and return per-batch values."""
+        results = {"loss": self.loss_stat["total"].accumulate_batch(loss).item()}
         for k, v in loss_contrib.items():
             if k not in self.loss_stat:
                 device = v.device
                 self.loss_stat[k] = RunningStats(
-                    dim=tuple(),
-                    reduction=Reduction.MEAN,
-                    ignore_nan=self.ignore_nan.get(k, False),
-                )
-                # As in the original, move to the correct device upon initialization
-                self.loss_stat[k].to("cpu" if device == -1 else device)
+                    dim=tuple(), reduction=Reduction.MEAN, ignore_nan=self.ignore_nan.get(k, False)
+                ).to("cpu" if device == -1 else device)
             
             results["loss_" + ABBREV.get(k, k)] = self.loss_stat[k].accumulate_batch(v).item()
-            
         return results
 
     def reset(self):
-        """Reset all running statistics."""
-        for v in self.loss_stat.values():
-            v.reset()
+        for v in self.loss_stat.values(): v.reset()
 
     def to(self, device):
-        """Move all running statistics to a specified device."""
-        for v in self.loss_stat.values():
-            v.to(device=device)
+        for v in self.loss_stat.values(): v.to(device=device)
 
     def current_result(self):
-        """Get the current accumulated results for the epoch."""
-        results = {
-            "loss_" + ABBREV.get(k, k): v.current_result().item()
-            for k, v in self.loss_stat.items() if k != "total"
-        }
+        results = {"loss_" + ABBREV.get(k, k): v.current_result().item() for k, v in self.loss_stat.items() if k != "total"}
         results["loss"] = self.loss_stat["total"].current_result().item()
         return results

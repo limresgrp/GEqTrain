@@ -8,7 +8,7 @@ from pathlib import Path
 from os.path import isdir
 from geqtrain.utils import Config, load_file, _set_global_options
 from geqtrain.scripts._logger import set_up_script_logger
-from geqtrain.train import Trainer
+from geqtrain.train.trainer import Trainer
 
 
 def parse_command_line(args=None):

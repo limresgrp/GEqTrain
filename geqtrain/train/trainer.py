@@ -12,7 +12,6 @@ from geqtrain.data import (
     DataLoader, InMemoryConcatDataset, LazyLoadingConcatDataset
 )
 from geqtrain.model import model_from_config
-from geqtrain.train.utils import instanciate_train_val_dsets
 
 # Import the new components
 from .components.distributed import DistributedManager
@@ -94,7 +93,7 @@ class Trainer:
             ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
             ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
             ("n_valid", None), ("train_val_split", "random"), ("shuffle", True),
-            ("metrics_metadata", {}), ("chunking", False),
+            ("metrics_metadata", {}),
         ]
         for param, default in params_to_extract:
             setattr(self, param, self.config.get(param, default))
@@ -113,6 +112,7 @@ class Trainer:
 
     def _load_and_split_datasets(self):
         """Load raw datasets and delegate splitting to the DatasetSplitter component."""
+        from geqtrain.train.utils import instanciate_train_val_dsets
         train_dset, val_dset = instanciate_train_val_dsets(self.config)
         
         splitter = DatasetSplitter(self)
@@ -154,7 +154,7 @@ class Trainer:
         return self.dist.wrap_model(model)
 
     def _setup_training_components(self):
-        self.loss, self.loss_stat = setup_loss(self.config)
+        self.loss = setup_loss(self.config)
         self.metrics = setup_metrics(self.config)
         self.optim = setup_optimizer(self.model, self.config)
         self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, len(self.dl_train))

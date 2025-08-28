@@ -15,7 +15,6 @@ class TrainingLoop:
         self.model = trainer.model
         self.optim = trainer.optim
         self.loss_fn = trainer.loss
-        self.loss_stat = trainer.loss_stat
         self.metrics = trainer.metrics
         self.ema = trainer.ema
         self.dist = trainer.dist
@@ -42,9 +41,10 @@ class TrainingLoop:
         self.trainer.n_batches = len(dataloader)
         self.model.train(is_train)
         
-        self.loss_stat.reset()
+        # Reset and move both trackers to the correct device
+        self.loss_fn.reset()
         self.metrics.reset()
-        self.loss_stat.to(self.dist.device)
+        self.loss_fn.to(self.dist.device)
         self.metrics.to(self.dist.device)
         
         if is_train:
@@ -58,7 +58,8 @@ class TrainingLoop:
             self._run_batch(batch, is_train=is_train)
             self.trainer._dispatch_callbacks('on_batch_end')
         
-        self.trainer.loss_dict[phase] = self.loss_stat.current_result()
+        # Get final results from each tracker
+        self.trainer.loss_dict[phase] = self.loss_fn.current_result()
         self.trainer.metrics_dict[phase] = self.metrics.current_result()
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
 
@@ -66,8 +67,6 @@ class TrainingLoop:
         """Runs a single batch with all original logic."""
         already_computed_nodes = None
         while True:
-            # Conditionally apply `torch.no_grad()` during validation.
-            # It will be skipped if `model_requires_grads` is true in the config.
             use_no_grad = (not is_train) and (not self.trainer.config.get('model_requires_grads', False))
             cm = torch.no_grad() if use_no_grad else contextlib.nullcontext()
             with cm:
@@ -106,21 +105,18 @@ class TrainingLoop:
                     self.optim.zero_grad(set_to_none=True)
                     self.trainer.accumulation_counter = 0
 
-            # --- Update and Sync Metrics/Losses ---
             syncd_loss = self.dist.sync_tensor(loss.detach())
             syncd_loss_contrib = self.dist.sync_dict_of_tensors(loss_contrib)
 
-            # Call loss_stat and store the result for the logger
-            # The call itself updates the epoch-level stats internally.
-            batch_losses = self.loss_stat(syncd_loss, syncd_loss_contrib)
+            # The loss object's internal tracker is used to get per-batch results
+            batch_losses = self.loss_fn.loss_stat(syncd_loss, syncd_loss_contrib)
             if self.dist.is_master:
                 self.trainer.batch_losses = batch_losses
             
             with torch.no_grad():
                 self.trainer.batch_metrics = self.metrics(pred=out, ref=ref_data)
             
-            # --- Evaluate chunking condition ---
-            if not self.trainer.chunking:
+            if not self.trainer.config.get('chunking', False):
                 break
             
             already_computed_nodes = evaluate_end_chunking_condition(

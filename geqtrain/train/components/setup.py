@@ -44,8 +44,7 @@ def setup_loss(config):
         positional_args=dict(components=config.get('loss_coeffs')),
         all_args=config,
     )
-    loss_stat = LossStat(loss)
-    return loss, loss_stat
+    return loss
 
 def setup_metrics(config):
     metrics, _ = instantiate(
