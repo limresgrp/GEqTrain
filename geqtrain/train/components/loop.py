@@ -3,7 +3,7 @@ import torch
 import contextlib
 
 from .inference import run_inference
-from geqtrain.train.grad_clipping_utils import gradient_clipping
+from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train._key import TRAIN, VALIDATION
 
@@ -20,6 +20,7 @@ class TrainingLoop:
         self.dist = trainer.dist
         self.lr_sched = trainer.lr_sched
         self.warmup_sched = trainer.warmup_sched
+        self.gradnorms_queue = Queue()
 
     def run_epoch(self, validation_only=False):
         """Runs a full training and validation epoch."""
@@ -30,7 +31,30 @@ class TrainingLoop:
         with ema_cm:
             self.run_phase(VALIDATION)
 
+        # Assemble the master epoch summary dict (`mae_dict`)
+        self._build_epoch_summary()
+
+        # Step the LR scheduler after the epoch summary is built
         self._lr_sched_step(batch_lvl=False)
+
+    def _build_epoch_summary(self):
+        """Assembles the `mae_dict` with all results from the epoch."""
+        epoch = self.trainer.iepoch + 1
+        train_wall = self.trainer.train_wall if epoch > 0 else 0.0
+        
+        self.trainer.mae_dict = {
+            "epoch": epoch, "LR": self.trainer.optim.param_groups[0]["lr"],
+            "train_wall": train_wall, "validation_wall": self.trainer.validation_wall,
+            "cumulative_wall": self.trainer.cumulative_wall,
+        }
+        
+        categories = [TRAIN, VALIDATION] if epoch > 0 else [VALIDATION]
+        for category in categories:
+            for key, value in self.trainer.loss_dict[category].items():
+                self.trainer.mae_dict[f"{category}_{key}"] = value
+            metrics = self.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
+            for key, value in metrics.items():
+                self.trainer.mae_dict[f"{category}_{key}"] = value
 
     def run_phase(self, phase: str):
         """Runs a single phase (training or validation)."""
@@ -67,15 +91,16 @@ class TrainingLoop:
         """Runs a single batch with all original logic."""
         already_computed_nodes = None
         while True:
-            use_no_grad = (not is_train) and (not self.trainer.config.get('model_requires_grads', False))
-            cm = torch.no_grad() if use_no_grad else contextlib.nullcontext()
-            with cm:
-                out, ref_data, batch_chunk_center_nodes, _ = run_inference(
-                    model=self.model, data=data, device=self.dist.device,
-                    output_keys=self.trainer.output_keys, per_node_outputs_keys=self.trainer.per_node_outputs_keys,
-                    already_computed_nodes=already_computed_nodes, config=self.trainer.config,
-                )
-                loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
+            out, ref_data, batch_chunk_center_nodes, _ = run_inference(
+                model=self.model,
+                data=data,
+                device=self.dist.device,
+                loss_fn=self.loss_fn,
+                config=self.trainer.config.as_dict(),
+                already_computed_nodes=already_computed_nodes,
+                is_train=is_train,
+            )
+            loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
             if is_train:
                 accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
@@ -91,7 +116,7 @@ class TrainingLoop:
                     max_grad_norm = self.trainer.config.get('max_gradient_norm')
                     if max_grad_norm is not None:
                         grad_norm, max_grad_norm_val = gradient_clipping(
-                            self.model, self.trainer.gradnorms_queue, max_grad_norm, self.dist.is_master
+                            self.model, self.gradnorms_queue, max_grad_norm, self.dist.is_master
                         )
                         if self.dist.is_master:
                             self.trainer.gradnorms.append(grad_norm.item())

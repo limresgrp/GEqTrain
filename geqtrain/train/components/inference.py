@@ -4,40 +4,53 @@ from copy import deepcopy
 from typing import List, Optional
 import numpy as np
 import torch
-from geqtrain.data import AtomicData, AtomicDataDict, _EDGE_FIELDS, _GRAPH_FIELDS
+from geqtrain.data import AtomicData, AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS
+from geqtrain.train.loss import Loss
 
+def get_output_keys(loss_func: Loss):
+    output_keys, per_node_outputs_keys = [], []
+    if loss_func is not None:
+        for key in loss_func.keys:
+            key_clean = loss_func.remove_suffix(key)
+            if key_clean in _NODE_FIELDS.union(_GRAPH_FIELDS).union(_EDGE_FIELDS):
+                output_keys.append(key_clean)
+            if key_clean in _NODE_FIELDS:
+                per_node_outputs_keys.append(key_clean)
+    return output_keys, per_node_outputs_keys
 
 def run_inference(
     model,
     data,
     device,
+    loss_fn: Loss,
+    config: dict,
     already_computed_nodes=None,
-    output_keys: List[str] = [],
-    per_node_outputs_keys: List[str] = [],
-    cm=contextlib.nullcontext(),
-    mixed_precision: bool = False,
-    chunking: bool = False,
-    batch_max_atoms: int = 1000,
-    ignore_chunk_keys: List[str] = [],
-    dropout_edges: float = 0.,
-    requires_grad: bool = False,
-    is_ddp: bool = False,
-    **kwargs,
+    is_train: bool=False,
 ):
-    # Check if any of the required outputs for the loss are graph-level properties.
+    """
+    Runs inference for a single batch, extracting options from the config object.
+    """
+    # Get options from the config dict, with sensible defaults
+    mixed_precision = config.get('mixed_precision', False)
+    chunking = config.get('chunking', False)
+    batch_max_atoms = config.get('batch_max_atoms', 1000)
+    ignore_chunk_keys = config.get('ignore_chunk_keys', [])
+    dropout_edges = config.get('dropout_edges', 0.0)
+    requires_grad = config.get('model_requires_grads', False)
+    is_ddp = config.get('ddp', False)
+    print(is_ddp)
+
+    # Compute keys on-the-fly
+    output_keys, per_node_outputs_keys = get_output_keys(loss_fn)
     has_graph_level_loss = any(key in _GRAPH_FIELDS for key in output_keys)
-    
-    # Only use chunking if it's enabled AND there are no graph-level losses.
     effective_chunking = chunking and not has_graph_level_loss
 
     if chunking and has_graph_level_loss:
-        # Inform the user that chunking is being temporarily disabled.
         graph_keys = [k for k in output_keys if k in _GRAPH_FIELDS]
         logging.warning(
             f"Chunking was enabled, but a graph-level loss was detected ({graph_keys}). "
-            "Disabling chunking for this batch to ensure correctness."
+            "Disabling chunking for this batch."
         )
-    # =================================================
 
     precision = torch.autocast(device_type='cuda' if torch.cuda.is_available() 
                                else 'cpu', dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
@@ -54,7 +67,6 @@ def run_inference(
         }
         ref_data = batch
     else:
-        # This part remains the same, as it's only called when chunking is valid.
         input_data, ref_data, batch_center_nodes = prepare_chunked_input_data(
             batch=batch,
             already_computed_nodes=already_computed_nodes,
@@ -69,11 +81,13 @@ def run_inference(
         for slices_key, slices in data.__slices__.items():
             val = torch.tensor(slices, dtype=torch.long, device=device)
             input_data[f"{slices_key}_slices"] = val
-            ref_data  [f"{slices_key}_slices"] = val
+            ref_data[f"{slices_key}_slices"] = val
 
     if dropout_edges > 0 and model.training:
         apply_dropout_edges(dropout_edges, input_data)
 
+    use_no_grad = (not is_train) and (not config.get('model_requires_grads', False))
+    cm = torch.no_grad() if use_no_grad else contextlib.nullcontext()
     with cm, precision:
         out = model(input_data)
         del input_data

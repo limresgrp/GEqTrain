@@ -289,6 +289,7 @@ class RunningStats:
         """
         self._state = self._state.to(dtype=dtype, device=device)
         self._n = self._n.to(device=device)
+        return self
 
     def current_result(self) -> torch.Tensor:
         """Get the current value of the running statistic.

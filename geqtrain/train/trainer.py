@@ -1,6 +1,4 @@
 # trainer.py
-
-""" Adapted from https://github.com/mir-group/nequip """
 import logging
 from time import perf_counter
 import torch
@@ -16,10 +14,8 @@ from geqtrain.model import model_from_config
 # Import the new components
 from .components.distributed import DistributedManager
 from .components.callbacks import Logger, CheckpointCallback, EarlyStoppingCallback
-from .components.setup import (
-    setup_loss, setup_metrics, setup_optimizer, setup_scheduler, setup_ema,
-    get_output_keys, set_seed, setup_early_stopping
-)
+from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
+                               setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
 from .components.loop import TrainingLoop
 
@@ -100,7 +96,6 @@ class Trainer:
 
     def _initialize_training_state(self):
         """Initialize counters, flags, and metrics for the training process."""
-        from geqtrain.train.grad_clipping_utils import Queue
         self.iepoch = -1 if self.report_init_validation else 0
         self.best_metrics = float("inf") if self.metric_criteria == 'decreasing' else float('-inf')
         self.best_epoch = 0; self.cumulative_wall = 0
@@ -108,7 +103,6 @@ class Trainer:
         self.train_wall = 0; self.validation_wall = 0; self._phase_start_time = 0
         self.batch_losses, self.batch_metrics, self.loss_dict, self.metrics_dict, self.mae_dict = {}, {}, {}, {}, {}
         self.gradnorms, self.gradnorms_clip = [], []
-        self.gradnorms_queue = Queue()
 
     def _load_and_split_datasets(self):
         """Load raw datasets and delegate splitting to the DatasetSplitter component."""
@@ -160,7 +154,6 @@ class Trainer:
         self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, len(self.dl_train))
         self.ema = setup_ema(self.model, self.config)
         self.early_stopping_conds = setup_early_stopping(self.config)
-        self.output_keys, self.per_node_outputs_keys = get_output_keys(self.loss)
 
     def _setup_callbacks(self):
         callbacks = [Logger(), CheckpointCallback(), EarlyStoppingCallback()]

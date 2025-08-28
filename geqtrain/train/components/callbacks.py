@@ -106,50 +106,48 @@ class Logger(Callback):
             logger.info(log_str)
 
     def _log_epoch(self):
-        epoch = self.trainer.iepoch + 1
-        train_wall = self.trainer.train_wall if epoch > 0 else 0.0
-        validation_wall = self.trainer.validation_wall
-        self.trainer.cumulative_wall += (train_wall + validation_wall)
-        lr = self.trainer.optim.param_groups[0]["lr"]
-
-        self.trainer.mae_dict = {"epoch": epoch, "LR": lr, "train_wall": train_wall, "validation_wall": validation_wall, "cumulative_wall": self.trainer.cumulative_wall}
+        # The mae_dict is pre-assembled by the TrainingLoop.
+        mae_dict = self.trainer.mae_dict
+        epoch = mae_dict["epoch"]
+        
+        # Build console logs for each category separately
+        log_headers_console = {}
+        log_strs_console = {}
         
         categories = [TRAIN, VALIDATION] if epoch > 0 else [VALIDATION]
         for category in categories:
-            for key, value in self.trainer.loss_dict[category].items(): self.trainer.mae_dict[f"{category}_{key}"] = value
-            metrics = self.trainer.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
-            for key, value in metrics.items(): self.trainer.mae_dict[f"{category}_{key}"] = value
-
-        log_headers_console, log_strs_console = {}, {}
-        
-        for category in categories:
-            wall = train_wall if category == TRAIN else validation_wall
+            wall = mae_dict["train_wall"] if category == TRAIN else mae_dict["validation_wall"]
             header = " ".join([f"{s:>12s}" for s in ["Epoch", "LR", "Wall"]])
-            log_str = f"{epoch:12d} {lr:12.3g} {wall:12.3f}"
+            log_str = f"{epoch:12d} {mae_dict['LR']:12.3g} {wall:12.3f}"
+            
             for key in self.trainer.loss_dict[category]:
                 header += f" {key:>12.12}"
-                log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
+                log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
+            
             metrics = self.trainer.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
             for key in metrics:
                 header += f" {key:>12.12}"
-                log_str += f" {self.trainer.mae_dict[f'{category}_{key}']:12.3g}"
-            log_headers_console[category] = header; log_strs_console[category] = log_str
+                log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
+            
+            log_headers_console[category] = header
+            log_strs_console[category] = log_str
         
+        # Print to console
         header_to_print = log_headers_console[VALIDATION]
         self.trainer.logger.info("\n\n#################### " + header_to_print)
-        
         if epoch > 0:
             self.trainer.logger.info("! Train              " + log_strs_console[TRAIN])
             self.trainer.logger.info("! Validation         " + log_strs_console[VALIDATION])
         else:
             self.trainer.logger.info("! Initial Validation " + log_strs_console[VALIDATION])
-        self.trainer.logger.info(f"Cumulative wall time: {self.trainer.cumulative_wall:.4f}s")
+        self.trainer.logger.info(f"Cumulative wall time: {mae_dict['cumulative_wall']:.4f}s")
 
+        # Save to CSV file
         epoch_logger = logging.getLogger(self.trainer.epoch_log)
         if epoch == 1 or (epoch == 0 and len(categories) > 0):
-            epoch_logger.info(",".join(self.trainer.mae_dict.keys()))
+            epoch_logger.info(",".join(mae_dict.keys()))
         
-        csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in self.trainer.mae_dict.values()]
+        csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in mae_dict.values()]
         epoch_logger.info(",".join(csv_values))
 
 class WandbCallback(Callback):

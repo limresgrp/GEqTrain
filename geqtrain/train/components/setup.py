@@ -26,17 +26,6 @@ def parse_idcs_file(filename):
         lines = f.readlines()
     return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
 
-def get_output_keys(loss_func: Loss):
-    output_keys, per_node_outputs_keys = [], []
-    if loss_func is not None:
-        for key in loss_func.keys:
-            key_clean = loss_func.remove_suffix(key)
-            if key_clean in _NODE_FIELDS.union(_GRAPH_FIELDS).union(_EDGE_FIELDS):
-                output_keys.append(key_clean)
-            if key_clean in _NODE_FIELDS:
-                per_node_outputs_keys.append(key_clean)
-    return output_keys, per_node_outputs_keys
-
 def setup_loss(config):
     loss, _ = instantiate(
         builder=Loss,
