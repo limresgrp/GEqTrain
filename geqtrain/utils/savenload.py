@@ -345,20 +345,21 @@ def adjust_format_name(
     return newformat, newname
 
 
-def match_suffix(supported_formats: str, filename: str):
+def match_suffix(supported_formats: dict, filename: str):
     """
     Recognize format based on suffix
 
     Args:
-
         supported_formats (dict): list of supported formats and corresponding suffix
-        filename (str): initial filename
+        filename (str or Path): initial filename
 
     Returns:
-
         format (str): the recognized format
-
     """
+
+    if isinstance(filename, Path):
+        filename = str(filename)
+
     for form, suffs in supported_formats.items():
         if isinstance(suffs, (set, list, tuple)):
             for suff in suffs:
