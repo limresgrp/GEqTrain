@@ -2,15 +2,11 @@
 import logging
 from time import perf_counter
 import torch
-import torch.distributed as dist
 
-from geqtrain.train.utils import instanciate_train_val_dsets
+from geqtrain.data.dataloader import DataLoader
+from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
-from geqtrain.train.components.splitter import DatasetSplitter
 from geqtrain.utils import Config, Output, load_callable
-from geqtrain.data import (
-    DataLoader, InMemoryConcatDataset, LazyLoadingConcatDataset
-)
 from geqtrain.model import model_from_config
 
 # Import the new components
@@ -53,7 +49,7 @@ class Trainer:
             model, self.config = self.checkpoint_handler.load_model_for_resume()
         
         # 7. Setup dataset and dataloaders
-        self.dataset_train, self.dataset_val = self._load_and_split_datasets()
+        self.dataset_train, self.dataset_val = self._build_datasets()
         self._init_dataloaders()
         
         # 8. Setup model and training-related objects
@@ -107,50 +103,12 @@ class Trainer:
         self.batch_losses, self.batch_metrics, self.loss_dict, self.metrics_dict, self.mae_dict = {}, {}, {}, {}, {}
         self.gradnorms, self.gradnorms_clip = [], []
 
-    def _load_and_split_datasets(self):
-        """
-        Loads and splits datasets, with a DDP guard to prevent data processing race conditions.
-        """
-        # In DDP, have workers wait until the master has finished processing the data.
-        # This prevents multiple processes from trying to write the same cache file.
-        # The master process (and single-GPU runs) will execute this and create the cache if needed.
-        if self.dist.is_distributed and self.dist.is_master:
-            train_dset, val_dset = instanciate_train_val_dsets(self.config)
-
-        # When the master is done, it signals to the waiting workers that they can proceed.
-        if self.dist.is_distributed:
-            dist.barrier()
-            if not self.dist.is_master:
-                train_dset, val_dset = instanciate_train_val_dsets(self.config)
-        
-        # Now, all processes can safely proceed. The workers will load the cache the master created.
-        splitter = DatasetSplitter(self)
-        self.train_idcs, self.val_idcs = splitter.split(train_dset, val_dset)
-
-        final_train_dset = self._index_dataset(train_dset, self.train_idcs)
-        final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, self.val_idcs)
-
+    def _build_datasets(self):
+        """Delegate dataset instantiation and preparation to the DatasetBuilder."""
+        builder = DatasetBuilder(self.config, self.dataset_rng, self.logger)
+        final_train_dset, final_val_dset = builder.build_train_val()
         self.logger.info(f"Training data points: {len(final_train_dset)} | Validation data points: {len(final_val_dset)}")
         return final_train_dset, final_val_dset
-    
-    def _index_dataset(self, dataset, indices):
-        """Selects a subset of a ConcatDataset using a list of lists of indices."""
-        indexed_subdatasets = []
-        if not isinstance(indices, list) or not all(isinstance(i, (list, torch.Tensor)) for i in indices):
-            raise TypeError(f"indices must be a list of lists/tensors, but got {type(indices)}")
-        
-        for d, idcs in zip(dataset.datasets, indices):
-            if len(idcs) > 0:
-                if isinstance(dataset, InMemoryConcatDataset):
-                    indexed_subdatasets.append(d.index_select(idcs))
-                elif isinstance(dataset, LazyLoadingConcatDataset):
-                    indexed_subdatasets.append(d[idcs].reshape(-1))
-        
-        if isinstance(dataset, InMemoryConcatDataset):
-            return InMemoryConcatDataset(indexed_subdatasets)
-        if isinstance(dataset, LazyLoadingConcatDataset):
-            return dataset.from_indexed_dataset(indices)
-        raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")
 
     def _init_dataloaders(self):
         use_ensemble = self.config.get("dataset_mode") == "ensemble"

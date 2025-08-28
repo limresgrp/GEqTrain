@@ -1,25 +1,61 @@
-# components/splitter.py
+# geqtrain/train/components/dataset_builder.py
 import torch
+import logging
+from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
+from geqtrain.data._build import dataset_from_config
 from geqtrain.train.components.setup import parse_idcs_file
 
-class DatasetSplitter:
-    """
-    Handles the logic of splitting datasets into training and validation sets
-    based on a hierarchical set of rules.
-    """
-    def __init__(self, trainer):
-        # The splitter needs access to certain trainer states and configs
-        self.config = trainer.config
-        self.logger = trainer.logger
-        self.dataset_rng = trainer.dataset_rng
-        
-        # Initial state from the trainer
-        self.train_idcs = trainer.train_idcs
-        self.val_idcs = trainer.val_idcs
-        self.n_train = trainer.n_train
-        self.n_valid = trainer.n_valid
+class DatasetBuilder:
+    """Handles instantiation, splitting, and indexing of datasets."""
+    def __init__(self, config, dataset_rng, logger=None):
+        self.config = config
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
+        self.dataset_rng = dataset_rng
 
-    def split(self, train_dset, val_dset=None):
+        self.n_train = self.config.get("n_train", None)
+        self.n_valid = self.config.get("n_valid", None)
+        self.n_test = self.config.get("n_test", None)
+
+        self.train_idcs = self.config.get("train_idcs", None)
+        self.val_idcs   = self.config.get("valid_idcs", None)
+        self.test_idcs  = self.config.get("test_idcs", None)
+
+    def build_train_val(self):
+        """Builds and returns the final training and validation datasets."""
+        # 1. Instantiate the raw datasets
+        train_dset = dataset_from_config(self.config, prefix="train")
+        try:
+            val_dset = dataset_from_config(self.config, prefix="validation")
+        except KeyError:
+            val_dset = None
+        
+        # 2. Get the indices
+        train_idcs, val_idcs = self._resolve_train_val_indices(train_dset, val_dset)
+        
+        # 3. Create the final indexed datasets
+        final_train_dset = self._index_dataset(train_dset, train_idcs)
+        final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, val_idcs)
+        return final_train_dset, final_val_dset
+
+    def build_test(self):
+        """Builds and returns the final test dataset."""
+        raw_test_dset = dataset_from_config(self.config, prefix="test")
+        test_idcs_path = self.config.get('test_idcs')
+        
+        if test_idcs_path:
+            indices = [parse_idcs_file(test_idcs_path)]
+        elif self.n_test is not None:
+            total_samples = sum(raw_test_dset.n_observations)
+            if self.n_test > total_samples:
+                self.n_test = total_samples
+            permutation = torch.randperm(total_samples, generator=self.dataset_rng)
+            indices = [permutation[:self.n_test]]
+        else:
+            return raw_test_dset
+            
+        return self._index_dataset(raw_test_dset, indices)
+
+    def _resolve_train_val_indices(self, train_dset, val_dset):
         """
         Robustly determines training and validation indices and updates n_train/n_valid counts.
         """
@@ -165,3 +201,22 @@ class DatasetSplitter:
                  val_idcs.append(permutation[:n_v])
 
         return train_idcs, val_idcs
+    
+    def _index_dataset(self, dataset, indices):
+        """Selects a subset of a ConcatDataset using a list of lists of indices."""
+        indexed_subdatasets = []
+        if not isinstance(indices, list) or not all(isinstance(i, (list, torch.Tensor)) for i in indices):
+            raise TypeError(f"indices must be a list of lists/tensors, but got {type(indices)}")
+        
+        for d, idcs in zip(dataset.datasets, indices):
+            if len(idcs) > 0:
+                if isinstance(dataset, InMemoryConcatDataset):
+                    indexed_subdatasets.append(d.index_select(idcs))
+                elif isinstance(dataset, LazyLoadingConcatDataset):
+                    indexed_subdatasets.append(d[idcs].reshape(-1))
+        
+        if isinstance(dataset, InMemoryConcatDataset):
+            return InMemoryConcatDataset(indexed_subdatasets)
+        if isinstance(dataset, LazyLoadingConcatDataset):
+            return dataset.from_indexed_dataset(indices)
+        raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")

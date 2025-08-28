@@ -6,7 +6,8 @@ import warnings
 import torch
 import e3nn
 
-from geqtrain.data import register_fields
+from geqtrain.data.AtomicData import register_fields
+
 from .auto_init import instantiate
 
 

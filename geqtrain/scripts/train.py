@@ -9,6 +9,7 @@ from os.path import isdir
 from geqtrain.utils import Config, load_file
 from geqtrain.scripts._logger import set_up_script_logger
 from geqtrain.train.trainer import Trainer
+from geqtrain.utils._global_options import _set_global_options
 
 
 def parse_command_line(args=None):
@@ -106,7 +107,7 @@ def main(args=None):
     # 3. Set up environment and global options
     if final_config.get('wandb') and final_config.get('ddp'):
         os.environ["WANDB_START_METHOD"] = "thread"
-    # _set_global_options(final_config)
+    _set_global_options(final_config)
 
     trainer = None
     try:
