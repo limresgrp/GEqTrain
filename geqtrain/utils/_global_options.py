@@ -3,11 +3,8 @@
 """
 
 import warnings
-
 import torch
-
 import e3nn
-import e3nn.util.jit
 
 from geqtrain.data import register_fields
 from .auto_init import instantiate

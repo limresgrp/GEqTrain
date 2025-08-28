@@ -3,10 +3,10 @@ import logging
 from typing import List
 import torch
 from typing import Tuple, Union
-from geqtrain.data import dataset_from_config
+from geqtrain.data.AtomicData import register_fields
+from geqtrain.data._build import dataset_from_config
 from geqtrain.data.dataset import InMemoryConcatDataset, LazyLoadingConcatDataset
 from geqtrain.utils import Config
-from geqtrain.data import register_fields
 from geqtrain.utils.auto_init import instantiate
 
 def parse_loss_metrics_dict(components: dict):
