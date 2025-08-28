@@ -2,7 +2,9 @@
 import logging
 from time import perf_counter
 import torch
+import torch.distributed as dist
 
+from geqtrain.train.utils import instanciate_train_val_dsets
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
 from geqtrain.train.components.splitter import DatasetSplitter
 from geqtrain.utils import Config, Output, load_callable
@@ -106,10 +108,22 @@ class Trainer:
         self.gradnorms, self.gradnorms_clip = [], []
 
     def _load_and_split_datasets(self):
-        """Load raw datasets and delegate splitting to the DatasetSplitter component."""
-        from geqtrain.train.utils import instanciate_train_val_dsets
-        train_dset, val_dset = instanciate_train_val_dsets(self.config)
+        """
+        Loads and splits datasets, with a DDP guard to prevent data processing race conditions.
+        """
+        # In DDP, have workers wait until the master has finished processing the data.
+        # This prevents multiple processes from trying to write the same cache file.
+        # The master process (and single-GPU runs) will execute this and create the cache if needed.
+        if self.dist.is_distributed and self.dist.is_master:
+            train_dset, val_dset = instanciate_train_val_dsets(self.config)
+
+        # When the master is done, it signals to the waiting workers that they can proceed.
+        if self.dist.is_distributed:
+            dist.barrier()
+            if not self.dist.is_master:
+                train_dset, val_dset = instanciate_train_val_dsets(self.config)
         
+        # Now, all processes can safely proceed. The workers will load the cache the master created.
         splitter = DatasetSplitter(self)
         self.train_idcs, self.val_idcs = splitter.split(train_dset, val_dset)
 
@@ -126,7 +140,11 @@ class Trainer:
             raise TypeError(f"indices must be a list of lists/tensors, but got {type(indices)}")
         
         for d, idcs in zip(dataset.datasets, indices):
-            if len(idcs) > 0: indexed_subdatasets.append(d.index_select(idcs))
+            if len(idcs) > 0:
+                if isinstance(dataset, InMemoryConcatDataset):
+                    indexed_subdatasets.append(d.index_select(idcs))
+                elif isinstance(dataset, LazyLoadingConcatDataset):
+                    indexed_subdatasets.append(d[idcs].reshape(-1))
         
         if isinstance(dataset, InMemoryConcatDataset):
             return InMemoryConcatDataset(indexed_subdatasets)

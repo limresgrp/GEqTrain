@@ -254,9 +254,6 @@ def handle_single_dataset_file_name(config,  prefix, class_name, inmemory, key_c
     if inmemory:
         return instance
     else:
-        # For lazy loading, we save the filtered data back to the processed cache
-        # and return the metadata needed to reconstruct it later.
-        instance.save_processed()
         out = {
             file_name_key: dataset_file_name,
             ensemble_index_key: ensemble_index,
