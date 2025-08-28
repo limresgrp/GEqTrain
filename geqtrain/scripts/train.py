@@ -6,7 +6,7 @@ import os
 import torch.distributed as dist
 from pathlib import Path
 from os.path import isdir
-from geqtrain.utils import Config, load_file, _set_global_options
+from geqtrain.utils import Config, load_file
 from geqtrain.scripts._logger import set_up_script_logger
 from geqtrain.train.trainer import Trainer
 
