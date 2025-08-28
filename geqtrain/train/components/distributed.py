@@ -39,6 +39,14 @@ class DistributedManager:
         if self.is_distributed:
             torch.cuda.set_device(self.device)
             dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
+        
+        self.find_unused = config.get('find_unused_parameters', False)
+        if self.find_unused:
+            import logging
+            logging.info(
+                "Initializing DDP with `find_unused_parameters=True`. "
+                "Note: This may slightly slow down training."
+            )
 
     @property
     def is_master(self) -> bool:
@@ -58,7 +66,7 @@ class DistributedManager:
         model.to(self.device)
         if not self.is_distributed:
             return model
-        return DDP(model, device_ids=[self.device.index])
+        return DDP(model, device_ids=[self.device.index], find_unused_parameters=self.find_unused)
 
     def get_sampler(self, dataset, shuffle: bool, use_ensemble: bool) -> Optional[Sampler]:
         if not self.is_distributed:

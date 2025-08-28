@@ -45,8 +45,9 @@ class Trainer:
         # 5. Initialize training state variables
         self._initialize_training_state()
         
-        # 6. Handle fine-tuning. This will now directly update self.train_idcs etc.
-        if self.config.get('fine_tune'):
+        # 6. Handle fine-tuning, but only if it's a new run (not a restart).
+        # A restart takes precedence and will load its own complete state later.
+        if self.config.get('fine_tune') and not self.config.get('restart'):
             model, self.config = self.checkpoint_handler.load_model_for_resume()
         
         # 7. Setup dataset and dataloaders
@@ -142,7 +143,8 @@ class Trainer:
         self.dl_val = DataLoader(dataset=self.dataset_val, batch_size=self.config.get('validation_batch_size'), shuffle=False, sampler=val_sampler, **dl_kwargs)
 
     def _setup_model(self, model):
-        if model is None: model, _ = model_from_config(config=self.config, initialize=True, dataset=self.dataset_train)
+        if model is None:
+            model, _ = model_from_config(config=self.config, initialize=True, dataset=self.dataset_train)
         self.num_weights = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.logger.info(f"Number of trainable weights: {self.num_weights}")
         return self.dist.wrap_model(model)

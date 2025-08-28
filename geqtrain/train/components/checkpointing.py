@@ -7,6 +7,8 @@ import torch
 
 from geqtrain.utils import load_file, save_file, atomic_write
 from geqtrain.model import model_from_config
+from geqtrain.utils.config import Config
+
 
 class CheckpointHandler:
     """Handles saving and loading of trainer and model states."""
@@ -70,32 +72,36 @@ class CheckpointHandler:
         }
 
     def load_model_for_resume(self):
-        """Handles the logic for `fine_tune` ONLY."""
+        """Handles the logic for `fine_tune` by calling the shared static method."""
         config = self.trainer.config
         fine_tune_path_str = config.get("fine_tune")
         
         fine_tune_path = Path(fine_tune_path_str)
         traindir = fine_tune_path.parent if fine_tune_path.is_file() else fine_tune_path
         model_name = fine_tune_path.name if fine_tune_path.is_file() else "last_model.pth"
-        model_pth_path = traindir / model_name
-        logging.info(f"Fine-tuning from {model_pth_path}")
-
-        assert isfile(model_pth_path), f"Model for fine-tuning not found: {model_pth_path}"
         
-        config = self._load_indices_from_run(config, traindir)
-            
-        model, _ = model_from_config(config=config, initialize=False, dataset=None)
-        state_dict = torch.load(model_pth_path, map_location="cpu")
-        model.load_state_dict(state_dict, strict=False)
-        logging.info(f"Successfully loaded model weights from {model_pth_path}")
+        model, updated_config = CheckpointHandler.load_model_from_training_session(
+            traindir=traindir, 
+            model_name=model_name, 
+            device=self.trainer.dist.device,
+        )
         
-        return model, config
+        updated_config = self._load_indices_from_run(updated_config, traindir)
+        return model, updated_config
 
     def load_for_restart(self):
         """Load the entire trainer state from the checkpoint in the current run directory."""
         logging.info("Loading state from checkpoint for restart...")
         
-        state = load_file(supported_formats=dict(torch=["pt", "pth"]), filename=self.trainer_save_path, enforced_format="torch")
+        # Determine the target device for the CURRENT process
+        device = self.trainer.dist.device
+        state = load_file(
+            supported_formats=dict(torch=["pt", "pth"]),
+            filename=self.trainer_save_path,
+            enforced_format="torch",
+            map_location=device,
+            weights_only=False,
+        )
         
         # Load states into the already initialized components
         model_to_load = self.trainer.model.module if self.trainer.dist.is_distributed else self.trainer.model
@@ -128,7 +134,12 @@ class CheckpointHandler:
             original_trainer_path = traindir / "trainer.pth"
             assert isfile(original_trainer_path), f"trainer.pth not found in {traindir}, required for loading dataset indices."
             
-            original_state = load_file(supported_formats=dict(torch=["pt", "pth"]), filename=str(original_trainer_path), enforced_format="torch")
+            original_state = load_file(
+                supported_formats=dict(torch=["pt", "pth"]),
+                filename=str(original_trainer_path),
+                enforced_format="torch",
+                weights_only=False,
+            )
             
             if load_train:
                 assert 'train_idcs' in original_state, "Key 'train_idcs' not found in the original trainer state."
@@ -151,3 +162,23 @@ class CheckpointHandler:
                 logging.info("Successfully loaded 'val_idcs' from previous run.")
                 
         return config
+    
+    @staticmethod
+    def load_model_from_training_session(traindir, model_name="best_model.pth", device="cpu"):
+        """
+        Loads a model and its configuration from a training session directory.
+        This is a static method and can be called without a Trainer instance.
+        """
+        traindir = Path(traindir)
+        config = Config.from_file(traindir / "config.yaml")
+        
+        logging.info("Building model from training config...")
+        model, _ = model_from_config(config=config, initialize=False)
+        
+        logging.info(f"Loading model state dict from {model_name}...")
+        state_dict = torch.load(traindir / model_name, map_location=device)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        
+        return model, config

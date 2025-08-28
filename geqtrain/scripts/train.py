@@ -18,6 +18,7 @@ def parse_command_line(args=None):
     parser.add_argument("--ddp", action="store_true", help="Use torch DistributedDataParallel. Assumes a torchrun launch.")
     parser.add_argument("-ma", "--master-addr", help="MASTER_ADDR for DDP. Defaults to 'localhost'.")
     parser.add_argument("-mp", "--master-port", help="MASTER_PORT for DDP. Defaults to a random free port.")
+    parser.add_argument("-u", "--find-unused-parameters", action="store_true", help="Enable DDP's find_unused_parameters flag. Useful for models with conditional logic.")
 
     args = parser.parse_args(args=args)
     config = Config.from_file(args.config)
@@ -30,69 +31,86 @@ def parse_command_line(args=None):
         config['master_addr'] = args.master_addr
     if args.master_port:
         config['master_port'] = args.master_port
+    if args.find_unused_parameters:
+        config['find_unused_parameters'] = args.find_unused_parameters
         
     return config
 
 def check_for_config_updates(new_config):
     """
-    Load the config from a saved training session and merge in any modifiable
-    parameters from the new config file.
+    Load a saved config, merge new parameters, enforce current runtime settings,
+    and return a clean, final Config object.
     """
     restart_file = f"{new_config['root']}/{new_config['run_name']}/trainer.pth"
-    saved_state = load_file(supported_formats=dict(torch=["pt", "pth"]), filename=restart_file, enforced_format="torch")
+    saved_state = load_file(
+        filename=restart_file,
+        supported_formats=dict(torch=["pt", "pth"]),
+        enforced_format="torch",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    # Start with the dictionary from the saved run
+    final_config_dict = saved_state['config'].as_dict()
+    new_config_dict = new_config.as_dict()
     
-    final_config = saved_state['config']
-    
+    # 1. Update user-modifiable parameters
     modifiable_params = [
         "max_epochs", "learning_rate", "loss_coeffs", "metrics_components",
         "log_batch_freq", "use_ema", "wandb"
     ]
-    
-    logging.info("Checking for updated parameters...")
+    logging.info("Checking for updated user-modifiable parameters...")
     for key in modifiable_params:
-        if key in new_config and new_config[key] != final_config.get(key):
-            logging.info(f'Updating parameter "{key}" from `{final_config.get(key)}` to `{new_config[key]}`')
-            final_config[key] = new_config[key]
+        if key in new_config_dict and new_config_dict[key] != final_config_dict.get(key):
+            logging.info(f'Updating parameter "{key}" from `{final_config_dict.get(key)}` to `{new_config_dict[key]}`')
+            final_config_dict[key] = new_config_dict[key]
+
+    # 2. Enforce critical runtime parameters from the new command
+    # This ensures DDP status, device, etc., are always from the new command.
+    runtime_params = ['ddp', 'device', 'find_unused_parameters']
+    logging.info("Enforcing current runtime parameters...")
+    for key in runtime_params:
+        if key in new_config_dict and new_config_dict[key] is not None:
+            if final_config_dict.get(key) != new_config_dict[key]:
+                 logging.info(f"Overwriting runtime parameter '{key}' with new value '{new_config_dict[key]}'")
+            final_config_dict[key] = new_config_dict[key]
+        else:
+            # If not specified in the new command, remove the old key
+            if key in final_config_dict:
+                logging.info(f"Removing stale runtime parameter '{key}' from loaded config.")
+                final_config_dict.pop(key)
+    
+    # 3. Create a brand new, clean Config object from the final dictionary
+    final_config = Config.from_dict(final_config_dict)
+    final_config.filepath = new_config.filepath
             
     return final_config
 
 def main(args=None):
     """The main entry point for training."""
+    # 1. Parse config from current command line
     config = parse_command_line(args)
-    
-    if config.get('wandb') and config.get('ddp'):
-        os.environ["WANDB_START_METHOD"] = "thread"
-
     set_up_script_logger(config.verbose)
+
+    # 2. Determine if it's a restart and create the final config
+    is_restart = isdir(f"{config.root}/{config.run_name}")
+    if is_restart:
+        logging.info("Found existing run directory, attempting to restart training.")
+        final_config = check_for_config_updates(config)
+        final_config['restart'] = True
+    else:
+        logging.info("Starting a fresh training run.")
+        final_config = config
+        final_config['restart'] = False
     
+    # 3. Set up environment and global options
+    if final_config.get('wandb') and final_config.get('ddp'):
+        os.environ["WANDB_START_METHOD"] = "thread"
+    # _set_global_options(final_config)
+
     trainer = None
     try:
-        if config.get('ddp', False):
-            if 'MASTER_ADDR' not in os.environ: os.environ['MASTER_ADDR'] = config.get('master_addr', 'localhost')
-            if 'MASTER_PORT' not in os.environ:
-                port = config.get('master_port')
-                if port is None:
-                    import socket
-                    from contextlib import closing
-                    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-                        s.bind(('', 0)); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        port = s.getsockname()[1]
-                os.environ['MASTER_PORT'] = str(port)
-                logging.info(f"Using MASTER_ADDR={os.environ['MASTER_ADDR']} and MASTER_PORT={os.environ['MASTER_PORT']}")
-
-        is_restart = isdir(f"{config.root}/{config.run_name}")
-        
-        if is_restart:
-            logging.info("Found existing run directory, attempting to restart training.")
-            final_config = check_for_config_updates(config)
-            final_config['restart'] = True
-        else:
-            logging.info("Starting a fresh training run.")
-            final_config = config
-            final_config['restart'] = False
-            if 'fine_tune' in final_config: logging.info(f"Fine-tuning from: {final_config['fine_tune']}")
-
-        _set_global_options(final_config)
+        # 4. Initialize and run the Trainer
         trainer = Trainer(config=final_config)
         
         if trainer.dist.is_master and not is_restart:
@@ -104,35 +122,34 @@ def main(args=None):
 
     except KeyboardInterrupt:
         logging.warning("Training manually interrupted. Initiating synchronized shutdown.")
+        raise
     
     except Exception as e:
         logging.error("An uncaught error occurred during training:")
         logging.exception(e)
-        # Re-raise the exception to ensure the script exits with a non-zero code,
-        # but only after the `finally` block has run.
+
+        if "find_unused_parameters" in str(e):
+            logging.error(
+                "\n HINT: This error often occurs in DDP when your model has parameters that "
+                "are not used in the forward pass. If this is intentional, "
+                "you can resolve this by adding `find_unused_parameters: true` to your YAML config file "
+                "or calling the training script with option '--find-unused-parameters' ('-u')."
+            )
         raise e
 
     finally:
-        # This unified shutdown sequence runs for normal exit, interrupts, and errors.
+        # 5. Unified shutdown sequence for all exit scenarios
         is_ddp = trainer is not None and trainer.dist.is_distributed and dist.is_initialized()
+        if is_ddp: dist.barrier()
 
-        if is_ddp:
-            # Step 1: All processes wait here. Ensures none rush ahead.
-            dist.barrier()
-
-        # Step 2: Master-rank performs its final exclusive tasks.
         if trainer is not None and trainer.dist.is_master:
             logging.info("Master rank performing final cleanup...")
-            # Cleanly shut down wandb
             if trainer.config.get('wandb'):
                 import wandb
                 if wandb.run is not None:
                     wandb.finish()
 
-        # Step 3: All processes are now free. They will all shut down together.
         if is_ddp:
-            # The barrier isn't strictly necessary here but can prevent race conditions
-            # with the final log messages.
             dist.barrier()
             logging.info(f"Rank {trainer.dist.rank} cleaning up distributed process group.")
             dist.destroy_process_group()
