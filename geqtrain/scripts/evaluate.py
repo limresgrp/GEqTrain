@@ -4,10 +4,8 @@ import argparse
 import torch
 from pathlib import Path
 from tqdm import tqdm
-import time
 from datetime import datetime
 
-from geqtrain.data._build import dataset_from_config
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.utils import Config
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS
@@ -15,7 +13,9 @@ from geqtrain.data import AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIE
 # Import the refactored components
 from geqtrain.train.components.setup import setup_loss, setup_metrics
 from geqtrain.train.components.inference import run_inference
+from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train.components.checkpointing import CheckpointHandler
+from geqtrain.utils._global_options import _set_global_options
 
 
 class Evaluator:
@@ -172,12 +172,17 @@ def main(args=None):
         traindir=args.model.parent, model_name=args.model.name, device=args.device
     )
 
-    # 2. Load Test Dataset Config and create the dataset
+    # 2. Load Test Dataset Config and merge it to original training config
     test_config = Config.from_file(args.dataset_config)
-    config = train_config; config.update(test_config)
+    config = train_config
+    config.update(test_config)
     config['extra_fields_to_log'] = args.extra_fields_to_log
-    dataset = dataset_from_config(config, prefix="test_dataset") # Use "dataset" prefix for eval
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    _set_global_options(config)
+
+    # 2. Create the dataset
+    builder = DatasetBuilder(config, torch.Generator())
+    final_test_dset = builder.build_test()
+    dataloader = DataLoader(final_test_dset, batch_size=args.batch_size, shuffle=False)
 
     # 3. Setup Loss and Metrics
     loss_fn = setup_loss(config) if config.get("loss_coeffs") else None

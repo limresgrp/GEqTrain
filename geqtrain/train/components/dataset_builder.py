@@ -39,44 +39,59 @@ class DatasetBuilder:
 
     def build_test(self):
         """Builds and returns the final test dataset."""
-        raw_test_dset = dataset_from_config(self.config, prefix="test")
-        test_idcs_path = self.config.get('test_idcs')
+        # 1. Instantiate the raw datasets
+        test_dset = dataset_from_config(self.config, prefix="test")
         
-        if test_idcs_path:
-            indices = [parse_idcs_file(test_idcs_path)]
-        elif self.n_test is not None:
-            total_samples = sum(raw_test_dset.n_observations)
-            if self.n_test > total_samples:
-                self.n_test = total_samples
-            permutation = torch.randperm(total_samples, generator=self.dataset_rng)
-            indices = [permutation[:self.n_test]]
+        # 2. Get the indices
+        # --- Step 2.1: Resolve indices from all explicit sources ---
+        if isinstance(self.test_idcs, str):
+            self.logger.info(f"Loading test indices from file: {self.test_idcs}")
+            self.test_idcs = [parse_idcs_file(self.test_idcs)]
+        # --- Step 2.2: Update counts from any resolved indices ---
+        if self.test_idcs is not None:
+            if self.n_test is not None:
+                self.logger.info("test_idcs were provided; the value of test_idcs in the config will be ignored and updated to match the actual indices.")
+            self.n_test = [len(t) for t in self.test_idcs]
+        # --- Step 2.3: Decide the final strategy based on what has been resolved ---
+        if self.test_idcs is not None:
+            self.logger.info("Using fully provided test indices.")
         else:
-            return raw_test_dset
-            
-        return self._index_dataset(raw_test_dset, indices)
+            if self.n_test is not None and not isinstance(self.n_test, list): self.n_test = [self.n_test]
+            test_idcs = []
+            for i, (n_obs, n_t) in enumerate(zip(test_dset.n_observations, self.n_test)):
+                if n_t > n_obs: raise ValueError(f"n_test[{i}]={n_t} is > n_observations[{i}]={n_obs}")
+                permutation = torch.randperm(n_obs, generator=self.dataset_rng)
+                test_idcs.append(permutation[:n_t])
+            self.test_idcs = test_idcs
+        
+        # 3. Create the final indexed datasets
+        final_test_dset = self._index_dataset(test_dset, self.test_idcs)
+        return final_test_dset
 
     def _resolve_train_val_indices(self, train_dset, val_dset):
         """
         Robustly determines training and validation indices and updates n_train/n_valid counts.
         """
         # --- Step 1: Resolve indices from all explicit sources ---
-        # `self.train_idcs` is already populated if `n_train: load` was used
         
         # Check for file paths for any indices not already loaded
-        if self.train_idcs is None and isinstance(self.n_train, str):
-            self.logger.info(f"Loading training indices from file: {self.n_train}")
-            self.train_idcs = [parse_idcs_file(self.n_train)]
+        if isinstance(self.train_idcs, str):
+            self.logger.info(f"Loading training indices from file: {self.train_idcs}")
+            self.train_idcs = [parse_idcs_file(self.train_idcs)]
         
-        if self.val_idcs is None and isinstance(self.n_valid, str):
-            self.logger.info(f"Loading validation indices from file: {self.n_valid}")
-            self.val_idcs = [parse_idcs_file(self.n_valid)]
+        if isinstance(self.val_idcs, str):
+            self.logger.info(f"Loading validation indices from file: {self.val_idcs}")
+            self.val_idcs = [parse_idcs_file(self.val_idcs)]
 
         # --- Step 2: Update counts from any resolved indices ---
-        # This is the key fix to prevent errors with the 'load' string.
         if self.train_idcs is not None:
+            if self.n_train is not None:
+                self.logger.info("train_idcs were provided; the value of n_train in the config will be ignored and updated to match the actual indices.")
             self.n_train = [len(t) for t in self.train_idcs]
         
         if self.val_idcs is not None:
+            if self.n_valid is not None:
+                self.logger.info("n_valid were provided; the value of n_valid in the config will be ignored and updated to match the actual indices.")
             self.n_valid = [len(t) for t in self.val_idcs]
 
         # --- Step 3: Decide the final strategy based on what has been resolved ---

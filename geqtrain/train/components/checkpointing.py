@@ -127,8 +127,8 @@ class CheckpointHandler:
         Load train/validation indices from a previous run's checkpoint and
         directly update the trainer's state.
         """
-        load_train = config.get('n_train') == 'load'
-        load_val = config.get('n_valid') == 'load'
+        load_train = config.get('train_idcs') == 'load'
+        load_val = config.get('val_idcs') == 'load'
 
         if load_train or load_val:
             original_trainer_path = traindir / "trainer.pth"
@@ -148,7 +148,7 @@ class CheckpointHandler:
                 self.trainer.train_idcs = original_state['train_idcs']
                 self.trainer.n_train = [len(t) for t in self.trainer.train_idcs]
                 
-                config.pop('n_train') # Remove the 'load' keyword
+                config.pop('train_idcs') # Remove the 'load' keyword
                 logging.info("Successfully loaded 'train_idcs' from previous run.")
             
             if load_val:
@@ -158,7 +158,7 @@ class CheckpointHandler:
                 self.trainer.val_idcs = original_state['val_idcs']
                 self.trainer.n_valid = [len(t) for t in self.trainer.val_idcs]
                 
-                config.pop('n_valid') # Remove the 'load' keyword
+                config.pop('val_idcs') # Remove the 'load' keyword
                 logging.info("Successfully loaded 'val_idcs' from previous run.")
                 
         return config
@@ -176,7 +176,7 @@ class CheckpointHandler:
         model, _ = model_from_config(config=config, initialize=False)
         
         logging.info(f"Loading model state dict from {model_name}...")
-        state_dict = torch.load(traindir / model_name, map_location=device)
+        state_dict = torch.load(traindir / model_name, map_location=device, weights_only=True)
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
