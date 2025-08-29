@@ -44,6 +44,9 @@ class LossWrapper:
                 pred_key = pred_key[center_nodes_idx]
             if ref_key.shape[0] == num_atoms:
                 ref_key = ref_key[center_nodes_idx]
+        
+        if ref_key.shape != pred_key.shape:
+            ref_key = ref_key.reshape(pred_key.shape)
 
         # 3. Handle NaNs (on the potentially filtered tensors)
         if self.ignore_nan:
@@ -64,7 +67,6 @@ class LossWrapper:
             return loss.mean() if mean else loss
 
     def _prepare_tensors(self, pred: dict, ref: dict, key: str):
-        # ... (this method remains the same)
         pred_key = pred.get(key)
         assert isinstance(pred_key, torch.Tensor), f"Prediction for '{key}' not a tensor."
         ref_key = ref.get(key)
@@ -92,6 +94,8 @@ class RMSDMetric:
             raise Exception("RMSDMetric is intended for evaluation and cannot be used as a training loss.")
         
         pred_key, ref_key = pred[key], ref[key]
+        if ref_key.shape != pred_key.shape:
+            ref_key = ref_key.reshape(pred_key.shape)
         
         # Calculate the element-wise squared error
         squared_error = self.mse(pred_key, ref_key)
