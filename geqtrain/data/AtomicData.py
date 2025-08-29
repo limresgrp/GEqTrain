@@ -194,7 +194,7 @@ def _process_dict(kwargs, ignore_fields):
             v = kwargs[k]
 
         # check if it must be added the batch size, nb: bs always = 1 when reading data
-        if k in set.union(_NODE_FIELDS, _EDGE_FIELDS) and len(v.shape) == 1:
+        if k in set.union(_NODE_FIELDS, _EDGE_FIELDS).__sub__(_FIXED_FIELDS) and len(v.shape) == 1:
             kwargs[k] = v.unsqueeze(-1)
             v = kwargs[k]
 

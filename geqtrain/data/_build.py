@@ -207,12 +207,28 @@ def _filter_dataset(
     # --- 1. Compute the final node mask based on all conditions ---
     nodes_to_keep_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=data.pos.device)
     
-    node_types_are_fixed_field = False
     node_types = data[AtomicDataDict.NODE_TYPE_KEY].flatten() if AtomicDataDict.NODE_TYPE_KEY in data else None
     if node_types is None:
-        node_types_are_fixed_field = True
-        # Repeat the fixed node types for each graph in the batch
-        node_types = dataset.fixed_fields.get(AtomicDataDict.NODE_TYPE_KEY).flatten().repeat(data.num_graphs)
+        # Pop the fixed node types from dataset and repeat them for each graph in the batch
+        node_types = dataset.fixed_fields.pop(AtomicDataDict.NODE_TYPE_KEY).repeat(data.num_graphs)
+        data[AtomicDataDict.NODE_TYPE_KEY] = node_types
+        # Add __slices__ for AtomicDataDict.NODE_TYPE_KEY
+        if not hasattr(data, '__slices__'):
+            data.__slices__ = {}
+        data.__slices__[AtomicDataDict.NODE_TYPE_KEY] = torch.arange(
+            0, data.num_nodes + 1, step=data.num_nodes // data.num_graphs if data.num_graphs > 0 else data.num_nodes
+        ).tolist()
+        # Add __cat_dims__ for AtomicDataDict.NODE_TYPE_KEY
+        if not hasattr(data, '__cat_dims__'):
+            data.__cat_dims__ = {}
+        data.__cat_dims__[AtomicDataDict.NODE_TYPE_KEY] = data.__cat_dim__(AtomicDataDict.NODE_TYPE_KEY, node_types)
+        # Add __cumsum__ for AtomicDataDict.NODE_TYPE_KEY
+        if not hasattr(data, '__cumsum__'):
+            data.__cumsum__ = {}
+        data.__cumsum__[AtomicDataDict.NODE_TYPE_KEY] = torch.cumsum(
+            torch.ones(data.num_graphs, dtype=torch.long) * (data.num_nodes // data.num_graphs if data.num_graphs > 0 else data.num_nodes),
+            dim=0
+        ).tolist()
 
     if keep_node_types is not None and node_types is not None:
         nodes_to_keep_mask &= torch.isin(node_types, keep_node_types.to(node_types.device))
@@ -250,10 +266,6 @@ def _filter_dataset(
     # --- 4. Use our new robust subgraph method ---
     # This correctly handles renumbering and all node/edge/graph attributes.
     dataset.data = data.subgraph(subset=final_node_mask, edge_index=kept_edges)
-    if node_types_are_fixed_field:
-        fixed_node_types = dataset.fixed_fields.get(AtomicDataDict.NODE_TYPE_KEY)
-        fixed_node_types = fixed_node_types[final_node_mask[:len(fixed_node_types)]]
-        dataset.fixed_fields = fixed_node_types
     
     if dataset.data.num_graphs == 0:
         return None
