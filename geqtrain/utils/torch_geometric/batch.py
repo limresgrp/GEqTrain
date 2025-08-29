@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from collections.abc import Sequence
 
@@ -250,6 +250,49 @@ class Batch(Data):
         The batch object must have been created via :meth:`from_data_list` in
         order to be able to reconstruct the initial objects."""
         return [self.get_example(i) for i in range(self.num_graphs)]
+
+    def subgraph(self, subset: torch.Tensor, edge_index: Optional[Tensor] = None) -> "Batch":
+        """
+        Returns a new Batch object containing only the nodes in `subset`
+        and the edges between them. This is a custom implementation that
+        correctly handles all node, edge, and graph attributes in a batch.
+        """
+        # Ensure subset is a boolean mask for easier indexing
+        if subset.dtype != torch.bool:
+            node_mask = torch.zeros(self.num_nodes, dtype=torch.bool, device=self.device)
+            node_mask[subset] = True
+            subset = node_mask
+        
+        # 1. Filter edges to keep only those between nodes in the subset
+        self.edge_index = edge_index if edge_index is not None else self.edge_index
+        edge_mask = subset[self.edge_index[0]] & subset[self.edge_index[1]]
+        
+        # 2. Create a mapping from old node indices to new, consecutive indices
+        node_map = torch.full((self.num_nodes,), -1, dtype=torch.long)
+        node_map[subset] = torch.arange(subset.sum())
+        
+        new_data_kwargs = {}
+        # 3. Filter and remap all attributes
+        for key, value in self:
+            if key in ['batch', 'ptr']:
+                continue # Batch is handled specially later
+
+            if key == 'edge_index':
+                new_data_kwargs[key] = node_map[value[:, edge_mask]]
+            elif torch.is_tensor(value) and value.size(0) == self.num_nodes:
+                new_data_kwargs[key] = value[subset]
+            elif torch.is_tensor(value) and value.size(0) == self.num_edges:
+                new_data_kwargs[key] = value[edge_mask]
+            else:
+                # Keep graph-level or other attributes
+                new_data_kwargs[key] = value
+
+        # 4. Recompute the `batch` and `ptr` tensors for the new, smaller batch
+        new_batch_tensor = self.batch[subset]
+        new_ptr = torch.cat([torch.tensor([0]), torch.cumsum(torch.bincount(new_batch_tensor), 0)])
+        
+        # 5. Create the new Batch object
+        return Batch(batch=new_batch_tensor, ptr=new_ptr, **new_data_kwargs)
 
     @property
     def num_graphs(self) -> int:

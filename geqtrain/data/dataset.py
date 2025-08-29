@@ -379,7 +379,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.target_indices = target_indices
         self.target_key = target_key
 
-        self.data = None
+        self.data: Optional[Batch] = None
         self.fixed_fields = None
 
         self.node_attributes = node_attributes

@@ -282,54 +282,6 @@ class AtomicData(Data):
                 if irreps is not None:
                     assert self[field].shape[-1] == irreps.dim
 
-    def subgraph(self, subset: torch.Tensor):
-        """
-        Returns a new AtomicData object containing only the nodes in `subset`
-        and the edges between them.
-
-        Args:
-            subset (Tensor): A 1D tensor of node indices to keep.
-        """
-        # Create a dictionary for the new data
-        new_data_kwargs = {}
-
-        # Ensure subset is a 1D tensor of indices
-        if subset.dtype == torch.bool:
-            subset = torch.where(subset)[0]
-
-        # 1. Create node mapping for re-indexing
-        node_map = torch.full((self.num_nodes,), -1, dtype=torch.long, device=self.pos.device)
-        node_map[subset] = torch.arange(subset.size(0), device=self.pos.device)
-
-        # 2. Filter edges and remap edge_index
-        edge_mask = torch.isin(self.edge_index[0], subset) & torch.isin(self.edge_index[1], subset)
-        new_data_kwargs[AtomicDataDict.EDGE_INDEX_KEY] = node_map[self.edge_index[:, edge_mask]]
-
-        # 3. Iterate through all items and slice them accordingly
-        for key in self.keys:
-            if key == AtomicDataDict.EDGE_INDEX_KEY:
-                continue  # Already handled
-
-            value = self[key]
-            # Check if it's a node-level tensor
-            if torch.is_tensor(value) and value.size(0) == self.num_nodes:
-                new_data_kwargs[key] = value[subset]
-            # Check if it's an edge-level tensor
-            elif torch.is_tensor(value) and value.size(0) == self.num_edges:
-                new_data_kwargs[key] = value[edge_mask]
-            else:
-                # It's a graph-level or fixed attribute, so just copy it
-                new_data_kwargs[key] = value
-
-        # 4. Create the new AtomicData object
-        # We pass _validate=False because we have carefully constructed the object
-        # and to avoid issues with fields that are not tensors (like pbc).
-        # The original `__init__` will handle `irreps` if it's in the kwargs.
-        if hasattr(self, '__irreps__'):
-            new_data_kwargs['irreps'] = self.__irreps__
-
-        return self.__class__(_validate=False, **new_data_kwargs)
-
     @classmethod
     def with_edge_index(
         cls,
