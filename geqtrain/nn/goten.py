@@ -254,7 +254,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         w_from_h = self.h_j_to_weights_init(h_j)
         env_weights = self.init_weights_norm(w_from_t * w_from_h)
         X_ij = self.env_weighter(spharms, env_weights)
-        X = self.node_eq_norm(scatter_sum(X_ij, edge_center, dim=0, dim_size=num_nodes))
+        X = self.node_eq_norm(scatter_sum(X_ij, edge_center, dim=0, dim_size=num_nodes) + 1.e-10)
 
         # === Interaction Loop ===
         update_coeffs = torch.sigmoid(self.update_coeffs)
