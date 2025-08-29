@@ -21,11 +21,6 @@ def set_seed(seed):
         torch.backends.cudnn.benchmark = False
         torch.cuda.manual_seed_all(seed)
 
-def parse_idcs_file(filename):
-    with open(filename, "r") as f:
-        lines = f.readlines()
-    return np.array([int(line.strip()) for line in lines if line.strip()], dtype=int)
-
 def setup_loss(config):
     loss, _ = instantiate(
         builder=Loss,

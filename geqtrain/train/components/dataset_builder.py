@@ -1,23 +1,40 @@
 # geqtrain/train/components/dataset_builder.py
 import torch
 import logging
+import numpy as np
 from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
 from geqtrain.data._build import dataset_from_config
-from geqtrain.train.components.setup import parse_idcs_file
+
+def save_txt_file(filename, arrays):
+    with open(filename, "w") as f:
+        for arr in arrays:
+            if isinstance(arr, torch.Tensor):
+                arr = arr.numpy()
+            np.savetxt(f, [arr], fmt="%d")  # write as one row
+
+def parse_txt_file(filename):
+    arrays = []
+    with open(filename, "r") as f:
+        for line in f:
+            if line.strip():  # skip empty lines
+                arr = np.fromstring(line, sep=" ")
+                arrays.append(arr)
+    return arrays
 
 class DatasetBuilder:
     """Handles instantiation, splitting, and indexing of datasets."""
-    def __init__(self, config, dataset_rng, logger=None):
+    def __init__(self, config, dataset_rng, logger=None, output=None):
         self.config = config
         self.logger = logger if logger is not None else logging.getLogger(__name__)
+        self.output = output
         self.dataset_rng = dataset_rng
 
         self.n_train = self.config.get("n_train", None)
-        self.n_valid = self.config.get("n_valid", None)
+        self.n_val = self.config.get("n_val", None)
         self.n_test = self.config.get("n_test", None)
 
         self.train_idcs = self.config.get("train_idcs", None)
-        self.val_idcs   = self.config.get("valid_idcs", None)
+        self.val_idcs   = self.config.get("val_idcs", None)
         self.test_idcs  = self.config.get("test_idcs", None)
 
     def build_train_val(self):
@@ -31,8 +48,13 @@ class DatasetBuilder:
         
         # 2. Get the indices
         train_idcs, val_idcs = self._resolve_train_val_indices(train_dset, val_dset)
+
+        # 3. Save the indices
+        if self.output is not None:
+            save_txt_file(self.output.generate_file(f"train_idcs.txt"), train_idcs)
+            save_txt_file(self.output.generate_file(f"val_idcs.txt"), val_idcs)
         
-        # 3. Create the final indexed datasets
+        # 4. Create the final indexed datasets
         final_train_dset = self._index_dataset(train_dset, train_idcs)
         final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, val_idcs)
         return final_train_dset, final_val_dset
@@ -46,7 +68,7 @@ class DatasetBuilder:
         # --- Step 2.1: Resolve indices from all explicit sources ---
         if isinstance(self.test_idcs, str):
             self.logger.info(f"Loading test indices from file: {self.test_idcs}")
-            self.test_idcs = [parse_idcs_file(self.test_idcs)]
+            self.test_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.test_idcs)]
         # --- Step 2.2: Update counts from any resolved indices ---
         if self.test_idcs is not None:
             if self.n_test is not None:
@@ -70,18 +92,18 @@ class DatasetBuilder:
 
     def _resolve_train_val_indices(self, train_dset, val_dset):
         """
-        Robustly determines training and validation indices and updates n_train/n_valid counts.
+        Robustly determines training and validation indices and updates n_train/n_val counts.
         """
         # --- Step 1: Resolve indices from all explicit sources ---
         
         # Check for file paths for any indices not already loaded
         if isinstance(self.train_idcs, str):
             self.logger.info(f"Loading training indices from file: {self.train_idcs}")
-            self.train_idcs = [parse_idcs_file(self.train_idcs)]
+            self.train_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.train_idcs)]
         
         if isinstance(self.val_idcs, str):
             self.logger.info(f"Loading validation indices from file: {self.val_idcs}")
-            self.val_idcs = [parse_idcs_file(self.val_idcs)]
+            self.val_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.val_idcs)]
 
         # --- Step 2: Update counts from any resolved indices ---
         if self.train_idcs is not None:
@@ -90,9 +112,9 @@ class DatasetBuilder:
             self.n_train = [len(t) for t in self.train_idcs]
         
         if self.val_idcs is not None:
-            if self.n_valid is not None:
-                self.logger.info("n_valid were provided; the value of n_valid in the config will be ignored and updated to match the actual indices.")
-            self.n_valid = [len(t) for t in self.val_idcs]
+            if self.n_val is not None:
+                self.logger.info("n_val were provided; the value of n_val in the config will be ignored and updated to match the actual indices.")
+            self.n_val = [len(t) for t in self.val_idcs]
 
         # --- Step 3: Decide the final strategy based on what has been resolved ---
         if self.train_idcs is not None and self.val_idcs is not None:
@@ -113,7 +135,7 @@ class DatasetBuilder:
         """Generates val_idcs by sampling from data not in train_idcs."""
         self.logger.info("Generating validation set from data points not used for training.")
         val_idcs = []
-        n_valid_req = self.n_valid
+        n_valid_req = self.n_val
         
         if n_valid_req is not None and not isinstance(n_valid_req, list): n_valid_req = [n_valid_req]
 
@@ -174,23 +196,23 @@ class DatasetBuilder:
         return train_idcs
         
     def _split_from_counts(self, train_dset, val_dset=None):
-        """Generates train/validation indices based on n_train/n_valid counts."""
+        """Generates train/validation indices based on n_train/n_val counts."""
         self.logger.info("Generating new train/validation split from counts or default.")
-        n_train, n_valid = self.n_train, self.n_valid
+        n_train, n_val = self.n_train, self.n_val
         if n_train is not None and not isinstance(n_train, list): n_train = [n_train]
-        if n_valid is not None and not isinstance(n_valid, list): n_valid = [n_valid]
+        if n_val is not None and not isinstance(n_val, list): n_val = [n_val]
 
         val_dset_provided = val_dset is not None
 
         def get_n_train_list():
             if n_train: return n_train
             if val_dset_provided: return train_dset.n_observations.tolist()
-            if n_valid: return [n - v for n, v in zip(train_dset.n_observations, n_valid)]
-            self.logger.warning("No 'n_train' or 'n_valid' provided; using default 80/20 split.")
+            if n_val: return [n - v for n, v in zip(train_dset.n_observations, n_val)]
+            self.logger.warning("No 'n_train' or 'n_val' provided; using default 80/20 split.")
             return (train_dset.n_observations * 0.8).astype(int).tolist()
 
         def get_n_valid_list(n_train_list):
-            if n_valid: return n_valid
+            if n_val: return n_val
             source_dset = val_dset if val_dset_provided else train_dset
             if val_dset_provided: return source_dset.n_observations.tolist()
             return [n - t for n, t in zip(source_dset.n_observations, n_train_list)]
@@ -206,12 +228,12 @@ class DatasetBuilder:
             train_idcs.append(permutation[:n_t])
             if not val_dset_provided:
                 n_v = n_valid_list[i]
-                if n_t + n_v > n_obs: raise ValueError("n_train + n_valid > n_observations")
+                if n_t + n_v > n_obs: raise ValueError("n_train + n_val > n_observations")
                 val_idcs.append(permutation[n_t : n_t + n_v])
         
         if val_dset_provided:
             for i, (n_obs, n_v) in enumerate(zip(val_dset.n_observations, n_valid_list)):
-                 if n_v > n_obs: raise ValueError(f"n_valid[{i}]={n_v} is > n_observations[{i}]={n_obs}")
+                 if n_v > n_obs: raise ValueError(f"n_val[{i}]={n_v} is > n_observations[{i}]={n_obs}")
                  permutation = torch.randperm(n_obs, generator=self.dataset_rng)
                  val_idcs.append(permutation[:n_v])
 

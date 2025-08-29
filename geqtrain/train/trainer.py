@@ -87,7 +87,7 @@ class Trainer:
             ("log_batch_freq", 10), ("log_epoch_freq", 1), ("save_checkpoint_freq", -1),
             ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
             ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
-            ("n_valid", None), ("train_val_split", "random"), ("shuffle", True),
+            ("n_val", None), ("train_val_split", "random"), ("shuffle", True),
             ("metrics_metadata", {}),
         ]
         for param, default in params_to_extract:
@@ -105,7 +105,7 @@ class Trainer:
 
     def _build_datasets(self):
         """Delegate dataset instantiation and preparation to the DatasetBuilder."""
-        builder = DatasetBuilder(self.config, self.dataset_rng, self.logger)
+        builder = DatasetBuilder(self.config, self.dataset_rng, self.logger, self.output)
         final_train_dset, final_val_dset = builder.build_train_val()
         self.logger.info(f"Training data points: {len(final_train_dset)} | Validation data points: {len(final_val_dset)}")
         return final_train_dset, final_val_dset

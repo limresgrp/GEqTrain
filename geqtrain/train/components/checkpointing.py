@@ -156,7 +156,7 @@ class CheckpointHandler:
 
                 # Directly update the trainer's attributes
                 self.trainer.val_idcs = original_state['val_idcs']
-                self.trainer.n_valid = [len(t) for t in self.trainer.val_idcs]
+                self.trainer.n_val = [len(t) for t in self.trainer.val_idcs]
                 
                 config.pop('val_idcs') # Remove the 'load' keyword
                 logging.info("Successfully loaded 'val_idcs' from previous run.")
