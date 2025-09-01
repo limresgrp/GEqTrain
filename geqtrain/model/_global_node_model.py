@@ -11,7 +11,7 @@ from geqtrain.nn import (
 from geqtrain.model._embedding import buildEmbeddingLayers
 
 
-def HeadlessGlobalNodeModel(config:Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
+def GlobalNodeModel(config:Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """
@@ -36,7 +36,7 @@ def buildGlobalNodeModelLayers():
             out_irreps=None,
             output_ls=[0],
         )),
-        "local_pooling": (EdgewiseReduce, dict(
+        "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),

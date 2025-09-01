@@ -10,7 +10,7 @@ from geqtrain.nn import (
 from geqtrain.model._embedding import buildEmbeddingLayers
 
 
-def HeadlessNodeModel(config: Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
+def NodeModel(config: Config, model: Optional[SequentialGraphNetwork]) -> SequentialGraphNetwork:
     """Base model architecture.
 
     """

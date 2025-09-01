@@ -2,9 +2,10 @@ import math
 import functools
 import torch
 
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from geqtrain.nn._embedding import BaseEmbedding
+from geqtrain.utils._model_utils import process_out_irreps
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 
 from e3nn import o3
@@ -21,7 +22,7 @@ from geqtrain.nn.allegro import (
     Contracter,
     MakeWeightedChannels,
 )
-from geqtrain.utils.tp_utils import SCALAR
+from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
 from geqtrain.nn.mace.irreps_tools import inverse_reshape_irreps
 
 
@@ -117,8 +118,6 @@ class GotenEdgeEmbedding(BaseEmbedding):
 
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.W_erp.weight)
-        if self.W_erp.bias is not None:
-            self.W_erp.bias.data.fill_(0)
 
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
         edge_center   = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -152,6 +151,8 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self,
         num_layers: int,
         out_irreps_node: Optional[Union[o3.Irreps, str]] = None,
+        output_ls:  Optional[List[int]] = None,
+        output_mul: Optional[Union[str, int]] = None,
         out_field_node: str = AtomicDataDict.NODE_FEATURES_KEY,
         out_field_edge: str = AtomicDataDict.EDGE_FEATURES_KEY,
         latent_dim: int = 64,
@@ -185,10 +186,26 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         node_eq_irreps = o3.Irreps([(eq_multiplicity, ir) for _, ir in spharms_irreps])
         assert node_eq_irreps[0].ir == SCALAR, "node_eq_irreps must start with scalars"
 
-        if out_irreps_node is None:
-            out_irreps_node = o3.Irreps(f"{self.latent_dim}x0e")
-        else:
-            out_irreps_node = o3.Irreps(out_irreps_node)
+        # === Process output irreps using the same logic as InteractionModule ===
+        out_irreps_node, _, output_mul = process_out_irreps(
+            out_irreps=out_irreps_node,
+            output_ls=output_ls,
+            output_mul=output_mul,
+            latent_dim=latent_dim,
+            edge_attrs_irreps=node_eq_irreps, # Use node_eq_irreps as reference
+        )
+        self.out_multiplicity = output_mul
+        self.out_irreps_node = out_irreps_node
+        self.out_feat_elems = sum(irr.ir.dim for irr in self.out_irreps_node)
+        
+        # Split out_irreps into scalar and equivariant parts
+        self.has_scalar_output = any(ir.l == 0 for _, ir in self.out_irreps_node)
+        self.out_n_scalars = 0
+        if self.has_scalar_output:
+            self.out_n_scalars = (self.out_irreps_node.count(SCALAR) + self.out_irreps_node.count(PSEUDO_SCALAR)) // self.out_multiplicity
+
+        self.eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in self.out_irreps_node if ir.l > 0])
+        # === End of irreps processing ===
 
         # === Initialize weights for X (steerable features) ===
         self.env_weighter = MakeWeightedChannels(irreps_in=spharms_irreps, multiplicity_out=eq_multiplicity)
@@ -205,12 +222,23 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.update_coeffs = torch.nn.Parameter(torch.zeros(num_layers))
 
         # === Final Projection ===
-        self.final_linear = Linear(irreps_in=node_eq_irreps, irreps_out=out_irreps_node, internal_weights=False)
-        self.final_w_mlp = latent(mlp_input_dimension=self.latent_dim, mlp_output_dimension=self.final_linear.weight_numel)
-        self.final_norm = SO3_LayerNorm(out_irreps_node)
-        self.reshape_node = inverse_reshape_irreps(out_irreps_node)
+        self.final_linear, self.eq_w_mlp, self.final_scalar_mlp, self.final_norm = None, None, None, None
         
-        self.irreps_out.update({self.out_field_node: out_irreps_node})
+        # Projection for equivariant part (l>0)
+        if self.eq_out_irreps.dim > 0:
+            self.final_linear = Linear(irreps_in=node_eq_irreps, irreps_out=self.eq_out_irreps, internal_weights=False)
+            self.eq_w_mlp = latent(mlp_input_dimension=self.latent_dim, mlp_output_dimension=self.final_linear.weight_numel)
+            self.final_norm = SO3_LayerNorm(self.eq_out_irreps)
+
+        # Projection for scalar part (l=0)
+        if self.has_scalar_output:
+            self.final_scalar_mlp = latent(
+                mlp_input_dimension=self.latent_dim,
+                mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
+            )
+
+        self.reshape_node = inverse_reshape_irreps(self.out_irreps_node)
+        self.irreps_out.update({self.out_field_node: self.out_irreps_node})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center   = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -226,7 +254,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         w_from_h = self.h_j_to_weights_init(h_j)
         env_weights = self.init_weights_norm(w_from_t * w_from_h)
         X_ij = self.env_weighter(spharms, env_weights)
-        X = self.node_eq_norm(scatter_sum(X_ij, edge_center, dim=0, dim_size=num_nodes))
+        X = self.node_eq_norm(scatter_sum(X_ij, edge_center, dim=0, dim_size=num_nodes) + 1.e-10)
 
         # === Interaction Loop ===
         update_coeffs = torch.sigmoid(self.update_coeffs)
@@ -234,9 +262,31 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             h, X, t_ij = layer(h, X, t_ij, edge_center, edge_neighbor, spharms, update_coeff, num_nodes)
 
         # === Final Projection ===
-        final_w = self.final_w_mlp(h)
-        output_features = self.final_linear(X, final_w)
-        data[self.out_field_node] = self.reshape_node(self.final_norm(output_features))
+        # Initialize an empty tensor to store the final combined output features
+        final_output = torch.zeros(
+            (num_nodes, self.out_multiplicity, self.out_feat_elems),
+            dtype=h.dtype,
+            device=h.device
+        )
+
+        # 1. Compute and place equivariant features (l>0)
+        if self.eq_out_irreps.dim > 0:
+            assert self.final_linear is not None and self.eq_w_mlp is not None and self.final_norm is not None
+            eq_w = self.eq_w_mlp(h)
+            eq_features = self.final_linear(X, eq_w)
+            eq_features = self.final_norm(eq_features)
+            # Place into the latter part of the output tensor
+            final_output[..., self.out_n_scalars:] = eq_features
+
+        # 2. Compute and place scalar features (l=0)
+        if self.has_scalar_output:
+            assert self.final_scalar_mlp is not None
+            scalar_features = self.final_scalar_mlp(h)
+            # Place into the beginning of the output tensor
+            final_output[..., :self.out_n_scalars] = scalar_features.unsqueeze(-1)
+        
+        # Reshape and store the final result
+        data[self.out_field_node] = self.reshape_node(final_output)
         data[self.out_field_edge] = t_ij
 
         return data

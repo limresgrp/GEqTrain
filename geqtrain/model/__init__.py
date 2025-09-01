@@ -1,35 +1,27 @@
-from ._node_model import HeadlessNodeModel
-from ._graph_model import HeadlessGraphModel
-from ._global_graph_model import HeadlessGlobalGraphModel, moreGNNLayers
-from ._global_node_model import HeadlessGlobalNodeModel
+from ._node_model import NodeModel
+from ._graph_model import GraphModel
+from ._global_graph_model import GlobalGraphModel, moreGNNLayers
+from ._global_node_model import GlobalNodeModel
 from ._heads import Heads
 from ._scale import PerNodeAttrsScale, PerTypeScale
 from ._combine import Combine
-from ._weight_init import (
-    uniform_initialize_FCs,
-    initialize_from_state,
-    load_model_state,
-)
-from ._grads import GradOutput
+from ._gradients import WithGradients
 from ._module import Module
 from ._goten_model import GotenModel
 from ._build import model_from_config
 from ._mace_model import MACEModel
 
 __all__ = [
-    HeadlessNodeModel,
-    HeadlessGraphModel,
-    HeadlessGlobalGraphModel,
-    HeadlessGlobalNodeModel,
+    NodeModel,
+    GraphModel,
+    GlobalGraphModel,
+    GlobalNodeModel,
     Heads,
     PerNodeAttrsScale,
     PerTypeScale,
-    uniform_initialize_FCs,
-    initialize_from_state,
-    load_model_state,
     model_from_config,
     moreGNNLayers,
-    GradOutput,
+    WithGradients,
     Combine,
     Module,
     GotenModel,

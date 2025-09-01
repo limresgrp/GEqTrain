@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 from typing import Dict
 
@@ -21,7 +22,7 @@ def Heads(config: Config, model: SequentialGraphNetwork) -> SequentialGraphNetwo
         "wrapped_model": model,
     }
 
-    heads: Dict[str, Dict[str, str]] = config.get("heads")
+    heads: Dict[str, Dict[str, str]] = deepcopy(config.get("heads"))
     assert isinstance(heads, dict), f"'heads' must be a dict of dicts. Found type {type(heads)}"
     for head_name, head_kwargs in heads.items():
         if "field" not in head_kwargs:

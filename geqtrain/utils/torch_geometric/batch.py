@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from collections.abc import Sequence
 
@@ -250,6 +250,87 @@ class Batch(Data):
         The batch object must have been created via :meth:`from_data_list` in
         order to be able to reconstruct the initial objects."""
         return [self.get_example(i) for i in range(self.num_graphs)]
+
+    def subgraph(self, subset: torch.Tensor, edge_index: Optional[Tensor] = None) -> "Batch":
+        """
+        Returns a new Batch object containing only the nodes in `subset`
+        and the edges between them.
+        """
+        if subset.dtype != torch.bool:
+            node_mask = torch.zeros(self.num_nodes, dtype=torch.bool)
+            node_mask[subset] = True
+            subset = node_mask
+
+        # --- 1. Filter all attributes and remap edge_index ---
+        self.edge_index = edge_index if edge_index is not None else self.edge_index
+        edge_mask = subset[self.edge_index[0]] & subset[self.edge_index[1]]
+        node_map = torch.full((self.num_nodes,), -1, dtype=torch.long)
+        node_map[subset] = torch.arange(subset.sum())
+
+        new_data_kwargs = {}
+        for key, value in self:
+            if key in ['batch', 'ptr']: continue
+            if key == 'edge_index':
+                new_data_kwargs[key] = node_map[value[:, edge_mask]]
+            elif torch.is_tensor(value) and value.size(0) == self.num_nodes:
+                new_data_kwargs[key] = value[subset]
+            elif torch.is_tensor(value) and value.size(0) == self.num_edges:
+                new_data_kwargs[key] = value[edge_mask]
+            else:
+                new_data_kwargs[key] = value
+
+        # --- 2. Recompute `batch`, `ptr`, and identify kept graphs ---
+        new_batch_tensor = self.batch[subset]
+        new_ptr = torch.cat([torch.tensor([0]), torch.cumsum(torch.bincount(new_batch_tensor), 0)])
+        # Find which of the original graphs still have nodes left
+        unique_graphs, new_graph_node_counts = torch.unique(new_batch_tensor, return_counts=True)
+        
+        # If no graphs are left, return None
+        if len(unique_graphs) == 0:
+            return None
+
+        # --- 3. Recompute slices and cumsum for the new batch ---
+        from geqtrain.data.AtomicData import _EDGE_FIELDS, _GRAPH_FIELDS, _NODE_FIELDS
+        new_slices, new_cumsum = {}, {}
+        
+        # Create a map from old graph index to new graph index
+        graph_map = torch.full((self.num_graphs,), -1, dtype=torch.long)
+        graph_map[unique_graphs] = torch.arange(len(unique_graphs))
+
+        # This tensor is what we will use to increment the cumsum for edge-like properties
+        node_increments = torch.cat([torch.tensor([0], device=self.batch.device), torch.cumsum(new_graph_node_counts, 0)])
+        
+        for key, old_slice in self.__slices__.items():
+            item_sizes = torch.tensor(old_slice, device=self.batch.device).diff()
+
+            if key in _NODE_FIELDS or key == 'batch':
+                new_item_sizes = new_graph_node_counts
+                # Node-like properties have a cumsum increment of 0
+                new_cumsum[key] = [0] * (len(unique_graphs) + 1)
+            elif key in _EDGE_FIELDS or key == 'edge_index':
+                edge_batch = self.batch[self.edge_index[0, edge_mask]]
+                new_item_sizes = torch.bincount(graph_map[edge_batch], minlength=len(unique_graphs))
+                # Edge-like properties increment by the number of nodes in each graph
+                new_cumsum[key] = node_increments.tolist()
+            elif key in _GRAPH_FIELDS:
+                new_item_sizes = torch.ones(len(unique_graphs), dtype=torch.long, device=self.batch.device)
+                new_cumsum[key] = [0] * (len(unique_graphs) + 1)
+            else:
+                new_item_sizes = item_sizes[unique_graphs]
+                new_cumsum[key] = [0] * (len(unique_graphs) + 1)
+
+            new_slices[key] = torch.cat([torch.tensor([0], device=self.batch.device), torch.cumsum(new_item_sizes, 0)]).tolist()
+
+        # --- 4. Create the final Batch object ---
+        new_batch_obj = Batch(batch=new_batch_tensor, ptr=new_ptr, **new_data_kwargs)
+        new_batch_obj.__slices__ = new_slices
+        new_batch_obj.__cumsum__ = new_cumsum
+        new_batch_obj.__num_graphs__ = len(unique_graphs)
+        new_batch_obj.__cat_dims__ = self.__cat_dims__
+        if self.__num_nodes_list__ is not None:
+            new_batch_obj.__num_nodes_list__ = new_graph_node_counts.tolist()
+        
+        return new_batch_obj
 
     @property
     def num_graphs(self) -> int:
