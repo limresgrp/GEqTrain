@@ -1,4 +1,5 @@
 # components/distributed.py
+import logging
 import os
 import torch
 import torch.distributed as dist
@@ -10,15 +11,13 @@ from geqtrain.nn import DDP
 class DistributedManager:
     """A helper class to manage distributed training setup and operations."""
     def __init__(self, config: dict = None):
-        config = {} if config is None else config
+        self.config = {} if config is None else config
+        self._is_initialized = False
 
-        if not dist.is_available() or not torch.cuda.is_available() or not config.get('ddp', False):
-            self.world_size = 1
-            self.rank = 0
-            self.local_rank = 0
+        if not dist.is_available() or not torch.cuda.is_available() or not self.config.get('ddp', False):
+            self.world_size, self.rank, self.local_rank = 1, 0, 0
             self.is_distributed = False
-            # Respect user-provided device, otherwise default
-            self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+            self.device = torch.device(self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
             return
 
         # This logic is portable between SLURM and torchrun
@@ -29,24 +28,27 @@ class DistributedManager:
         self.is_distributed = self.world_size > 1
         
         # Determine device: priority is user config -> automatic DDP assignment -> default
-        if config.get('device'):
-            self.device = torch.device(config.get('device'))
+        if self.config.get('device'):
+            self.device = torch.device(self.config.get('device'))
         elif self.is_distributed:
-            self.device = torch.device("cuda", self.local_rank)
+            # When SLURM sets CUDA_VISIBLE_DEVICES per process, torch.cuda.device_count()
+            # will be 1. local_rank % 1 will always be 0.
+            # This correctly assigns the only visible device to the process.
+            device_id = self.local_rank % torch.cuda.device_count()
+            self.device = torch.device("cuda", device_id)
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if self.is_distributed:
-            torch.cuda.set_device(self.device)
-            dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
         
-        self.find_unused = config.get('find_unused_parameters', False)
-        if self.find_unused:
-            import logging
-            logging.info(
-                "Initializing DDP with `find_unused_parameters=True`. "
-                "Note: This may slightly slow down training."
-            )
+        self.init_process_group()
+
+    def init_process_group(self):
+        """Initializes the distributed process group."""
+        if not self.is_distributed or self._is_initialized:
+            return
+        torch.cuda.set_device(self.device)
+        dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
+        self._is_initialized = True
+        logging.info(f"Initialized process group for rank {self.rank} on device {self.device}.")
 
     @property
     def is_master(self) -> bool:
@@ -63,10 +65,18 @@ class DistributedManager:
         return obj_list[0]
 
     def wrap_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Wraps the model with DDP after it has been moved to the correct device."""
         model.to(self.device)
         if not self.is_distributed:
             return model
-        return DDP(model, device_ids=[self.device.index], find_unused_parameters=self.find_unused)
+        
+        find_unused = self.config.get('find_unused_parameters', False)
+        if find_unused:
+            logging.info(
+                "Initializing DDP with `find_unused_parameters=True`. "
+                "Note: This may slightly slow down training."
+            )
+        return DDP(model, find_unused_parameters=find_unused)
 
     def get_sampler(self, dataset, shuffle: bool, use_ensemble: bool) -> Optional[Sampler]:
         if not self.is_distributed:
