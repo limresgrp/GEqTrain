@@ -62,10 +62,13 @@ def check_for_config_updates(new_config):
         "batch_size", "validation_batch_size", "dataloader_num_workers",
     ]
     logging.info("Checking for updated user-modifiable parameters...")
-    for key in modifiable_params:
-        if key in new_config_dict and new_config_dict[key] != final_config_dict.get(key):
-            logging.info(f'Updating parameter "{key}" from `{final_config_dict.get(key)}` to `{new_config_dict[key]}`')
-            final_config_dict[key] = new_config_dict[key]
+    for key in new_config_dict:
+        if key in final_config_dict and new_config_dict[key] != final_config_dict[key]:
+            if key in modifiable_params:
+                logging.info(f'Updating parameter "{key}" from `{final_config_dict[key]}` to `{new_config_dict[key]}`')
+                final_config_dict[key] = new_config_dict[key]
+            else:
+                raise ValueError(f'Parameter "{key}" is not user-modifiable and cannot be changed during restart.')
 
     # 2. Enforce critical runtime parameters from the new command
     # This ensures DDP status, device, etc., are always from the new command.
