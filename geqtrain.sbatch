@@ -33,6 +33,7 @@ echo "MASTER_PORT=${MASTER_PORT}"
 
 # srun will launch 4 independent copies of the following command.
 # Each process will have its environment set up correctly by sourcing the activate scripts.
+# Escaping, e.g. \$MASTER_ADDR, ensures the dollar signs are interpreted by the shell on the compute node, not the login node.
 srun --uenv=pytorch/v2.6.0:v1 --view=default -- bash -c "
   source $HOME/GEqTrain/geqtrain-venv/bin/activate && \
   geqtrain-train --ddp --master-addr \$MASTER_ADDR --master-port \$MASTER_PORT $CONFIG
@@ -42,4 +43,5 @@ echo "Job finished"
 
 # For debugging, having access to a bash on the node which is running the training
 # salloc -N 1 -t 15 --partition debug
+# source $HOME/GEqTrain/geqtrain-venv/bin/activate
 # srun --ntasks=4 --gpus-per-task=1 --uenv=pytorch/v2.6.0:v1 --view=default geqtrain-train --ddp --master-addr localhost --master-port 29500 /users/dangiole/GEqTrain/config/xxMD-DFT/xxMD.DFT.azo.goten.yaml &> log.txt &
