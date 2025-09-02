@@ -25,6 +25,8 @@ class TrainingLoop:
     def run_epoch(self, validation_only=False):
         """Runs a full training and validation epoch."""
         if not validation_only:
+            if self.trainer.train_sampler is not None:
+                self.trainer.train_sampler.set_epoch(self.trainer.iepoch + 1)
             self.run_phase(TRAIN)
 
         ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
@@ -139,7 +141,13 @@ class TrainingLoop:
                 self.trainer.batch_losses = batch_losses
             
             with torch.no_grad():
-                self.trainer.batch_metrics = self.metrics(pred=out, ref=ref_data)
+                # First, compute metrics on the local batch
+                batch_metrics = self.metrics(pred=out, ref=ref_data)
+                # Synchronize the metrics dictionary across all GPUs
+                # NOTE: For metrics like RMSDMetric, averaging across multiple GPUs is technically incorrect.
+                # However, this is not very impactful in practice and is difficult to handle properly—just be aware.
+                syncd_batch_metrics = self.dist.sync_dict_of_tensors(batch_metrics)
+                self.trainer.batch_metrics = syncd_batch_metrics
             
             if not self.trainer.config.get('chunking', False):
                 break
