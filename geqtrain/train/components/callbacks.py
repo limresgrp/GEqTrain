@@ -64,6 +64,7 @@ class Logger(Callback):
     def on_validation_end(self):
         if self.trainer.dist.is_master:
             self.trainer.validation_wall = perf_counter() - self.trainer._phase_start_time
+            self.trainer.cumulative_wall += self.trainer.train_wall + self.trainer.validation_wall
             
     def on_epoch_end(self):
         if self.trainer.dist.is_master:
