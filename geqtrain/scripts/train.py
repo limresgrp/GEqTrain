@@ -59,7 +59,8 @@ def check_for_config_updates(new_config):
     modifiable_params = [
         "max_epochs", "learning_rate", "loss_coeffs", "metrics_components", "log_batch_freq",
         "use_ema", "wandb", "dataset_list", "validation_dataset_list", "test_dataset_list",
-        "batch_size", "validation_batch_size", "dataloader_num_workers", "filepath", "ddp",
+        "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
+        "device", "filepath", "ddp",
     ]
     logging.info("Checking for updated user-modifiable parameters...")
     for key in new_config_dict:
