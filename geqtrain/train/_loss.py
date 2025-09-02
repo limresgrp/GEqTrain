@@ -10,6 +10,39 @@ from torch_runstats import Reduction
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils import instantiate_from_cls_name
 
+from torch_scatter import(
+    scatter_sum,
+    scatter_mean,
+    scatter_max,
+    scatter_log_softmax,
+    scatter_logsumexp,
+    scatter_softmax,
+)
+
+def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
+    ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''
+    unique_ensembles = torch.unique(ensemble_indices)
+
+    # ensemble predictions
+    if predictions.shape == torch.Size([]) and unique_ensembles.shape[0] == 1:
+        is_input_already_ensembled = True
+    else:
+        is_input_already_ensembled = unique_ensembles.shape[0] == predictions.shape[0]
+
+    if not is_input_already_ensembled:
+        predictions = aggregation_fn(predictions, ensemble_indices)
+
+    # ensemble targets
+    if targets.shape == torch.Size([]) and unique_ensembles.shape[0] == 1:
+        is_output_already_ensembled = True
+    else:
+        is_output_already_ensembled = unique_ensembles.shape[0] == targets.shape[0]
+
+    if not is_output_already_ensembled:
+        targets = aggregation_fn(targets, ensemble_indices) # acts just as selection and ordering wrt unique_ensembles
+
+    return predictions, targets
+
 
 class SimpleLoss:
     """
@@ -111,9 +144,18 @@ class SimpleLossWithNaNsFilter(SimpleLoss):
         pred_key, not_nan_pred_filter, ref_key, not_nan_ref_filter = self.prepare(pred, ref, key, **kwargs)
         not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
 
+        if 'ensemble_index' in pred:
+            assert 'ensemble_index' in ref
+            pred_key, ref_key = ensemble_predictions_and_targets(pred_key.squeeze(), ref_key.squeeze(), pred['ensemble_index'])
+            n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
+            ref_key /= n_ens
+            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
+            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
+            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+
         loss = self.func(pred_key, ref_key) * not_nan_filter
         if mean:
-            return loss.sum() / not_nan_filter.sum()
+            return loss.sum() / torch.max(not_nan_filter.sum(), torch.ones(1, device=not_nan_filter.device))
         loss[~not_nan_filter.bool()] = torch.nan
         return loss
 
@@ -159,7 +201,7 @@ class SimpleNodeLoss(SimpleLossWithNaNsFilter):
 
         loss = self.func(pred_key, ref_key) * not_nan_filter
         if mean:
-            return loss.sum() / not_nan_filter.sum() # + penalty
+            return loss.sum() / torch.max(not_nan_filter.sum(), torch.ones_like(not_nan_filter.sum(), device=not_nan_filter.device))
         loss[~not_nan_filter.bool()] = torch.nan
         return loss
 
@@ -212,7 +254,7 @@ class RMSDLoss(SimpleLossWithNaNsFilter):
             # Thus, we need to pass the sqrt(loss) to obtain the RMSD as output.
             loss[~not_nan_filter[:, 0].bool()] = torch.nan
             return torch.sqrt(loss)
-    
+
     def __str__(self):
         return "RMSD"
 
@@ -252,7 +294,7 @@ class FocalLossBinaryAccuracy(SimpleLoss):
         bce_loss = self.func(logits, target)
         p = torch.sigmoid(logits)
         p_t = p * target + (1 - p) * (1 - target)
-        
+
         loss = bce_loss * ((1 - p_t) ** self.gamma)
 
         if self.alpha >= 0:
@@ -260,7 +302,7 @@ class FocalLossBinaryAccuracy(SimpleLoss):
             loss = alpha_t * loss
 
         return loss.mean() if mean else loss
-    
+
     def __str__(self):
         return "FocalLossBinaryAccuracy"
 
@@ -287,20 +329,38 @@ class BinaryAUROCMetric:
         if mean:
             raise(f"{__class__.__name__} cannot be used as loss function for training")
 
-        logits = pred[key].squeeze(-1)
-        target = ref[key].squeeze(-1)
+        logits = pred[key].squeeze()
+        target = ref[key].squeeze()
+
+        if 'ensemble_index' in pred:
+            assert 'ensemble_index' in ref
+            logits, target = ensemble_predictions_and_targets(logits, target, pred['ensemble_index'])
+            n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
+            target /= n_ens
+            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
+            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
+            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
 
         if target.dim() == 0: # if bs = 1
             target = target.unsqueeze(0)
             logits = logits.unsqueeze(0)
 
+        # Remove NaNs from target and associated logits
+        mask = ~torch.isnan(target)
+        if not mask.all():
+            logits = logits[mask]
+            target = target[mask]
+
+        if logits.numel() == 0 and target.numel() == 0:
+            return torch.tensor([-1.0], device=logits.device, dtype=logits.dtype)
+
         self.metric.update(logits, target)
         rocauc = self.metric.compute()
         return rocauc.to(logits.device)
-    
+
     def reset(self):
         self.metric.reset()
-    
+
     def __str__(self):
         return "BinaryAUROC"
 

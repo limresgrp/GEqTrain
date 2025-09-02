@@ -130,7 +130,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             if self.use_masking and attribute_name in self.fields_to_mask:
                 x = apply_masking(x, mask_token_index=emb_layer.weight.shape[0] -1) # last index is reserved for masking, make sure to match this in yaml
 
-            x_emb = emb_layer(x)
+            x_emb = emb_layer(x.long())
             out.append(x_emb)
 
         if self._has_numericals:

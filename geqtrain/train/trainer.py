@@ -589,10 +589,10 @@ class Trainer:
             'target_names': self.target_names or ['target'],
         }
 
-        if not (self.metrics_key.lower().startswith(VALIDATION) or self.metrics_key.lower().startswith(TRAIN)):
-            raise RuntimeError(f"metrics_key should start with either {VALIDATION} or {TRAIN}")
-        if self.report_init_validation and self.metrics_key.lower().startswith(TRAIN):
-            raise RuntimeError(f"metrics_key may not start with {TRAIN} when report_init_validation=True")
+        # if not (self.metrics_key.lower().startswith(VALIDATION) or self.metrics_key.lower().startswith(TRAIN)):
+        #     raise RuntimeError(f"metrics_key should start with either {VALIDATION} or {TRAIN}")
+        # if self.report_init_validation and self.metrics_key.lower().startswith(TRAIN):
+        #     raise RuntimeError(f"metrics_key may not start with {TRAIN} when report_init_validation=True")
 
     def _init_callbacks(self):
         """Initialize callbacks."""
@@ -1348,7 +1348,7 @@ class Trainer:
                 return
 
         if self.iepoch > 0 and self.lr_scheduler_name == "ReduceLROnPlateau":
-            self.lr_sched.step(metrics=self.mae_dict[self.metrics_key])
+            self.lr_sched.step(metrics=self.pick_current_target_metric_from_mae_dict())
             if hasattr(self, "using_batch_lvl_lrscheduler"):
                 return
             setattr(self, "using_batch_lvl_lrscheduler", False)
@@ -1584,6 +1584,12 @@ class Trainer:
         if (self.ibatch + 1) % self.log_batch_freq == 0 or (self.ibatch + 1) == self.n_batches:
             self.logger.info(log_str)
 
+    def pick_current_target_metric_from_mae_dict(self):
+        if isinstance(self.metrics_key, (list, tuple)):
+            out = torch.tensor([self.mae_dict[_metric] for _metric in self.metrics_key], dtype=torch.float32)
+            return out.mean().item()
+        return self.mae_dict[self.metrics_key]
+
     def end_of_epoch_save(self):
         """
         save model and trainer details
@@ -1593,7 +1599,7 @@ class Trainer:
 
         with atomic_write_group():
             # allow current_metrics to be None at first epoch in case tracked metric is a training metric; mae_dict.keys = list of metrics listed in yaml under metrics_components
-            current_metrics = self.mae_dict.get(self.metrics_key, None)
+            current_metrics = self.pick_current_target_metric_from_mae_dict()
             if not current_metrics:
                 return
 
