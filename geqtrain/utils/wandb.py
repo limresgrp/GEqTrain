@@ -1,7 +1,5 @@
 import wandb
 import logging
-from wandb.util import json_friendly_val
-
 from pathlib import Path
 
 import os, shutil
@@ -54,37 +52,33 @@ def init_n_update_wandb(config):
     )
 
     # save config as-is on wandb for experiment relaunching
-
     wandb.save(Path(config.filepath).resolve(), policy = "now")
 
     # upload geqtrain code
-
     source = Path(__file__).parent.parent.resolve()
     upload_zipped_code_on_wandb(source, 'geqtrain_source_code')
 
     # upload ad-hoc code
-
     if 'code_folder_name' in config:
         source = Path().resolve() / config['code_folder_name']
         upload_zipped_code_on_wandb(source, f'{config["code_folder_name"]}_source_code')
 
     # download from wandb set up
-
     updated_parameters = dict(wandb.config)
     for k, v_new in updated_parameters.items():
-        skip = False
-        if k in config.keys():
-            # double check the one sanitized by wandb
+        if k in config:
+            # Check if the new value from wandb is different from the local one
+            from wandb.util import json_friendly_val
             v_old = json_friendly_val(config[k])
-            if repr(v_new) == repr(v_old):
-                skip = True
-        if skip:
-            logging.info(f"# skipping wandb update {k} from {v_old} to {v_new}")
+            if repr(v_new) != repr(v_old):
+                # Only log when an actual update happens
+                logging.info(f"# wandb update: Overriding config '{k}' from '{v_old}' with sweep value '{v_new}'")
+                config.update({k: v_new})
         else:
+            # If the key is entirely new from wandb, add it
             config.update({k: v_new})
-            logging.info(f"# wandb update {k} from {v_old} to {v_new}")
-    return config
 
+    return config
 
 def resume_wandb_run(config):
     # resume to the old wandb run

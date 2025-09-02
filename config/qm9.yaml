@@ -10,7 +10,7 @@ default_dtype: float32
 
 # --- M O D E L --- #
 model_builders:
-  - HeadlessNodeModel
+  - NodeModel
   - Heads
   - cls: NodewiseReduce
     name: node_pooling

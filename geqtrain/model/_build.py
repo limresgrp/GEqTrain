@@ -2,7 +2,7 @@ import copy
 import inspect
 from typing import Optional
 from torch.nn import Module
-from geqtrain.data import AtomicDataset
+from geqtrain.data.dataset import AtomicDataset
 from geqtrain.utils import load_callable, Config, add_tags_to_parameter
 from typing import Tuple, Dict
 

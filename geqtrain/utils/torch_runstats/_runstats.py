@@ -27,7 +27,6 @@ class Reduction(enum.Enum):
 
     MEAN = "mean"
     RMS = "rms"
-    LATEST = "latest"
 torch.serialization.add_safe_globals([Reduction])
 
 
@@ -92,7 +91,7 @@ class RunningStats:
             self._dim[i] for i in range(len(self._dim)) if i not in self._reduce_dims
         )
 
-        if reduction not in (Reduction.MEAN, Reduction.RMS, Reduction.LATEST):
+        if reduction not in (Reduction.MEAN, Reduction.RMS):
             raise NotImplementedError(f"Reduction {reduction} not yet implimented")
         self._reduction = reduction
         self.ignore_nan = ignore_nan
@@ -227,9 +226,6 @@ class RunningStats:
         """
 
         average, new_sum, N = self.batch_result(batch, accumulate_by)
-        if self._reduction == Reduction.LATEST:
-            self._state = average
-            return average
 
         # assert self._state.shape == ((self._n_bins,)+self._dim)
         # assert self._n.shape == ((self._n_bins,)+self._dim)
@@ -293,6 +289,7 @@ class RunningStats:
         """
         self._state = self._state.to(dtype=dtype, device=device)
         self._n = self._n.to(device=device)
+        return self
 
     def current_result(self) -> torch.Tensor:
         """Get the current value of the running statistic.
@@ -305,8 +302,6 @@ class RunningStats:
             return self._state.clone()
         elif self._reduction == Reduction.RMS:
             return self._state.sqrt()
-        elif self._reduction == Reduction.LATEST:
-            return self._state.clone()
 
     @property
     def n(self) -> torch.Tensor:

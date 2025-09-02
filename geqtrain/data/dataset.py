@@ -140,11 +140,10 @@ class LazyLoadingConcatDataset(Dataset):
     class_name: str
     prefix: str
 
-    def __init__(self, class_name, prefix, config, datasets_list: List[dict]):
+    def __init__(self, class_name, prefix, datasets_list: List[dict]):
         super().__init__()
         self._class_name       = class_name
         self._prefix           = prefix
-        self._config           = config
         self._lazy_datasets    = [i.pop('lazy_dataset') for i in datasets_list]
         self._ensemble_indices = np.array([i.get(f'{prefix}_ensemble_index') for i in datasets_list])
         self._datasets_list    = datasets_list
@@ -217,17 +216,19 @@ class LazyLoadingConcatDataset(Dataset):
         return instance[self._lazy_datasets[dataset_idx][sample_idx]]
 
     def __getdataset__(self, dataset_idx):
-        _config = copy.deepcopy(self.config)
-        file_name_key = f"{self._prefix}_file_name"
-        _config[file_name_key] = self._datasets_list[dataset_idx][file_name_key]
-        ensemble_index_key = f"{self._prefix}_ensemble_index"
-        _config[ensemble_index_key] = self._datasets_list[dataset_idx][ensemble_index_key]
-
+        """
+        Instantiates a child dataset using the specific configuration
+        stored for it in the datasets_list.
+        """
+        # Retrieve the exact config needed to reconstruct THIS child dataset
+        instance_config = self._datasets_list[dataset_idx]['config']
+        
+        # Instantiate with the retrieved config
         instance, _ = instantiate(
             self._class_name, # dataset type selected for instanciation eg NpzDataset
             prefix=self._prefix, # looks for {prefix}_ in yaml to select ctor params (default: 'dataset')
             positional_args={},
-            optional_args=_config, # the whole yaml parsed and wrapped in a dict
+            optional_args=instance_config,
         )
 
         return instance
@@ -378,7 +379,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.target_indices = target_indices
         self.target_key = target_key
 
-        self.data = None
+        self.data: Optional[Batch] = None
         self.fixed_fields = None
 
         self.node_attributes = node_attributes

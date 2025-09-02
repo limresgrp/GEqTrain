@@ -240,9 +240,9 @@ def save_file(
     return filename
 
 
-def load_file(supported_formats: dict, filename: str, enforced_format: str = None):
+def load_file(supported_formats: dict, filename: str, enforced_format: str = None, **kwargs):
     """
-    Load file. Current support form
+    Load file. Accepts **kwargs to pass to the underlying loader (e.g., map_location for torch.load).
     """
     if enforced_format is None:
         format = match_suffix(supported_formats=supported_formats, filename=filename)
@@ -255,30 +255,27 @@ def load_file(supported_formats: dict, filename: str, enforced_format: str = Non
 
     if format == "json":
         import json
-
         with open(filename) as fin:
-            return json.load(fin)
+            return json.load(fin, **kwargs)
     elif format == "yaml":
         import yaml
-
         with open(filename) as fin:
+            # yaml.load doesn't typically take kwargs, but we keep it for consistency
             return yaml.load(fin, Loader=yaml.Loader)
     elif format == "torch":
         import torch
-
-        return torch.load(filename, weights_only=False)
+        # Pass any extra kwargs, like map_location, to torch.load
+        return torch.load(filename, **kwargs)
     elif format == "pickle":
         import pickle
-
         with open(filename, "rb") as fin:
-            return pickle.load(fin)
+            return pickle.load(fin, **kwargs)
     elif format == "npz":
         import numpy as np
-
-        return np.load(filename, allow_pickle=True, mmap_mode='r')
+        return np.load(filename, allow_pickle=True, **kwargs)
     else:
         raise NotImplementedError(
-            f"Input format not supported:" f" try from {supported_formats.keys()}"
+            f"Input format not supported: try from {list(supported_formats.keys())}"
         )
 
 
@@ -345,27 +342,25 @@ def adjust_format_name(
     return newformat, newname
 
 
-def match_suffix(supported_formats: str, filename: str):
+def match_suffix(supported_formats: dict, filename: str):
     """
     Recognize format based on suffix
 
     Args:
-
         supported_formats (dict): list of supported formats and corresponding suffix
-        filename (str): initial filename
+        filename (str or Path): initial filename
 
     Returns:
-
         format (str): the recognized format
-
     """
-    for form, suffs in supported_formats.items():
-        if isinstance(suffs, (set, list, tuple)):
-            for suff in suffs:
-                if filename.lower().endswith(f".{suff}"):
-                    return form
-        else:
-            if filename.lower().endswith(f".{suffs}"):
-                return form
 
-    return list(supported_formats.keys())[0]
+    if isinstance(filename, Path):
+        filename = str(filename)
+
+    suffix = filename.split(".")[-1]
+    for key, suffixes in supported_formats.items():
+        if isinstance(suffixes, str) and suffix == suffixes:
+            return key
+        elif isinstance(suffixes, (list, tuple)) and suffix in suffixes:
+            return key
+    raise ValueError(f"Unsupported file type `{suffix}` for file `{filename}`")
