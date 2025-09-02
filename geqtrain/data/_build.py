@@ -20,7 +20,12 @@ from geqtrain.utils.torch_geometric.batch import Batch
 #           Public Functions
 # ==================================================================================================
 
-def dataset_from_config(config: Config, prefix: str = "train", loss_key: str = 'loss_coeffs') -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
+def dataset_from_config(
+    config: Config,
+    prefix: str = "train",
+    loss_key: str = 'loss_coeffs',
+    metadata_only: bool = False, # TODO: Can we spare some computation when only need to load dataset to know number of elements?
+) -> Union[InMemoryConcatDataset, LazyLoadingConcatDataset]:
     """
     Initializes a dataset from a configuration object, supporting list-based
     and prefix-based definitions, lazy loading, and data filtering.

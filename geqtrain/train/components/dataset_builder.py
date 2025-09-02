@@ -9,7 +9,7 @@ def save_txt_file(filename, arrays):
     with open(filename, "w") as f:
         for arr in arrays:
             if isinstance(arr, torch.Tensor):
-                arr = arr.numpy()
+                arr = arr.cpu().numpy()
             np.savetxt(f, [arr], fmt="%d")  # write as one row
 
 def parse_txt_file(filename):
@@ -29,32 +29,39 @@ class DatasetBuilder:
         self.output = output
         self.dataset_rng = dataset_rng
 
-        self.n_train = self.config.get("n_train", None)
-        self.n_val = self.config.get("n_val", None)
-        self.n_test = self.config.get("n_test", None)
+    # --- For generating indices efficiently ---
+    def resolve_split_indices(self):
+        """
+        Resolves train/val indices without loading the full dataset.
+        Returns:
+            (list of tensors, list of tensors): train_idcs, val_idcs
+        """
+        self.logger.info("Resolving dataset indices...")
 
-        self.train_idcs = self.config.get("train_idcs", None)
-        self.val_idcs   = self.config.get("val_idcs", None)
-        self.test_idcs  = self.config.get("test_idcs", None)
+        # The rest of this logic is moved from the old `build_train_val`
+        train_idcs, val_idcs = self._resolve_train_val_indices()
 
-    def build_train_val(self):
-        """Builds and returns the final training and validation datasets."""
-        # 1. Instantiate the raw datasets
+        # Save the indices (only on master process, guarded by self.output)
+        if self.output is not None:
+            save_txt_file(self.output.generate_file(f"train_idcs.txt"), train_idcs)
+            save_txt_file(self.output.generate_file(f"val_idcs.txt"), val_idcs)
+        
+        return train_idcs, val_idcs
+
+    # --- For building final datasets from indices ---
+    def build_datasets_from_indices(self, train_idcs, val_idcs):
+        """
+        Instantiates the full datasets and applies the provided indices.
+        """
+        self.logger.info("Building final datasets from indices...")
+
+        # Now, instantiate the full, potentially in-memory datasets
         train_dset = dataset_from_config(self.config, prefix="train")
         try:
             val_dset = dataset_from_config(self.config, prefix="validation")
         except KeyError:
             val_dset = None
         
-        # 2. Get the indices
-        train_idcs, val_idcs = self._resolve_train_val_indices(train_dset, val_dset)
-
-        # 3. Save the indices
-        if self.output is not None:
-            save_txt_file(self.output.generate_file(f"train_idcs.txt"), train_idcs)
-            save_txt_file(self.output.generate_file(f"val_idcs.txt"), val_idcs)
-        
-        # 4. Create the final indexed datasets
         final_train_dset = self._index_dataset(train_dset, train_idcs)
         final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, val_idcs)
         return final_train_dset, final_val_dset
@@ -90,52 +97,65 @@ class DatasetBuilder:
         final_test_dset = self._index_dataset(test_dset, self.test_idcs)
         return final_test_dset
 
-    def _resolve_train_val_indices(self, train_dset, val_dset):
+    def _resolve_train_val_indices(self):
         """
         Robustly determines training and validation indices and updates n_train/n_val counts.
         """
+
+        train_idcs = self.config.get("train_idcs", None)
+        val_idcs   = self.config.get("val_idcs", None)
+        n_train    = self.config.get("n_train", None)
+        n_val      = self.config.get("n_val", None)
+
         # --- Step 1: Resolve indices from all explicit sources ---
         
         # Check for file paths for any indices not already loaded
-        if isinstance(self.train_idcs, str):
-            self.logger.info(f"Loading training indices from file: {self.train_idcs}")
-            self.train_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.train_idcs)]
+        if isinstance(train_idcs, str):
+            self.logger.info(f"Loading training indices from file: {train_idcs}")
+            train_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(train_idcs)]
         
-        if isinstance(self.val_idcs, str):
-            self.logger.info(f"Loading validation indices from file: {self.val_idcs}")
-            self.val_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.val_idcs)]
+        if isinstance(val_idcs, str):
+            self.logger.info(f"Loading validation indices from file: {val_idcs}")
+            val_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(val_idcs)]
 
         # --- Step 2: Update counts from any resolved indices ---
-        if self.train_idcs is not None:
-            if self.n_train is not None:
+        if train_idcs is not None:
+            if n_train is not None:
                 self.logger.info("train_idcs were provided; the value of n_train in the config will be ignored and updated to match the actual indices.")
-            self.n_train = [len(t) for t in self.train_idcs]
+            n_train = [len(t) for t in train_idcs]
         
-        if self.val_idcs is not None:
-            if self.n_val is not None:
+        if val_idcs is not None:
+            if n_val is not None:
                 self.logger.info("n_val were provided; the value of n_val in the config will be ignored and updated to match the actual indices.")
-            self.n_val = [len(t) for t in self.val_idcs]
+            n_val = [len(t) for t in val_idcs]
 
         # --- Step 3: Decide the final strategy based on what has been resolved ---
-        if self.train_idcs is not None and self.val_idcs is not None:
+        if train_idcs is not None and val_idcs is not None:
             self.logger.info("Using fully provided training and validation indices.")
-            return self.train_idcs, self.val_idcs
+            return train_idcs, val_idcs
 
-        elif self.train_idcs is not None: # But val_idcs is None
-            self.val_idcs = self._generate_val_idcs_from_remaining(train_dset, self.train_idcs)
-            return self.train_idcs, self.val_idcs
+        # Load lightweight, metadata-only versions of the datasets
+        # This assumes dataset_from_config can be modified to support this
+        train_dset_meta = dataset_from_config(self.config, prefix="train", metadata_only=True)
+        try:
+            val_dset_meta = dataset_from_config(self.config, prefix="validation", metadata_only=True)
+        except KeyError:
+            val_dset_meta = None
+        
+        if train_idcs is not None: # But val_idcs is None
+            val_idcs = self._generate_val_idcs_from_remaining(train_dset_meta, train_idcs, n_val)
+            return train_idcs, val_idcs
             
-        elif self.val_idcs is not None: # But train_idcs is None
-            self.train_idcs = self._generate_train_idcs_from_remaining(train_dset, self.val_idcs)
-            return self.train_idcs, self.val_idcs
+        elif val_idcs is not None: # But train_idcs is None
+            train_idcs = self._generate_train_idcs_from_remaining(train_dset_meta, val_idcs, n_train)
+            return train_idcs, val_idcs
         else: # Neither is resolved yet, so split from counts or default
-            return self._split_from_counts(train_dset, val_dset)
+            return self._split_from_counts(train_dset_meta, val_dset_meta, n_train, n_val)
 
-    def _generate_val_idcs_from_remaining(self, dset, train_idcs):
+    def _generate_val_idcs_from_remaining(self, dset, train_idcs, n_valid_req):
         """Generates val_idcs by sampling from data not in train_idcs."""
         self.logger.info("Generating validation set from data points not used for training.")
         val_idcs = []
-        n_valid_req = self.n_val
         
         if n_valid_req is not None and not isinstance(n_valid_req, list): n_valid_req = [n_valid_req]
 
@@ -163,11 +183,10 @@ class DatasetBuilder:
             val_idcs.append(selected_idcs)
         return val_idcs
 
-    def _generate_train_idcs_from_remaining(self, dset, val_idcs):
+    def _generate_train_idcs_from_remaining(self, dset, val_idcs, n_train_req):
         """Generates train_idcs by sampling from data not in val_idcs."""
         self.logger.warning("Validation indices were provided, but training indices were not. Proceeding to select training data from remaining samples.")
         train_idcs = []
-        n_train_req = self.n_train
         
         if n_train_req is not None and not isinstance(n_train_req, list): n_train_req = [n_train_req]
 
@@ -195,10 +214,9 @@ class DatasetBuilder:
             train_idcs.append(selected_idcs)
         return train_idcs
         
-    def _split_from_counts(self, train_dset, val_dset=None):
+    def _split_from_counts(self, train_dset, val_dset, n_train, n_val):
         """Generates train/validation indices based on n_train/n_val counts."""
         self.logger.info("Generating new train/validation split from counts or default.")
-        n_train, n_val = self.n_train, self.n_val
         if n_train is not None and not isinstance(n_train, list): n_train = [n_train]
         if n_val is not None and not isinstance(n_val, list): n_val = [n_val]
 

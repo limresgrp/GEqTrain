@@ -88,12 +88,11 @@ class CheckpointHandler:
         
         updated_config = self._load_indices_from_run(updated_config, traindir)
         return model, updated_config
-
-    def load_for_restart(self):
-        """Load the entire trainer state from the checkpoint in the current run directory."""
-        logging.info("Loading state from checkpoint for restart...")
+    
+    def load_raw_state_for_restart(self):
+        """Load the trainer state dictionary from the checkpoint file without applying it."""
+        logging.info("Loading raw state from checkpoint for restart...")
         
-        # Determine the target device for the CURRENT process
         device = self.trainer.dist.device
         state = load_file(
             supported_formats=dict(torch=["pt", "pth"]),
@@ -102,6 +101,11 @@ class CheckpointHandler:
             map_location=device,
             weights_only=False,
         )
+        return state
+
+    def apply_state_for_restart(self, state: dict):
+        """Apply a loaded state dictionary to the trainer's components."""
+        logging.info("Applying loaded state to trainer components...")
         
         # Load states into the already initialized components
         model_to_load = self.trainer.model.module if self.trainer.dist.is_distributed else self.trainer.model
@@ -120,12 +124,12 @@ class CheckpointHandler:
         self.trainer.best_metrics = state['best_metrics']
         self.trainer.cumulative_wall = state.get('cumulative_wall', 0)
         
-        logging.info(f"Successfully loaded state. Resuming from epoch {self.trainer.iepoch + 1}.")
+        logging.info(f"Successfully applied state. Resuming from epoch {self.trainer.iepoch + 1}.")
 
     def _load_indices_from_run(self, config, traindir):
         """
         Load train/validation indices from a previous run's checkpoint and
-        directly update the trainer's state.
+        update the config to use them.
         """
         load_train = config.get('train_idcs') == 'load'
         load_val = config.get('val_idcs') == 'load'
@@ -143,22 +147,14 @@ class CheckpointHandler:
             
             if load_train:
                 assert 'train_idcs' in original_state, "Key 'train_idcs' not found in the original trainer state."
-                
-                # Directly update the trainer's attributes
-                self.trainer.train_idcs = original_state['train_idcs']
-                self.trainer.n_train = [len(t) for t in self.trainer.train_idcs]
-                
-                config.pop('train_idcs') # Remove the 'load' keyword
+                # Update the config dict. This config will be passed to the DatasetBuilder.
+                config['train_idcs'] = original_state['train_idcs']
                 logging.info("Successfully loaded 'train_idcs' from previous run.")
             
             if load_val:
                 assert 'val_idcs' in original_state, "Key 'val_idcs' not found in the original trainer state."
-
-                # Directly update the trainer's attributes
-                self.trainer.val_idcs = original_state['val_idcs']
-                self.trainer.n_val = [len(t) for t in self.trainer.val_idcs]
-                
-                config.pop('val_idcs') # Remove the 'load' keyword
+                # Update the config dict.
+                config['val_idcs'] = original_state['val_idcs']
                 logging.info("Successfully loaded 'val_idcs' from previous run.")
                 
         return config
