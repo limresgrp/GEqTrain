@@ -1,9 +1,9 @@
+import torch
 import logging
 import contextlib
+import numpy as np
 from copy import deepcopy
 from typing import List, Optional
-import numpy as np
-import torch
 from geqtrain.data import AtomicData, AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS
 from geqtrain.train.loss import Loss
 

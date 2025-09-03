@@ -4,7 +4,10 @@ import os
 import wandb
 import torch
 import torch.distributed as dist
+from e3nn.o3 import Irreps
 from time import perf_counter
+from geqtrain.data import AtomicDataDict
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
@@ -20,6 +23,8 @@ class Callback:
     def on_epoch_begin(self, **kwargs): pass
     def on_epoch_end(self, **kwargs): pass
     def on_batch_begin(self, **kwargs): pass
+    def on_after_backward(self, **kwargs): pass
+    def on_step_end(self, **kwargs): pass
     def on_batch_end(self, **kwargs): pass
     def on_train_begin(self, **kwargs): pass
     def on_train_end(self, **kwargs): pass
@@ -236,3 +241,44 @@ class EarlyStoppingCallback(Callback):
         else:
             # For single-GPU runs, just update the flag directly
             self.trainer.should_stop = should_stop
+
+class GrokFastCallback(Callback):
+    """Applies Grokfast's gradient filtering after the backward pass."""
+    def on_trainer_begin(self, **kwargs):
+        # Initialize the grads attribute on the trainer if needed
+        if self.trainer.config.get('use_grokfast', False):
+            if not hasattr(self.trainer, 'grads'):
+                self.trainer.grads = None
+    
+    def on_after_backward(self, **kwargs):
+        if self.trainer.config.get('use_grokfast', False):
+            from geqtrain.utils import gradfilter_ema
+            self.trainer.grads = gradfilter_ema(self.trainer.model, grads=self.trainer.grads)
+
+class ActivationNormCallback(Callback):
+    """Tracks the norm of node activations at the end of a training batch."""
+    def on_step_end(self, batch_output, summary: EpochSummary, **kwargs):
+        # This callback only runs during training and at the specified frequency
+        if self.trainer.batch_type != TRAIN or batch_output is None or summary is None:
+            return
+            
+        if not ((self.trainer.ibatch + 1) % self.trainer.log_batch_freq == 0 or (self.trainer.ibatch + 1) == self.trainer.n_batches):
+            return
+
+        with torch.no_grad():
+            batch_node_norms = {}
+            model = self.trainer.model
+            # The model might be wrapped in DDP, access the module
+            model_to_inspect = model.module if self.trainer.dist.is_distributed else model
+
+            irreps_as_dict = {ir.l:mul for (mul, ir) in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
+            node_reprs = batch_output[AtomicDataDict.NODE_FEATURES_KEY]
+            split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+            reshapers = [reshape_irreps(Irreps(str(ir))) for ir in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
+            reprs = torch.split(node_reprs, split_sizes, dim=1)
+            
+            for l, repr_ in enumerate(reprs):
+                norm = torch.mean(torch.norm(reshapers[l](repr_).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
+                batch_node_norms[f'node_repr_l_{l}_mean'] = norm
+            
+            summary.add_node_feature_norms(batch_node_norms)

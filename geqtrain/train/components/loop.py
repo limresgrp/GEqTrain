@@ -11,10 +11,6 @@ from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train._key import TRAIN, VALIDATION
 
-from geqtrain.data import AtomicDataDict
-from geqtrain.nn.mace.irreps_tools import reshape_irreps
-from e3nn import o3
-
 
 class TrainingLoop:
     """Manages the training and validation loops for each epoch."""
@@ -81,87 +77,84 @@ class TrainingLoop:
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
 
     def _run_batch(self, data, is_train: bool, summary: EpochSummary):
-        """Runs a single batch with all original logic."""
-        already_computed_nodes = None
-        while True:
-            out, ref_data, batch_chunk_center_nodes, _ = run_inference(
-                model=self.model,
-                data=data,
-                device=self.dist.device,
-                loss_fn=self.loss_fn,
-                config=self.trainer.config.as_dict(),
-                already_computed_nodes=already_computed_nodes,
-                is_train=is_train,
-            )
-            loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
+        """
+        Orchestrates batch processing, handling chunking if enabled.
+        This method controls the looping logic.
+        """
+        if not self.trainer.config.get('chunking', False):
+            # No chunking, just one step.
+            self._process_step(data, is_train, summary)
+        else:
+            # Chunking is enabled, so we loop.
+            already_computed_nodes = None
+            while True:
+                # Process one chunk of the batch
+                out, center_nodes = self._process_step(
+                    data, is_train, summary, already_computed_nodes
+                )
+                
+                # Update the state for the next chunk
+                already_computed_nodes = evaluate_end_chunking_condition(
+                    already_computed_nodes, center_nodes, len(center_nodes)
+                )
 
-            if is_train:
-                accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
-                loss = loss / accumulation_steps
-                loss.backward()
-                self.trainer.accumulation_counter += 1
+                if already_computed_nodes is None:
+                    break # Finished all chunks for this batch
+    
+    def _process_step(self, data, is_train: bool, summary: EpochSummary, already_computed_nodes=None):
+        """
+        Performs the core computation for a single step (a chunk or a full batch).
+        This method contains the inference and training logic.
+        """
+        out, ref_data, batch_chunk_center_nodes, _ = run_inference(
+            model=self.model,
+            data=data,
+            device=self.dist.device,
+            loss_fn=self.loss_fn,
+            config=self.trainer.config.as_dict(),
+            already_computed_nodes=already_computed_nodes,
+            is_train=is_train,
+        )
+        loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
-                if self.trainer.config.get('use_grokfast', False):
-                    from geqtrain.utils import gradfilter_ema
-                    self.trainer.grads = gradfilter_ema(self.model, grads=self.trainer.grads)
+        if is_train:
+            accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
+            loss = loss / accumulation_steps
+            loss.backward()
+            self.trainer.accumulation_counter += 1
+            self.trainer._dispatch_callbacks('on_after_backward')
 
-                if ((self.trainer.ibatch + 1) % self.trainer.log_batch_freq == 0 or (self.trainer.ibatch + 1) == self.trainer.n_batches):
-                    with torch.no_grad():
-                        batch_node_norms = {}
-                        model = self.model
-                        irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
-                        node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
-                        split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
-                        reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
-                        reprs = torch.split(node_reprs, split_sizes, dim=1)
-                        for l, repr_ in enumerate(reprs):
-                            norm = torch.mean(torch.norm(reshapers[l](repr_).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                            batch_node_norms[f'node_repr_l_{l}_mean'] = norm
-                        summary.add_node_feature_norms(batch_node_norms)
+            if self.trainer.accumulation_counter == accumulation_steps:
+                grad_norm, max_grad_norm_val = gradient_clipping(
+                    self.model,
+                    self.gradnorms_queue,
+                    self.trainer.config.get('max_gradient_norm', math.inf),
+                    self.dist.is_master,
+                )
+                if self.dist.is_master:
+                    summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
 
-                if self.trainer.accumulation_counter == accumulation_steps:
-                    grad_norm, max_grad_norm_val = gradient_clipping(
-                        self.model,
-                        self.gradnorms_queue,
-                        self.trainer.config.get('max_gradient_norm', math.inf),
-                        self.dist.is_master,
-                    )
-                    if self.dist.is_master:
-                        summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
+                self.optim.step()
+                if self.ema: self.ema.update()
+                self._lr_sched_step(summary=summary, batch_lvl=True)
+                self.optim.zero_grad(set_to_none=True)
+                self.trainer.accumulation_counter = 0
 
-                    self.optim.step()
-                    if self.ema:
-                        self.ema.update()
+        syncd_loss = self.dist.sync_tensor(loss.detach())
+        syncd_loss_contrib = self.dist.sync_dict_of_tensors(loss_contrib)
+        batch_losses = self.loss_fn.loss_stat(syncd_loss, syncd_loss_contrib)
+        if self.dist.is_master: self.trainer.batch_losses = batch_losses
 
-                    self._lr_sched_step(summary=summary, batch_lvl=True)
-                    self.optim.zero_grad(set_to_none=True)
-                    self.trainer.accumulation_counter = 0
+        with torch.no_grad():
+            batch_metrics = self.metrics(pred=out, ref=ref_data)
+            syncd_batch_metrics = self.dist.sync_dict_of_tensors(batch_metrics)
+            self.trainer.batch_metrics = syncd_batch_metrics
 
-            syncd_loss = self.dist.sync_tensor(loss.detach())
-            syncd_loss_contrib = self.dist.sync_dict_of_tensors(loss_contrib)
-
-            # The loss object's internal tracker is used to get per-batch results
-            batch_losses = self.loss_fn.loss_stat(syncd_loss, syncd_loss_contrib)
-            if self.dist.is_master:
-                self.trainer.batch_losses = batch_losses
-
-            with torch.no_grad():
-                # First, compute metrics on the local batch
-                batch_metrics = self.metrics(pred=out, ref=ref_data)
-                # Synchronize the metrics dictionary across all GPUs
-                # NOTE: For metrics like RMSDMetric, averaging across multiple GPUs is technically incorrect.
-                # However, this is not very impactful in practice and is difficult to handle properly—just be aware.
-                syncd_batch_metrics = self.dist.sync_dict_of_tensors(batch_metrics)
-                self.trainer.batch_metrics = syncd_batch_metrics
-
-            if not self.trainer.config.get('chunking', False):
-                break
-
-            already_computed_nodes = evaluate_end_chunking_condition(
-                already_computed_nodes, batch_chunk_center_nodes, len(batch_chunk_center_nodes)
-            )
-            if already_computed_nodes is None:
-                break
+        # Dispatch the per-step hook for callbacks
+        self.trainer._dispatch_callbacks('on_step_end', batch_output=out, summary=summary)
+        
+        # Return values needed by the chunking controller
+        return out, batch_chunk_center_nodes
 
     def _lr_sched_step(self, summary: EpochSummary, batch_lvl: bool):
         """Handle LR scheduler steps for both warmup and main phases."""

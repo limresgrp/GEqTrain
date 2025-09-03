@@ -13,7 +13,7 @@ from geqtrain.model import model_from_config
 
 # Import the new components
 from .components.distributed import DistributedManager
-from .components.callbacks import Logger, CheckpointCallback, EarlyStoppingCallback
+from .components.callbacks import ActivationNormCallback, GrokFastCallback, Logger, CheckpointCallback, EarlyStoppingCallback
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -183,8 +183,16 @@ class Trainer:
         if self.config.get('wandb'):
             from .components.callbacks import WandbCallback
             callbacks.insert(1, WandbCallback()) # Insert Wandb before checkpointing
+        
+        if self.config.get('use_grokfast', False):
+            callbacks.append(GrokFastCallback())
+        
+        if self.config.get('track_activation_norms', True): # Enabled by default
+            callbacks.append(ActivationNormCallback())
+        
         for cb_string in self.config.get('callbacks', []):
             callbacks.append(load_callable(cb_string)())
+        
         for cb in callbacks:
             cb.set_trainer(self)
         self.callbacks = callbacks
