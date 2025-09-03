@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple, Union
 
 from e3nn import nn, o3
 from e3nn.util.jit import compile_mode
-# from torch_scatter import scatter_sum
 from geqtrain.utils._model_utils import process_out_irreps
 from geqtrain.utils.pytorch_scatter import scatter_sum
 

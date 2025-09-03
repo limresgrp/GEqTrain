@@ -3,15 +3,7 @@
 import torch
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
-
-from torch_scatter import(
-    scatter_sum,
-    scatter_mean,
-    scatter_max,
-    scatter_log_softmax,
-    scatter_logsumexp,
-    scatter_softmax,
-)
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_mean, scatter_max
 
 def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
     ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''

@@ -1,6 +1,4 @@
-import torch
-from torch.nn import Module, Parameter
-# from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_add
+from torch.nn import Module
 from geqtrain.utils.pytorch_scatter import scatter_mean, scatter_sum, scatter_max
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.data import AtomicDataDict
