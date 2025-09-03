@@ -5,6 +5,7 @@ import wandb
 import torch
 import torch.distributed as dist
 from time import perf_counter
+from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
 from geqtrain.utils.wandb import init_n_update_wandb, resume_wandb_run
@@ -14,16 +15,16 @@ class Callback:
     def set_trainer(self, trainer):
         self.trainer = trainer
 
-    def on_trainer_begin(self): pass
-    def on_trainer_end(self): pass
-    def on_epoch_begin(self): pass
-    def on_epoch_end(self): pass
-    def on_batch_begin(self): pass
-    def on_batch_end(self): pass
-    def on_train_begin(self): pass
-    def on_train_end(self): pass
-    def on_validation_begin(self): pass
-    def on_validation_end(self): pass
+    def on_trainer_begin(self, **kwargs): pass
+    def on_trainer_end(self, **kwargs): pass
+    def on_epoch_begin(self, **kwargs): pass
+    def on_epoch_end(self, **kwargs): pass
+    def on_batch_begin(self, **kwargs): pass
+    def on_batch_end(self, **kwargs): pass
+    def on_train_begin(self, **kwargs): pass
+    def on_train_end(self, **kwargs): pass
+    def on_validation_begin(self, **kwargs): pass
+    def on_validation_end(self, **kwargs): pass
 
 class Logger(Callback):
     """Handles all logging to the console and local files."""
@@ -43,11 +44,6 @@ class Logger(Callback):
             self.trainer.logger.info(f"! Stop training: {self.trainer.stop_arg}")
             self.trainer.logger.info(f"Cumulative wall time: {self.trainer.cumulative_wall}")
 
-    def on_epoch_begin(self):
-        if self.trainer.dist.is_master:
-            self.trainer.gradnorms.clear()
-            self.trainer.gradnorms_clip.clear()
-
     # == Timing Hooks ==
     def on_train_begin(self):
         if self.trainer.dist.is_master:
@@ -66,9 +62,9 @@ class Logger(Callback):
             self.trainer.validation_wall = perf_counter() - self.trainer._phase_start_time
             self.trainer.cumulative_wall += self.trainer.train_wall + self.trainer.validation_wall
 
-    def on_epoch_end(self):
+    def on_epoch_end(self, summary: EpochSummary):
         if self.trainer.dist.is_master:
-            self._log_epoch()
+            self._log_epoch(summary)
 
     def on_batch_end(self):
         if self.trainer.dist.is_master:
@@ -106,10 +102,10 @@ class Logger(Callback):
         if (self.trainer.ibatch + 1) % self.trainer.log_batch_freq == 0 or (self.trainer.ibatch + 1) == self.trainer.n_batches:
             logger.info(log_str)
 
-    def _log_epoch(self):
-        # The mae_dict is pre-assembled by the TrainingLoop.
-        mae_dict = self.trainer.mae_dict
-        epoch = mae_dict["epoch"]
+    def _log_epoch(self, summary: EpochSummary):
+        # 1. Get the flat dictionary containing all values
+        mae_dict = summary.to_flat_dict()
+        epoch = summary.epoch
 
         # Build console logs for each category separately
         log_headers_console = {}
@@ -121,14 +117,16 @@ class Logger(Callback):
             header = " ".join([f"{s:>12s}" for s in ["Epoch", "LR", "Wall"]])
             log_str = f"{epoch:12d} {mae_dict['LR']:12.3g} {wall:12.3f}"
 
-            for key in self.trainer.loss_dict[category]:
-                header += f" {key:>12.12}"
-                log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
+            # 2. Get the specific list of loss keys from the summary
+            for key in summary.get_loss_keys(category):
+                full_key = f'{category}_{key}'
+                header  += f" {key:>12.12}"
+                log_str += f" {mae_dict.get(full_key, 0.0):12.3g}"
 
-            metrics = self.trainer.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
-            for key in metrics:
-                header += f" {key:>12.12}"
-                log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
+            # 3. Get the specific list of flattened metric keys from the summary
+            for key in summary.get_flattened_metric_keys(category):
+                header  += f" {key:>12.12}"
+                log_str += f" {mae_dict.get(f'{category}_{key}', 'N.A.'):12.3g}"
 
             log_headers_console[category] = header
             log_strs_console[category] = log_str
@@ -172,23 +170,30 @@ class WandbCallback(Callback):
         if self.trainer.config.get("wandb_watch", False):
             wandb.watch(self.trainer.model, **self.trainer.config.get("wandb_watch_kwargs", {}))
 
-    def on_epoch_end(self):
+    def on_epoch_end(self, summary: EpochSummary):
         """Log the epoch's metrics to WandB from the master rank only."""
         if self.trainer.dist.is_master and wandb.run is not None:
-            wandb.log(self.trainer.mae_dict)
-            if hasattr(self.trainer, 'gradnorms') and self.trainer.gradnorms:
-                for norm in self.trainer.gradnorms:
-                    wandb.log({"gradient_norm": norm})
-            if hasattr(self.trainer, 'gradnorms_clip') and self.trainer.gradnorms_clip:
-                for norm_clip in self.trainer.gradnorms_clip:
-                    wandb.log({"gradient_norm_clip_value": norm_clip})
+            wandb.log(summary.to_flat_dict())
+            
+            # Log each individual norm value for more detailed plots
+            for norm in summary.grad_norms:
+                wandb.log({"train_gradient_norm_step": norm})
+            for norm_clip in summary.grad_norms_clip:
+                wandb.log({"train_gradient_norm_clip_value_step": norm_clip})
+
+            for key, norm_list in summary.node_feature_norms.items():
+                for norm in norm_list:
+                    wandb.log({f"train_{key}_step": norm.item()})
 
 class CheckpointCallback(Callback):
-    def on_epoch_end(self):
+    def on_epoch_end(self, summary: EpochSummary):
         if not self.trainer.dist.is_master: return
+        
+        current_metrics = summary.get_target_metric(self.trainer.metrics_key)
+        if current_metrics is None:
+            return
+        
         with atomic_write_group():
-            current_metrics = self.trainer.pick_current_target_metric_from_mae_dict()
-            if current_metrics is None: return
             is_improved = (current_metrics < self.trainer.best_metrics if self.trainer.metric_criteria == 'decreasing' else current_metrics > self.trainer.best_metrics)
             if is_improved:
                 self.trainer.best_metrics = current_metrics
@@ -203,14 +208,14 @@ class CheckpointCallback(Callback):
 
 class EarlyStoppingCallback(Callback):
     """Handles early stopping with proper DDP synchronization."""
-    def on_epoch_end(self):
+    def on_epoch_end(self, summary: EpochSummary):
         should_stop = False
         # 1. Only the master rank evaluates the stopping condition
         if self.trainer.dist.is_master:
-            if self.trainer.early_stopping_conds is not None and hasattr(self.trainer, "mae_dict"):
+            if self.trainer.early_stopping_conds is not None and summary is not None:
                 is_over = self.trainer.iepoch >= self.trainer.warmup_epochs
                 if is_over:
-                    early_stop_triggered, args, _ = self.trainer.early_stopping_conds(self.trainer.mae_dict)
+                    early_stop_triggered, args, _ = self.trainer.early_stopping_conds(summary.to_flat_dict())
                     if early_stop_triggered:
                         self.trainer.stop_arg = args
                         should_stop = True

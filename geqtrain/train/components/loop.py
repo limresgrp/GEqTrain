@@ -1,7 +1,10 @@
 # components/loop.py
 from collections import defaultdict
+import math
 import torch
 import contextlib
+
+from geqtrain.train.components.epoch_summary import EpochSummary
 
 from .inference import run_inference
 from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
@@ -27,43 +30,23 @@ class TrainingLoop:
         self.warmup_sched = trainer.warmup_sched
         self.gradnorms_queue = Queue()
 
-    def run_epoch(self, validation_only=False):
-        """Runs a full training and validation epoch."""
+    def run_epoch(self, summary: EpochSummary, validation_only=False):
+        """
+        Runs a full training and validation epoch, populating the provided summary object.
+        """
         if not validation_only:
             if self.trainer.train_sampler is not None:
                 self.trainer.train_sampler.set_epoch(self.trainer.iepoch + 1)
-            self.run_phase(TRAIN)
+            self.run_phase(TRAIN, summary)
 
         ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
         with ema_cm:
-            self.run_phase(VALIDATION)
-
-        # Assemble the master epoch summary dict (`mae_dict`)
-        self._build_epoch_summary()
+            self.run_phase(VALIDATION, summary)
 
         # Step the LR scheduler after the epoch summary is built
-        self._lr_sched_step(batch_lvl=False)
+        self._lr_sched_step(summary=summary, batch_lvl=False)
 
-    def _build_epoch_summary(self):
-        """Assembles the `mae_dict` with all results from the epoch."""
-        epoch = self.trainer.iepoch + 1
-        train_wall = self.trainer.train_wall if epoch > 0 else 0.0
-
-        self.trainer.mae_dict = {
-            "epoch": epoch, "LR": self.trainer.optim.param_groups[0]["lr"],
-            "train_wall": train_wall, "validation_wall": self.trainer.validation_wall,
-            "cumulative_wall": self.trainer.cumulative_wall,
-        }
-
-        categories = [TRAIN, VALIDATION] if epoch > 0 else [VALIDATION]
-        for category in categories:
-            for key, value in self.trainer.loss_dict[category].items():
-                self.trainer.mae_dict[f"{category}_{key}"] = value
-            metrics = self.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
-            for key, value in metrics.items():
-                self.trainer.mae_dict[f"{category}_{key}"] = value
-
-    def run_phase(self, phase: str):
+    def run_phase(self, phase: str, summary: EpochSummary):
         """Runs a single phase (training or validation)."""
         self.trainer._dispatch_callbacks(f'on_{phase}_begin')
 
@@ -87,15 +70,17 @@ class TrainingLoop:
             self.trainer.ibatch = ibatch
             self.trainer.batch_type = phase
             self.trainer._dispatch_callbacks('on_batch_begin')
-            self._run_batch(batch, is_train=is_train)
+            self._run_batch(batch, is_train=is_train, summary=summary)
             self.trainer._dispatch_callbacks('on_batch_end')
 
-        # Get final results from each tracker
-        self.trainer.loss_dict[phase] = self.loss_fn.current_result()
-        self.trainer.metrics_dict[phase] = self.metrics.current_result()
+        # Get final results and record them in the summary object
+        loss_results    = self.loss_fn.current_result()
+        metrics_results = self.metrics.current_result()
+        summary.set_phase_results(phase, loss_results, metrics_results)
+
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
 
-    def _run_batch(self, data, is_train: bool):
+    def _run_batch(self, data, is_train: bool, summary: EpochSummary):
         """Runs a single batch with all original logic."""
         already_computed_nodes = None
         while True:
@@ -110,19 +95,6 @@ class TrainingLoop:
             )
             loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
-            if (self.ibatch + 1) % self.log_batch_freq == 0 or (self.ibatch + 1) == self.n_batches and is_train:
-                with torch.no_grad():
-                    # only master logs its features
-                    model = self.model.module if self.is_ddp else self.model
-                    irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
-                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
-                    split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
-                    reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
-                    reprs = torch.split(node_reprs, split_sizes, dim=1)
-                    for l, repr in enumerate(reprs):
-                        norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                        self.trainer.node_features_norms[f'node_repr_l_{l}_mean'].append(norm)
-
             if is_train:
                 accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
                 loss = loss / accumulation_steps
@@ -133,21 +105,35 @@ class TrainingLoop:
                     from geqtrain.utils import gradfilter_ema
                     self.trainer.grads = gradfilter_ema(self.model, grads=self.trainer.grads)
 
+                if ((self.trainer.ibatch + 1) % self.trainer.log_batch_freq == 0 or (self.trainer.ibatch + 1) == self.trainer.n_batches):
+                    with torch.no_grad():
+                        batch_node_norms = {}
+                        model = self.model
+                        irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
+                        node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
+                        split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+                        reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
+                        reprs = torch.split(node_reprs, split_sizes, dim=1)
+                        for l, repr_ in enumerate(reprs):
+                            norm = torch.mean(torch.norm(reshapers[l](repr_).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
+                            batch_node_norms[f'node_repr_l_{l}_mean'] = norm
+                        summary.add_node_feature_norms(batch_node_norms)
+
                 if self.trainer.accumulation_counter == accumulation_steps:
-                    max_grad_norm = self.trainer.config.get('max_gradient_norm')
-                    if max_grad_norm is not None:
-                        grad_norm, max_grad_norm_val = gradient_clipping(
-                            self.model, self.gradnorms_queue, max_grad_norm, self.dist.is_master
-                        )
-                        if self.dist.is_master:
-                            self.trainer.gradnorms.append(grad_norm.item())
-                            self.trainer.gradnorms_clip.append(float(max_grad_norm_val))
+                    grad_norm, max_grad_norm_val = gradient_clipping(
+                        self.model,
+                        self.gradnorms_queue,
+                        self.trainer.config.get('max_gradient_norm', math.inf),
+                        self.dist.is_master,
+                    )
+                    if self.dist.is_master:
+                        summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
 
                     self.optim.step()
                     if self.ema:
                         self.ema.update()
 
-                    self._lr_sched_step(batch_lvl=True)
+                    self._lr_sched_step(summary=summary, batch_lvl=True)
                     self.optim.zero_grad(set_to_none=True)
                     self.trainer.accumulation_counter = 0
 
@@ -177,7 +163,7 @@ class TrainingLoop:
             if already_computed_nodes is None:
                 break
 
-    def _lr_sched_step(self, batch_lvl: bool):
+    def _lr_sched_step(self, summary: EpochSummary, batch_lvl: bool):
         """Handle LR scheduler steps for both warmup and main phases."""
         if self.lr_sched is None:
             return
@@ -192,7 +178,7 @@ class TrainingLoop:
         else: # Epoch level
             # We only step epoch-level schedulers after the warmup period is over
             if self._is_warmup_period_over():
-                self._epoch_lvl_lrscheduler_step()
+                self._epoch_lvl_lrscheduler_step(summary)
 
     def _is_warmup_period_over(self):
         """Check if the warmup period is finished."""
@@ -207,10 +193,10 @@ class TrainingLoop:
         if scheduler_name in ("CosineAnnealingLR", "CosineAnnealingWarmRestarts"):
             self.lr_sched.step()
 
-    def _epoch_lvl_lrscheduler_step(self):
+    def _epoch_lvl_lrscheduler_step(self, summary: EpochSummary):
         """Step schedulers that update based on end-of-epoch metrics."""
         scheduler_name = self.trainer.config.get('lr_scheduler_name')
         if scheduler_name == "ReduceLROnPlateau":
-            metric = self.trainer.pick_current_target_metric_from_mae_dict()
+            metric = summary.get_target_metric(self.trainer.metrics_key)
             if metric is not None:
                 self.lr_sched.step(metrics=metric)

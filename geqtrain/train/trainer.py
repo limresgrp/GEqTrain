@@ -7,6 +7,7 @@ import torch.distributed as dist
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
+from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import Config, Output, load_callable
 from geqtrain.model import model_from_config
 
@@ -110,7 +111,7 @@ class Trainer:
         self.best_epoch, self.cumulative_wall = 0, 0
         self.should_stop, self.stop_arg = False, ""
         self.train_wall, self.validation_wall, self._phase_start_time = 0, 0, 0
-        self.batch_losses, self.batch_metrics, self.loss_dict, self.metrics_dict, self.mae_dict = {}, {}, {}, {}, {}
+        self.batch_losses, self.batch_metrics = {}, {}
         self.gradnorms, self.gradnorms_clip = [], []
         self.train_dset, self.val_dset = None, None
         self.train_idcs, self.val_idcs = None, None
@@ -192,12 +193,6 @@ class Trainer:
         for cb in self.callbacks:
             getattr(cb, event)(**kwargs)
 
-    def pick_current_target_metric_from_mae_dict(self):
-        if isinstance(self.metrics_key, (list, tuple)):
-            out = torch.tensor([self.mae_dict[_metric] for _metric in self.metrics_key], dtype=torch.float32)
-            return out.mean().item()
-        return self.mae_dict[self.metrics_key]
-
     def train(self):
         """Main training entry point."""
         self.training_loop = TrainingLoop(self)
@@ -205,9 +200,24 @@ class Trainer:
         self.wall = perf_counter()
 
         while not self.should_stop:
+            # 1. Create the stateful summary object for the new epoch
+            epoch_summary = EpochSummary(self)
+
             self._dispatch_callbacks('on_epoch_begin')
-            self.training_loop.run_epoch(validation_only=(self.iepoch == -1))
-            self._dispatch_callbacks('on_epoch_end')
+            
+            # 2. Run epoch and pass the summary object to the loop to be populated
+            self.training_loop.run_epoch(
+                summary=epoch_summary,
+                validation_only=(self.iepoch == -1)
+            )
+            
+            # 3. Finalize the summary with end-of-epoch data (timings, LR)
+            epoch_summary.finalize(self)
+            
+            # 4. Pass the completed summary to the callbacks
+            self._dispatch_callbacks('on_epoch_end', summary=epoch_summary)
+            
+            # 5. Next epoch
             self.iepoch += 1
 
         self._dispatch_callbacks('on_trainer_end')

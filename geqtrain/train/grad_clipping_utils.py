@@ -32,7 +32,7 @@ class Queue():
 def gradient_clipping(model, gradnorm_queue, max_gradient_norm, is_master):
 
     if gradnorm_queue.is_empty():
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_gradient_norm, norm_type=2.0)
         gradnorm_queue.add(float(grad_norm))
         return grad_norm, max_gradient_norm
 
