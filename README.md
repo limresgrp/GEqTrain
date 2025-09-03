@@ -119,6 +119,9 @@ export MASTER_PORT=29500
 echo "MASTER_ADDR=${MASTER_ADDR}"
 echo "MASTER_PORT=${MASTER_PORT}"
 
+# Set Wandb api key if you need to log training on W&B
+export WANDB_API_KEY=myapikey
+
 # srun will launch 4 independent copies of the following command.
 # You may need to adapt this line to your cluster's module or environment system.
 srun bash -c "
