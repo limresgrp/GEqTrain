@@ -4,6 +4,40 @@ import torch
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 
+from torch_scatter import(
+    scatter_sum,
+    scatter_mean,
+    scatter_max,
+    scatter_log_softmax,
+    scatter_logsumexp,
+    scatter_softmax,
+)
+
+def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
+    ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''
+    unique_ensembles = torch.unique(ensemble_indices)
+
+    # ensemble predictions
+    if predictions.shape == torch.Size([]) and unique_ensembles.shape[0] == 1:
+        is_input_already_ensembled = True
+    else:
+        is_input_already_ensembled = unique_ensembles.shape[0] == predictions.shape[0]
+
+    if not is_input_already_ensembled:
+        predictions = aggregation_fn(predictions, ensemble_indices)
+
+    # ensemble targets
+    if targets.shape == torch.Size([]) and unique_ensembles.shape[0] == 1:
+        is_output_already_ensembled = True
+    else:
+        is_output_already_ensembled = unique_ensembles.shape[0] == targets.shape[0]
+
+    if not is_output_already_ensembled:
+        targets = aggregation_fn(targets, ensemble_indices) # acts just as selection and ordering wrt unique_ensembles
+
+    return predictions, targets
+
+
 class LossWrapper:
     """
     A wrapper for standard torch.nn loss functions that adds capabilities like
@@ -44,7 +78,7 @@ class LossWrapper:
                 pred_key = pred_key[center_nodes_idx]
             if ref_key.shape[0] == num_atoms:
                 ref_key = ref_key[center_nodes_idx]
-        
+
         if ref_key.shape != pred_key.shape:
             ref_key = ref_key.reshape(pred_key.shape)
 
@@ -53,13 +87,13 @@ class LossWrapper:
             not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
             pred_key = torch.nan_to_num(pred_key, nan=0.0)
             ref_key = torch.nan_to_num(ref_key, nan=0.0)
-            
+
             loss = self.func(pred_key, ref_key)
             loss = loss * not_nan_mask
 
             if mean:
                 return loss.sum() / not_nan_mask.sum().clamp(min=1)
-            
+
             loss[~not_nan_mask] = torch.nan
             return loss
         else:
@@ -92,21 +126,21 @@ class RMSDMetric:
     def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
         if mean:
             raise Exception("RMSDMetric is intended for evaluation and cannot be used as a training loss.")
-        
+
         pred_key, ref_key = pred[key], ref[key]
         if ref_key.shape != pred_key.shape:
             ref_key = ref_key.reshape(pred_key.shape)
-        
+
         # Calculate the element-wise squared error
         squared_error = self.mse(pred_key, ref_key)
-        
+
         # Calculate the mean squared error for each sample (across the feature dimension)
         per_sample_mse = torch.mean(squared_error, dim=-1)
-        
+
         # 1. Compute the square root to get the per-sample RMSD.
         # RunningStats will square this value again during its RMS accumulation.
         rmsd = torch.sqrt(per_sample_mse)
-        
+
         # 2. NAN HANDLING: Invalidate the entire sample if any of its
         #    feature values were originally NaN.
         if self.ignore_nan:
@@ -114,7 +148,7 @@ class RMSDMetric:
             is_valid_sample = torch.all(torch.isfinite(pred_key) & torch.isfinite(ref_key), dim=-1)
             # Set the RMSD to NaN for invalid samples so they are ignored by RunningStats
             rmsd[~is_valid_sample] = torch.nan
-            
+
         return rmsd
 
     def __str__(self):
@@ -133,15 +167,15 @@ class FocalLossBinaryAccuracy:
     def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
         logits = pred[key]
         target = ref[key].float()
-        
+
         bce_loss = self.bce(logits, target)
         p_t = torch.exp(-bce_loss) # This is p if target=1, and 1-p if target=0
-        
+
         alpha_t = self.alpha * target + (1 - self.alpha) * (1 - target)
         focal_loss = alpha_t * ((1 - p_t) ** self.gamma) * bce_loss
-        
+
         return focal_loss.mean() if mean else focal_loss
-        
+
     def __str__(self):
         return "FocalLoss"
 
@@ -151,13 +185,13 @@ class StatefulMetric:
     def __init__(self, **params):
         # This base class can be expanded if common functionality is needed
         pass
-    
+
     def update(self, pred: dict, ref: dict, key: str):
         raise NotImplementedError
-    
+
     def compute(self):
         raise NotImplementedError
-        
+
     def reset(self):
         raise NotImplementedError
 
@@ -176,8 +210,17 @@ class BinaryAUROCMetric(StatefulMetric):
         self.device = 'cpu'
 
     def update(self, pred: dict, ref: dict, key: str):
-        logits = pred[key].detach().squeeze(-1)
-        target = ref[key].detach().squeeze(-1)
+        logits = pred[key].detach().squeeze()
+        target = ref[key].detach().squeeze()
+
+        if 'ensemble_index' in pred:
+            assert 'ensemble_index' in ref
+            logits, target = ensemble_predictions_and_targets(logits, target, pred['ensemble_index'])
+            n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
+            target /= n_ens
+            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
+            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
+            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
 
         if target.dim() == 0: # if batch_size = 1
             target = target.unsqueeze(0)
@@ -185,23 +228,23 @@ class BinaryAUROCMetric(StatefulMetric):
 
         # Create a mask to filter out rows with NaNs in either logits or target
         valid_mask = torch.isfinite(logits) & torch.isfinite(target)
-        
+
         if not torch.all(valid_mask):
             logits = logits[valid_mask]
             target = target[valid_mask]
-        
+
         # Ensure metric is on the correct device
         if self.device != logits.device:
             self.device = logits.device
             self.metric.to(self.device)
-        
+
         # Update with cleaned data, ensuring target is int
-        if logits.numel() > 0: # Only update if there is valid data
+        if logits.numel() > 0 and target.numel() > 0:  # Only update if there is valid data
             self.metric.update(logits, target.int())
-    
+
     def compute(self):
         return self.metric.compute().clone()
-        
+
     def reset(self):
         self.metric.reset()
 

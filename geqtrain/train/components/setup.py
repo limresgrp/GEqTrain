@@ -1,4 +1,6 @@
 # components/setup.py
+import os
+import random
 from typing import Dict, List
 import torch
 import numpy as np
@@ -15,6 +17,8 @@ from torch_ema import ExponentialMovingAverage
 
 def set_seed(seed):
     if seed is not None:
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.backends.cudnn.deterministic = True
@@ -88,7 +92,7 @@ def setup_optimizer(model, config):
         # Automatically add 'nowd' (no weight decay) for bias and 1D parameters
         if param.dim() < 2:
             tags.append('nowd')
-        
+
         # Create a group for this parameter
         group = merge_groups(param, list(set(tags)))
         # Merge it into the final list
@@ -102,7 +106,7 @@ def setup_optimizer(model, config):
         positional_args=dict(params=optim_groups, lr=config.get('learning_rate', 1e-3)),
         all_args=config,
     )
-    
+
     # Log the parameter groups for debugging and verification
     logging.info(f"Optimizer {type(optim).__name__} initialized with {len(optim.param_groups)} parameter groups:")
     for i, group in enumerate(optim.param_groups):
@@ -131,14 +135,14 @@ def setup_scheduler(optimizer, config, steps_per_epoch):
         # Account for warmup steps
         if warmup_epochs > 0:
             total_number_of_steps -= warmup_steps
-        
+
         # Set T_max in the config so it's picked up by the instantiation function
         config['T_max'] = total_number_of_steps
-        
+
         # Set a default for eta_min if not provided
         if 'eta_min' not in config:
             config['eta_min'] = config.get('learning_rate', 1e-3) * 1e-2
-        
+
         logging.info(f"CosineAnnealingLR scheduler configured with T_max = {config['T_max']}")
 
     # Main Scheduler Instantiation
@@ -165,9 +169,9 @@ def setup_early_stopping(config):
         return_args_only=True,
     )
 
-    # The `instantiate` helper will find `early_stopping_patiences`, 
+    # The `instantiate` helper will find `early_stopping_patiences`,
     # `early_stopping_criteria`, etc., and put them in kwargs.
-    
+
     # Rename 'metric_criteria' to 'criteria' for the constructor
     if 'metric_criteria' in kwargs:
         kwargs['criteria'] = kwargs.pop('metric_criteria')
@@ -189,7 +193,7 @@ def setup_early_stopping(config):
                     new_dict[f"{VALIDATION}_{k}"] = v
             kwargs[arg_name] = new_dict
             n_args += len(new_dict)
-            
+
     return EarlyStopping(**kwargs) if n_args > 0 else None
 
 def setup_ema(model, config):

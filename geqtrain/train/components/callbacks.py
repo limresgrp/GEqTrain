@@ -65,19 +65,19 @@ class Logger(Callback):
         if self.trainer.dist.is_master:
             self.trainer.validation_wall = perf_counter() - self.trainer._phase_start_time
             self.trainer.cumulative_wall += self.trainer.train_wall + self.trainer.validation_wall
-            
+
     def on_epoch_end(self):
         if self.trainer.dist.is_master:
             self._log_epoch()
-    
+
     def on_batch_end(self):
         if self.trainer.dist.is_master:
-            self._log_batch(self.trainer.batch_type)        
-    
+            self._log_batch(self.trainer.batch_type)
+
     def _log_batch(self, batch_type):
         logger = self.trainer.logger
         batch_logger = logging.getLogger(self.trainer.batch_log[batch_type])
-        
+
         mat_str = f"{self.trainer.iepoch+1:5d}, {self.trainer.ibatch+1:5d}"
         log_str = f" {self.trainer.iepoch+1:8d} {self.trainer.ibatch+1:8d}"
         header = "epoch, batch"
@@ -95,7 +95,7 @@ class Logger(Callback):
             header += f", {key:>12.12}"
             log_str += f" {value:12.3g}"
             log_header += f" {key:>12.12}"
-        
+
         if self.trainer.ibatch == 0:
             batch_logger.info(header)
         batch_logger.info(mat_str)
@@ -110,29 +110,29 @@ class Logger(Callback):
         # The mae_dict is pre-assembled by the TrainingLoop.
         mae_dict = self.trainer.mae_dict
         epoch = mae_dict["epoch"]
-        
+
         # Build console logs for each category separately
         log_headers_console = {}
         log_strs_console = {}
-        
+
         categories = [TRAIN, VALIDATION] if epoch > 0 else [VALIDATION]
         for category in categories:
             wall = mae_dict["train_wall"] if category == TRAIN else mae_dict["validation_wall"]
             header = " ".join([f"{s:>12s}" for s in ["Epoch", "LR", "Wall"]])
             log_str = f"{epoch:12d} {mae_dict['LR']:12.3g} {wall:12.3f}"
-            
+
             for key in self.trainer.loss_dict[category]:
                 header += f" {key:>12.12}"
                 log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
-            
+
             metrics = self.trainer.metrics.flatten_metrics(self.trainer.metrics_dict[category], self.trainer.metrics_metadata)
             for key in metrics:
                 header += f" {key:>12.12}"
                 log_str += f" {mae_dict[f'{category}_{key}']:12.3g}"
-            
+
             log_headers_console[category] = header
             log_strs_console[category] = log_str
-        
+
         # Print to console
         header_to_print = log_headers_console[VALIDATION]
         self.trainer.logger.info("\n\n#################### " + header_to_print)
@@ -147,7 +147,7 @@ class Logger(Callback):
         epoch_logger = logging.getLogger(self.trainer.epoch_log)
         if epoch == 1 or (epoch == 0 and len(categories) > 0):
             epoch_logger.info(",".join(mae_dict.keys()))
-        
+
         csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in mae_dict.values()]
         epoch_logger.info(",".join(csv_values))
 
@@ -171,7 +171,7 @@ class WandbCallback(Callback):
 
         if self.trainer.config.get("wandb_watch", False):
             wandb.watch(self.trainer.model, **self.trainer.config.get("wandb_watch_kwargs", {}))
-    
+
     def on_epoch_end(self):
         """Log the epoch's metrics to WandB from the master rank only."""
         if self.trainer.dist.is_master and wandb.run is not None:
@@ -187,7 +187,7 @@ class CheckpointCallback(Callback):
     def on_epoch_end(self):
         if not self.trainer.dist.is_master: return
         with atomic_write_group():
-            current_metrics = self.trainer.mae_dict.get(self.trainer.metrics_key)
+            current_metrics = self.trainer.pick_current_target_metric_from_mae_dict()
             if current_metrics is None: return
             is_improved = (current_metrics < self.trainer.best_metrics if self.trainer.metric_criteria == 'decreasing' else current_metrics > self.trainer.best_metrics)
             if is_improved:
@@ -214,7 +214,7 @@ class EarlyStoppingCallback(Callback):
                     if early_stop_triggered:
                         self.trainer.stop_arg = args
                         should_stop = True
-            
+
             if self.trainer.iepoch + 1 >= self.trainer.max_epochs:
                 self.trainer.stop_arg = "max epochs reached"
                 should_stop = True

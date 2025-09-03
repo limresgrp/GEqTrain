@@ -157,7 +157,7 @@ def appendNGNNLayers(config):
 def moreGNNLayers(config:Config):
     logging.info("--- Building Global Graph Model")
 
-    from geqtrain.data._build import update_config
+    from geqtrain.model.init_utils import update_config
     update_config(config)
 
     if 'node_attributes' in config:

@@ -40,7 +40,7 @@ class Trainer:
         if self.config.get('restart'):
             # 3. Load the raw state dictionary FIRST.
             trainer_state = self.checkpoint_handler.load_raw_state_for_restart()
-            
+
             # 4. Inject the essential dataset indices into the config.
             # This ensures the DatasetBuilder uses the correct, restored indices.
             logging.info("Updating config with train/validation indices from checkpoint.")
@@ -49,19 +49,19 @@ class Trainer:
 
         # 5. Extract config parameters (now includes restored indices if restarting)
         self._extract_config_parameters()
-        
+
         # 6. Initialize training state variables
         self._initialize_training_state()
-        
+
         # 7. Handle fine-tuning (only if it's a new run, not a restart).
         if self.config.get('fine_tune') and not self.config.get('restart'):
             model, self.config = self.checkpoint_handler.load_model_for_resume()
-        
+
         # 8. Setup dataset and dataloaders
         # This will now correctly use the restored indices on a restart.
         self._build_datasets()
         self._init_dataloaders()
-        
+
         # 9. Setup model and training-related objects
         self._setup_model(model)
         self._setup_training_components()
@@ -69,7 +69,7 @@ class Trainer:
         # 10. If restarting, APPLY the rest of the state to the components we just built.
         if self.config.get('restart') and trainer_state is not None:
              self.checkpoint_handler.apply_state_for_restart(trainer_state)
-        
+
         # 11. Callbacks
         self._setup_callbacks()
 
@@ -91,7 +91,7 @@ class Trainer:
         self.dataset_rng = torch.Generator().manual_seed(self.config.get('dataset_seed'))
 
     def _extract_config_parameters(self):
-        """Extract parameters from the config file to trainer attributes for easy access."""
+        """Extract parameters from the config file to trainer attributes for easy access via self. """
         params_to_extract = [
             ("learning_rate", 1e-3), ("metrics_key", "validation_loss"), ("metric_criteria", "decreasing"),
             ("log_batch_freq", 10), ("log_epoch_freq", 1), ("save_checkpoint_freq", -1),
@@ -124,34 +124,34 @@ class Trainer:
         3. All processes build the final datasets from these indices.
         """
         builder = DatasetBuilder(self.config, self.dataset_rng, self.logger, self.output)
-        
+
         # --- DDP Synchronization for Index Resolution ---
         # self.train_idcs is initialized from config in _initialize_training_state
         # If they are not specified, we must generate them.
         if self.train_idcs is None or self.val_idcs is None:
-            
+
             # 1. Master process alone resolves the indices efficiently.
             if self.dist.is_master:
                 train_idcs, val_idcs = builder.resolve_split_indices()
             else:
                 train_idcs, val_idcs = None, None
-            
+
             # 2. Synchronize and broadcast the indices to all processes.
             if self.dist.is_distributed:
                 dist.barrier()
-            
+
             self.train_idcs = self.dist.broadcast_object(train_idcs, src=0)
             self.val_idcs   = self.dist.broadcast_object(val_idcs, src=0)
-        
+
         # --- Dataset Building on ALL processes ---
         # 3. Now that all processes have the SAME indices, they build the final datasets.
         #    This is where the full data is actually loaded.
         self.train_dset, self.val_dset = builder.build_datasets_from_indices(self.train_idcs, self.val_idcs)
-        
+
         # Final barrier to ensure all dataset loading is complete before proceeding.
         if self.dist.is_distributed:
             dist.barrier()
-        
+
         self.logger.info(f"Training data points: {len(self.train_dset)} | Validation data points: {len(self.val_dset)}")
 
     def _init_dataloaders(self):
@@ -192,6 +192,12 @@ class Trainer:
         for cb in self.callbacks:
             getattr(cb, event)(**kwargs)
 
+    def pick_current_target_metric_from_mae_dict(self):
+        if isinstance(self.metrics_key, (list, tuple)):
+            out = torch.tensor([self.mae_dict[_metric] for _metric in self.metrics_key], dtype=torch.float32)
+            return out.mean().item()
+        return self.mae_dict[self.metrics_key]
+
     def train(self):
         """Main training entry point."""
         self.training_loop = TrainingLoop(self)
@@ -203,13 +209,13 @@ class Trainer:
             self.training_loop.run_epoch(validation_only=(self.iepoch == -1))
             self._dispatch_callbacks('on_epoch_end')
             self.iepoch += 1
-        
+
         self._dispatch_callbacks('on_trainer_end')
 
     @property
     def best_model_path(self):
         return self.checkpoint_handler.best_model_path
-    
+
     @property
     def last_model_path(self):
         return self.checkpoint_handler.last_model_path

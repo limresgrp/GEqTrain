@@ -1,4 +1,5 @@
 # components/loop.py
+from collections import defaultdict
 import torch
 import contextlib
 
@@ -6,6 +7,10 @@ from .inference import run_inference
 from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train._key import TRAIN, VALIDATION
+
+from geqtrain.data import AtomicDataDict
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
+from e3nn import o3
 
 
 class TrainingLoop:
@@ -43,13 +48,13 @@ class TrainingLoop:
         """Assembles the `mae_dict` with all results from the epoch."""
         epoch = self.trainer.iepoch + 1
         train_wall = self.trainer.train_wall if epoch > 0 else 0.0
-        
+
         self.trainer.mae_dict = {
             "epoch": epoch, "LR": self.trainer.optim.param_groups[0]["lr"],
             "train_wall": train_wall, "validation_wall": self.trainer.validation_wall,
             "cumulative_wall": self.trainer.cumulative_wall,
         }
-        
+
         categories = [TRAIN, VALIDATION] if epoch > 0 else [VALIDATION]
         for category in categories:
             for key, value in self.trainer.loss_dict[category].items():
@@ -61,18 +66,19 @@ class TrainingLoop:
     def run_phase(self, phase: str):
         """Runs a single phase (training or validation)."""
         self.trainer._dispatch_callbacks(f'on_{phase}_begin')
-        
+
         is_train = phase == TRAIN
         dataloader = self.trainer.dl_train if is_train else self.trainer.dl_val
         self.trainer.n_batches = len(dataloader)
         self.model.train(is_train)
-        
+
         # Reset and move both trackers to the correct device
         self.loss_fn.reset()
         self.metrics.reset()
+        self.node_features_norms = defaultdict(list)
         self.loss_fn.to(self.dist.device)
         self.metrics.to(self.dist.device)
-        
+
         if is_train:
             self.trainer.optim.zero_grad(set_to_none=True)
             self.trainer.accumulation_counter = 0
@@ -83,7 +89,7 @@ class TrainingLoop:
             self.trainer._dispatch_callbacks('on_batch_begin')
             self._run_batch(batch, is_train=is_train)
             self.trainer._dispatch_callbacks('on_batch_end')
-        
+
         # Get final results from each tracker
         self.trainer.loss_dict[phase] = self.loss_fn.current_result()
         self.trainer.metrics_dict[phase] = self.metrics.current_result()
@@ -104,6 +110,19 @@ class TrainingLoop:
             )
             loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
+            if (self.ibatch + 1) % self.log_batch_freq == 0 or (self.ibatch + 1) == self.n_batches and is_train:
+                with torch.no_grad():
+                    # only master logs its features
+                    model = self.model.module if self.is_ddp else self.model
+                    irreps_as_dict = {ir.l:mul for (mul, ir) in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
+                    node_reprs = out[AtomicDataDict.NODE_FEATURES_KEY]
+                    split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
+                    reshapers = [reshape_irreps(o3.Irreps(str(ir))) for ir in model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
+                    reprs = torch.split(node_reprs, split_sizes, dim=1)
+                    for l, repr in enumerate(reprs):
+                        norm = torch.mean(torch.norm(reshapers[l](repr).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
+                        self.trainer.node_features_norms[f'node_repr_l_{l}_mean'].append(norm)
+
             if is_train:
                 accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
                 loss = loss / accumulation_steps
@@ -113,7 +132,7 @@ class TrainingLoop:
                 if self.trainer.config.get('use_grokfast', False):
                     from geqtrain.utils import gradfilter_ema
                     self.trainer.grads = gradfilter_ema(self.model, grads=self.trainer.grads)
-                
+
                 if self.trainer.accumulation_counter == accumulation_steps:
                     max_grad_norm = self.trainer.config.get('max_gradient_norm')
                     if max_grad_norm is not None:
@@ -123,11 +142,11 @@ class TrainingLoop:
                         if self.dist.is_master:
                             self.trainer.gradnorms.append(grad_norm.item())
                             self.trainer.gradnorms_clip.append(float(max_grad_norm_val))
-                    
+
                     self.optim.step()
                     if self.ema:
                         self.ema.update()
-                    
+
                     self._lr_sched_step(batch_lvl=True)
                     self.optim.zero_grad(set_to_none=True)
                     self.trainer.accumulation_counter = 0
@@ -139,7 +158,7 @@ class TrainingLoop:
             batch_losses = self.loss_fn.loss_stat(syncd_loss, syncd_loss_contrib)
             if self.dist.is_master:
                 self.trainer.batch_losses = batch_losses
-            
+
             with torch.no_grad():
                 # First, compute metrics on the local batch
                 batch_metrics = self.metrics(pred=out, ref=ref_data)
@@ -148,10 +167,10 @@ class TrainingLoop:
                 # However, this is not very impactful in practice and is difficult to handle properly—just be aware.
                 syncd_batch_metrics = self.dist.sync_dict_of_tensors(batch_metrics)
                 self.trainer.batch_metrics = syncd_batch_metrics
-            
+
             if not self.trainer.config.get('chunking', False):
                 break
-            
+
             already_computed_nodes = evaluate_end_chunking_condition(
                 already_computed_nodes, batch_chunk_center_nodes, len(batch_chunk_center_nodes)
             )
@@ -167,14 +186,14 @@ class TrainingLoop:
             # Handle warmup for batch-level schedulers
             if self.warmup_sched and not self._is_warmup_period_over():
                 with self.warmup_sched.dampening():
-                    self.lr_sched.step()
+                    pass
             else:
                 self._batch_lvl_lrscheduler_step()
         else: # Epoch level
             # We only step epoch-level schedulers after the warmup period is over
             if self._is_warmup_period_over():
                 self._epoch_lvl_lrscheduler_step()
-    
+
     def _is_warmup_period_over(self):
         """Check if the warmup period is finished."""
         if self.warmup_sched is None:
@@ -192,6 +211,6 @@ class TrainingLoop:
         """Step schedulers that update based on end-of-epoch metrics."""
         scheduler_name = self.trainer.config.get('lr_scheduler_name')
         if scheduler_name == "ReduceLROnPlateau":
-            metric = self.trainer.mae_dict.get(self.trainer.metrics_key)
+            metric = self.trainer.pick_current_target_metric_from_mae_dict()
             if metric is not None:
                 self.lr_sched.step(metrics=metric)
