@@ -208,6 +208,8 @@ def _filter_dataset(
     data: Batch = dataset.data
     if data is None or data.num_graphs == 0:
         return None
+    if keep_node_types is None and exclude_node_types_from_edge_center is None and exclude_node_types_from_edge_neigh is None:
+        return dataset
 
     # --- 1. Compute the final node mask based on all conditions ---
     nodes_to_keep_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=data.pos.device)
@@ -215,7 +217,7 @@ def _filter_dataset(
     node_types = data[AtomicDataDict.NODE_TYPE_KEY].flatten() if AtomicDataDict.NODE_TYPE_KEY in data else None
     if node_types is None:
         # Pop the fixed node types from dataset and repeat them for each graph in the batch
-        node_types = dataset.fixed_fields.pop(AtomicDataDict.NODE_TYPE_KEY).repeat(data.num_graphs)
+        node_types = dataset.fixed_fields.pop(AtomicDataDict.NODE_TYPE_KEY).flatten().repeat(data.num_graphs)
         data[AtomicDataDict.NODE_TYPE_KEY] = node_types
         # Add __slices__ for AtomicDataDict.NODE_TYPE_KEY
         if not hasattr(data, '__slices__'):
