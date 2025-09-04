@@ -30,36 +30,34 @@ def GlobalGraphModel(config:Config, model: Optional[SequentialGraphNetwork]) -> 
         layers=layers,
     )
 
-def buildGlobalGraphModelLayers(config:Config):
+def buildGlobalGraphModelLayers():
     logging.info("--- Building Global Graph Model")
 
     layers = {
         "local_interaction": (InteractionModule, dict(
-            name = "local_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+            node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_irreps=None,
             output_ls=[0],
         )),
-        "local_pooling": (EdgewiseReduce, dict(
+        "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
-            reduce=config.get("edge_reduce", "sum"),
         )),
-        "update": (ReadoutModuleWithConditioning, dict(
+        "local_update": (ReadoutModuleWithConditioning, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
-            resnet=True,
         )),
         "context_aware_interaction": (InteractionModule, dict(
-            name = "context_aware_interaction",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+            node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             output_mul="hidden",
         )),
@@ -67,7 +65,7 @@ def buildGlobalGraphModelLayers(config:Config):
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "update": (ReadoutModuleWithConditioning, dict(
+        "global_update": (ReadoutModuleWithConditioning, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
