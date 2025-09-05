@@ -141,6 +141,7 @@ class GotenEdgeEmbedding(BaseEmbedding):
 # ==============================================================================
 # 3. INTERACTION MODULE
 # ==============================================================================
+
 @compile_mode("script")
 class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
     """
@@ -207,9 +208,18 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in self.out_irreps_node if ir.l > 0])
         # === End of irreps processing ===
 
+        # Define projection layers to map initial h and t_ij to latent_dim.
+        # This allows embedding layers to have variable output dimensions.
+        node_attr_dim = self.irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim
+        edge_attr_dim = self.irreps_in[AtomicDataDict.EDGE_ATTRS_KEY].dim
+        
+        self.h_proj = latent(mlp_input_dimension=node_attr_dim, mlp_output_dimension=self.latent_dim)
+        self.t_ij_proj = latent(mlp_input_dimension=edge_attr_dim, mlp_output_dimension=self.latent_dim)
+
         # === Initialize weights for X (steerable features) ===
         self.env_weighter = MakeWeightedChannels(irreps_in=spharms_irreps, multiplicity_out=eq_multiplicity)
         generate_n_weights = self.env_weighter.weight_numel
+        # The MLPs below take latent_dim as input
         self.t_ij_to_weights_init = latent(mlp_input_dimension=self.latent_dim, mlp_output_dimension=generate_n_weights)
         self.h_j_to_weights_init = latent(mlp_input_dimension=self.latent_dim, mlp_output_dimension=generate_n_weights)
         self.init_weights_norm = torch.nn.LayerNorm(generate_n_weights)
@@ -248,8 +258,14 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         t_ij          = data[AtomicDataDict.EDGE_ATTRS_KEY]
         num_nodes     = h.shape[0]
 
+        # Apply the initial projection to ensure h and t_ij have the correct
+        # latent_dim before entering the first interaction layer.
+        h = self.h_proj(h)
+        t_ij = self.t_ij_proj(t_ij)
+
         # === Initialize X (Steerable Features) using h and t_ij ===
         h_j = h[edge_neighbor]
+        # Now w_from_t and w_from_h correctly receive tensors of shape latent_dim
         w_from_t = self.t_ij_to_weights_init(t_ij)
         w_from_h = self.h_j_to_weights_init(h_j)
         env_weights = self.init_weights_norm(w_from_t * w_from_h)
