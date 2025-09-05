@@ -45,7 +45,7 @@ class Loss:
             clean_key = self.remove_suffix(key)
             try:
                 loss_val = self.funcs[key](pred=pred, ref=ref, key=clean_key, mean=True, **kwargs)
-                contributions[key] = loss_val
+                contributions[key] = loss_val.detach()
                 total_loss += self.coeffs[key].to(loss_val.device) * loss_val
             except Exception as e:
                 raise RuntimeError(f"Error computing loss for key '{clean_key}': {e}") from e
