@@ -2,45 +2,14 @@
 """
 
 """
-Class to holde a bunch of hyperparameters associate with either training or a model.
+Class to hold a bunch of hyperparameters associated with either training or a model.
 
-The interface is inteneded to be as close to the wandb.config class as possible. But it does not have any locked
-entries as in wandb.config
-
-Examples:
-
-    Initialization
-    ```
-    config = Config()
-    config = Config(dict(a=1, b=2))
-    ```
-
-    add a new parameter
-
-    ```
-    config['key'] = default_value
-    config.key = default_value
-    ```
-
-    set up typehint for a parameter
-    ```
-    config['_key_type'] = int
-    config._key_type = int
-    config.set_type(key, int)
-    ```
-
-    update with a dictionary
-    ```
-    config.update(dictionary={'a':3, 'b':4})
-    ```
-
-    If a parameter is updated, the updated value will be formatted back to the same type.
-
+The interface is intended to be as close to the wandb.config class as possible.
 """
 import inspect
 
 from copy import deepcopy
-from typing import Optional
+from typing import Optional, List
 
 from geqtrain.utils.savenload import save_file, load_file
 
@@ -69,7 +38,7 @@ DEFAULT_CONFIG = dict(
     wandb=False,
     dataset_statistics_stride=1,
     default_dtype="float32",
-    allow_tf32=False,  # TODO: until we understand equivar issues
+    allow_tf32=False,
     verbose="INFO",
     model_debug_mode=False,
     equivariance_test=False,
@@ -108,9 +77,6 @@ class Config(object):
     def keys(self):
         return self._items.keys()
 
-    def _as_dict(self):
-        return self._items
-
     def as_dict(self):
         return dict(self)
 
@@ -118,28 +84,15 @@ class Config(object):
         return self._items[key]
 
     def get_type(self, key):
-        """Get Typehint from item_types dict or previous defined value
-        Args:
-
-            key: name of the variable
-        """
-
+        """Get Typehint from item_types dict or previously defined value."""
         return self._item_types.get(key, None)
 
     def set_type(self, key, typehint):
-        """set typehint for a variable
-
-        Args:
-
-            key: name of the variable
-            typehint: type of the variable
-        """
-
+        """Set typehint for a variable."""
         self._item_types[key] = typehint
 
     def add_allow_list(self, keys, default_values={}):
-        """add key to allow_list"""
-
+        """Add keys to the allow_list, restricting which keys can be set."""
         object.__setattr__(self, "_allow_all", False)
         object.__setattr__(
             self, "_allow_list", list(set(self._allow_list).union(set(keys)))
@@ -150,35 +103,28 @@ class Config(object):
         return self._allow_list
 
     def __setitem__(self, key, val):
-
-        # typehint
+        # Handle typehint declarations like `_key_type`
         if key.endswith("_type") and key.startswith("_"):
-
             k = key[1:-5]
-            if (not self._allow_all) and key not in self._allow_list:
+            if (not self._allow_all) and k not in self._allow_list:
                 return None
-
             self._item_types[k] = val
-
-        # normal value
         else:
-
             if (not self._allow_all) and key not in self._allow_list:
                 return None
-
+            
             typehint = self.get_type(key)
-
-            # try to format the variable
-            try:
-                val = typehint(val) if typehint is not None else val
-            except Exception:
-                raise TypeError(
-                    f"Wrong Type: Parameter {key} should be {typehint} type."
-                    f"But {type(val)} is given"
-                )
-
+            # try to cast the variable to its typehint if it exists
+            if typehint is not None:
+                try:
+                    val = typehint(val)
+                except Exception:
+                    raise TypeError(
+                        f"Wrong Type: Parameter '{key}' should be of type {typehint}, "
+                        f"but received type {type(val)}."
+                    )
             self._items[key] = deepcopy(val)
-            return key
+        return key
 
     def items(self):
         return self._items.items()
@@ -190,87 +136,54 @@ class Config(object):
 
     def __contains__(self, key):
         return key in self._items
-
+        
     def __getstate__(self):
-        """
-        This method is called by pickle to get the object's state.
-        We return a dictionary of all the essential attributes to save.
-        """
-        state = {
+        """Called by pickle to get the object's state for serialization."""
+        return {
             "_items": self._items,
             "_item_types": self._item_types,
             "_allow_list": self._allow_list,
             "_allow_all": self._allow_all,
             "filepath": getattr(self, "filepath", None),
         }
-        return state
 
     def __setstate__(self, state):
-        """
-        This method is called by pickle to restore the object's state.
-        We take the dictionary from __getstate__ and restore the attributes.
-        """
+        """Called by pickle to restore the object's state from deserialization."""
         for key, value in state.items():
             object.__setattr__(self, key, value)
 
     def pop(self, *args):
         return self._items.pop(*args)
 
-    def update_w_prefix(
-        self,
-        dictionary: dict,
-        prefix: str,
-        allow_val_change=None,
-    ):
-        """Mock of wandb.config function
-
-        Add a dictionary of parameters to the
-        The key of the parameter cannot be started as "_"
-
-        Args:
-
-            dictionary (dict): dictionary of parameters and their typehint to update
-            allow_val_change (None): mock for wandb.config, not used.
-
-        Returns:
-
+    def update_w_prefix(self, dictionary: dict, prefix: str):
         """
-
-        # override with prefix
-        l_prefix = len(prefix) + 1
+        Update config with keys from a dictionary that match a given prefix.
+        For example, if prefix='model', it will look for 'model_key' in the dictionary.
+        """
+        keys = {}
+        # Override with prefix_key
+        prefix_with_underscore = prefix + "_"
+        l_prefix = len(prefix_with_underscore)
         prefix_dict = {
-            k[l_prefix:]: v for k, v in dictionary.items() if k.startswith(prefix + "_")
+            k[l_prefix:]: v for k, v in dictionary.items() if k.startswith(prefix_with_underscore)
         }
-        keys = self.update(prefix_dict, allow_val_change=allow_val_change)
-        keys = {k: f"{prefix}_{k}" for k in keys}
+        updated_keys = self.update(prefix_dict)
+        keys.update({k: f"{prefix_with_underscore}{k}" for k in updated_keys})
 
+        # Also check for nested dictionaries like `model_kwargs`
         for suffix in ["params", "kwargs"]:
-            if f"{prefix}_{suffix}" in dictionary:
-                key3 = self.update(
-                    dictionary[f"{prefix}_{suffix}"],
-                    allow_val_change=allow_val_change,
-                )
-                keys.update({k: f"{prefix}_{suffix}.{k}" for k in key3})
+            nested_key = f"{prefix}_{suffix}"
+            if nested_key in dictionary and isinstance(dictionary[nested_key], dict):
+                nested_updated_keys = self.update(dictionary[nested_key])
+                keys.update({k: f"{nested_key}.{k}" for k in nested_updated_keys})
         return keys
 
-    def update(self, dictionary: dict, allow_val_change=None):
-        """Mock of wandb.config function
-
-        Add a dictionary of parameters to the config
-        The key of the parameter cannot be started as "_"
-
-        Args:
-
-            dictionary (dict): dictionary of parameters and their typehint to update
-            allow_val_change (None): mock for wandb.config, not used.
-
-        Returns:
-            keys (set): set of keys being udpated
-
+    def update(self, dictionary: dict):
         """
-
+        Update the config with a dictionary of parameters.
+        Keys starting with '_' are treated as private or typehints and set first.
+        """
         keys = []
-
         if 'include' in dictionary:
             include_files = dictionary.pop('include')
             if not isinstance(include_files, list):
@@ -278,37 +191,23 @@ class Config(object):
             for include_file in include_files:
                 included_dict = load_file(supported_formats={"yaml": ("yml", "yaml"), "json": "json"}, filename=include_file)
                 self.update(included_dict)
-
-        # first log in all typehints or hidden variables
+        
+        # first set all typehints or hidden variables
         for k, value in dictionary.items():
             if k.startswith("_"):
-                keys += [self.__setitem__(k, value)]
-
-        # then log in the values
+                keys.append(self.__setitem__(k, value))
+        # then set the actual values
         for k, value in dictionary.items():
             if not k.startswith("_"):
-                keys += [self.__setitem__(k, value)]
+                keys.append(self.__setitem__(k, value))
 
-        return set(keys) - set([None])
+        return set(k for k in keys if k is not None)
 
     def get(self, *args):
         return self._items.get(*args)
 
-    def persist(self):
-        """mock wandb.config function"""
-        pass
-
-    def setdefaults(self, d):
-        """mock wandb.config function"""
-        pass
-
-    def update_locked(self, d, user=None):
-        """mock wandb.config function"""
-        pass
-
     def save(self, filename: str, format: Optional[str] = None):
-        """Print config to file."""
-
+        """Save the current config to a file (YAML or JSON)."""
         supported_formats = {"yaml": ("yml", "yaml"), "json": "json"}
         return save_file(
             item=dict(self),
@@ -319,96 +218,128 @@ class Config(object):
 
     @staticmethod
     def from_file(filename: str, format: Optional[str] = None, defaults: dict = DEFAULT_CONFIG):
-        """Load arguments from file"""
-
+        """Load a config from a YAML or JSON file."""
         supported_formats = {"yaml": ("yml", "yaml"), "json": "json"}
         dictionary = load_file(
             supported_formats=supported_formats,
             filename=filename,
             enforced_format=format,
         )
-
         config = Config.from_dict(dictionary, defaults)
         config.filepath = filename
-
         return config
 
     @staticmethod
     def from_dict(dictionary: dict, defaults: dict = {}):
+        """Create a config instance from a dictionary."""
         c = Config(defaults)
         c.update(dictionary)
         c.parse_node_types()
         c.parse_attributes()
         return c
 
-    @staticmethod
-    def from_class(class_type, remove_kwargs: bool = False):
-        """return Config class instance based on init function of the input class
-        the instance will only allow to store init function related variables
-        the type hints are all set to None, so no automatic format conversion is applied
+    # =====================================================================
+    # UPDATED/NEW METHODS FOR MRO INSPECTION
+    # =====================================================================
 
-        class_type: torch.module children class type
-        remove_kwargs (optional, bool): the same as Config.from_function
-
-        Returns:
-
-        config (Config):
+    @classmethod
+    def from_callable(cls, fun, remove_kwargs: bool = True):
         """
-
-        if inspect.isclass(class_type):
-            return Config.from_function(
-                class_type.__init__, remove_kwargs=remove_kwargs
-            )
-        elif callable(class_type):
-            return Config.from_function(class_type, remove_kwargs=remove_kwargs)
-        else:
-            raise ValueError(
-                f"from_class only takes class type or callable, but got {class_type}"
-            )
-
-    @staticmethod
-    def from_function(function, remove_kwargs=False):
-        """return Config class instance based on the function of the input class
-        the instance will only allow to store init function related variables
-        the type hints are all set to None, so no automatic format conversion is applied
-
-        Args:
-
-        function: function name
-        remove_kwargs (optional, bool): if True, kwargs are removed from the keys
-             and the returned instance will only takes the init params of the class_type.
-             if False and kwargs exists, the config only initialized with the default param values,
-             but it can take any other keys
-
-        Returns:
-
-        config (Config):
+        Creates a Config object from a single callable (function or method).
+        This method does NOT inspect inheritance.
         """
-
-        sig = inspect.signature(function)
+        if inspect.isclass(fun):
+            raise TypeError("from_callable is for functions/methods, not classes. Use from_class for classes.")
+        
+        sig = inspect.signature(fun)
+        param_keys = list(sig.parameters.keys())
+        
+        # If it's a method, 'self' is the first arg, so we skip it
+        if len(param_keys) > 0 and param_keys[0] == "self":
+            param_keys = param_keys[1:]
 
         default_params = {
             k: v.default
             for k, v in sig.parameters.items()
             if v.default is not inspect.Parameter.empty
         }
-        param_keys = list(sig.parameters.keys())
-        if param_keys[0] == "self":
-            param_keys = param_keys[1:]
 
-        for key in param_keys:
-            default_params[f"_{key}_type"] = None
-
-        # do not restrict variables when kwargs exists
         if "kwargs" in param_keys and not remove_kwargs:
+            # If kwargs are present and not removed, the config can accept any key
             return Config(config=default_params)
-        elif "kwargs" in param_keys:
-            param_keys.remove("kwargs")
-            return Config(config=default_params, allow_list=param_keys)
         else:
+            if "kwargs" in param_keys:
+                param_keys.remove("kwargs")
+            # Otherwise, restrict the config to only the specified keys
             return Config(config=default_params, allow_list=param_keys)
+            
+    @classmethod
+    def from_class(cls, class_type, remove_kwargs: bool = True):
+        """
+        Creates a Config instance based on the __init__ method of the input class.
+
+        If the class's __init__ method contains a `**kwargs` parameter, this
+        method will inspect the entire inheritance hierarchy (MRO) to build a
+        complete list of valid arguments from all parent classes.
+
+        Otherwise, it will only consider the arguments explicitly defined in the
+        __init__ method of the class itself, ignoring parents. This is useful
+        for classes that intentionally override parent arguments.
+        """
+        if not inspect.isclass(class_type):
+            raise ValueError(f"from_class only takes a class, but got {type(class_type)}")
+        
+        has_kwargs = False
+        try:
+            init_sig = inspect.signature(class_type.__init__)
+            params = init_sig.parameters.values()
+            has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        except (ValueError, TypeError):
+            # Handles built-in types like `object` that don't have a useful __init__ signature
+            pass
+
+        if has_kwargs:
+            # **kwargs is present, so we inspect the full inheritance tree
+            # to collect arguments from all parent classes.
+            mro = list(inspect.getmro(class_type))
+            return cls.from_classes(mro, remove_kwargs=remove_kwargs)
+        else:
+            # No **kwargs, so we only inspect the class's __init__ itself.
+            # This prevents pulling in arguments from parents that the class
+            # doesn't intend to accept (like `transform` in NpzDataset).
+            return cls.from_callable(class_type.__init__, remove_kwargs=remove_kwargs)
+
+    @classmethod
+    def from_classes(cls, class_mro: List[type], remove_kwargs: bool = True):
+        """
+        Builds a config from a list of classes by inspecting their __init__ methods.
+        This is useful for handling inheritance, where a child class's __init__ might
+        not explicitly list all arguments from its parents.
+        
+        Args:
+            class_mro (list): A list of classes, typically from `inspect.getmro()`.
+            remove_kwargs (bool): If True, `**kwargs` arguments are ignored.
+        """
+        all_params = {}
+        # Iterate through the Method Resolution Order
+        for c in class_mro:
+            if hasattr(c, '__init__') and callable(c.__init__):
+                try:
+                    sig = inspect.signature(c.__init__)
+                    for name, param in sig.parameters.items():
+                        # Exclude 'self' and, optionally, 'kwargs'
+                        if name == 'self' or (remove_kwargs and param.kind == inspect.Parameter.VAR_KEYWORD):
+                            continue
+                        # Add parameter only if not already seen from a more specific subclass
+                        if name not in all_params:
+                            all_params[name] = param.default if param.default is not inspect.Parameter.empty else None
+                except (ValueError, TypeError):
+                    # Some built-ins like 'object' don't have a useful signature
+                    continue
+        return cls(config=all_params, allow_list=list(all_params.keys()))
 
     def parse_node_types(self):
+        """Parses and validates type_names and num_types fields."""
         if "type_names" in self:
             type_names = [str(type_name) for type_name in self["type_names"]]
             self["type_names"] = type_names
@@ -421,6 +352,7 @@ class Config(object):
             self["type_names"] = [f"type_{str(i)}" for i in range(num_types)]
 
     def parse_attributes(self):
+        """Parses and validates attribute fields."""
         if "node_attributes" in self and "node_types" in self["node_attributes"]:
             if "num_types" in self["node_attributes"]["node_types"]:
                 assert self["node_attributes"]["node_types"]["num_types"] == self["num_types"]

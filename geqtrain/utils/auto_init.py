@@ -20,37 +20,16 @@ def instantiate_from_cls_name(
     remove_kwargs: bool = True,
     return_args_only: bool = False,
 ):
-    """Initialize a class based on a string class name
-
-    Args:
-    module: the module to import the class, i.e. torch.optim
-    class_name: the string name of the class, i.e. "CosineAnnealingWarmRestarts"
-    positional_args (dict): positional arguments
-    optional_args (optional, dict): optional arguments
-    all_args (dict): list of all candidate parameters tha could potentially match the argument list
-    remove_kwargs: if True, ignore the kwargs argument in the init funciton
-        same definition as the one in Config.from_function
-    return_args_only (bool): if True, do not instantiate, only return the arguments
-
-    Returns:
-
-    instance: the instance
-    optional_args (dict):
-    """
+    """Initialize a class based on a string class name. (Delegates to `instantiate`)"""
 
     if class_name is None:
         raise NameError("class_name type is not defined ")
 
     # first obtain a list of all classes in this module
-    class_list = inspect.getmembers(module, inspect.isclass)
-    class_dict = {}
-    for k, v in class_list:
-        class_dict[k] = v
+    the_class = getattr(module, class_name, None)
 
-    # find the matching class
-    the_class = class_dict.get(class_name, None)
-    if the_class is None:
-        raise NameError(f"{class_name} type is not found in {module.__name__} module")
+    if not inspect.isclass(the_class):
+        raise NameError(f"{class_name} type is not found or not a class in {module.__name__} module")
 
     return instantiate(
         builder=the_class,
@@ -73,22 +52,10 @@ def instantiate(
     return_args_only: bool = False,
     parent_builders: list = [],
 ):
-    """Automatic initializing class instance by matching keys in the parameter dictionary to the constructor function.
-
-    Keys that are exactly the same, or with a 'prefix_' in all_args, optional_args will be used.
-    Priority:
-
-        all_args[key] < all_args[prefix_key] < optional_args[key] < optional_args[prefix_key] < positional_args
-
-    Args:
-        builder: the type of the instance
-        prefix: the prefix used to address the parameter keys
-        positional_args: the arguments used for input. These arguments have the top priority.
-        optional_args: the second priority group to search for keys.
-        all_args: the third priority group to search for keys.
-        remove_kwargs: if True, ignore the kwargs argument in the init function
-            same definition as the one in Config.from_function
-        return_args_only (bool): if True, do not instantiate, only return the arguments
+    """
+    Automatic initializing class instance by matching keys in the parameter 
+    dictionary to the constructor functions.
+    It intelligently handles inheritance based on `**kwargs`.
     """
 
     prefix_list = [builder.__name__] if inspect.isclass(builder) else []
@@ -99,8 +66,14 @@ def instantiate(
     else:
         raise ValueError(f"prefix has the wrong type {type(prefix)}")
 
-    # detect the input parameters needed from params
-    config = Config.from_class(builder, remove_kwargs=remove_kwargs)
+    if inspect.isclass(builder):
+        # from_class() will decide whether to do a shallow or deep (MRO) inspection
+        # based on the presence of `**kwargs` in the __init__ signature.
+        config = Config.from_class(builder, remove_kwargs=remove_kwargs)
+    else:
+        # Fallback for non-class builders (functions)
+        config = Config.from_callable(builder, remove_kwargs=remove_kwargs)
+    # =====================================================================
 
     # be strict about _kwargs keys:
     allow = config.allow_list()
@@ -114,40 +87,26 @@ def instantiate(
 
     key_mapping = {}
     if all_args is not None:
-        # fetch paratemeters that directly match the name
         _keys = config.update(all_args)
         key_mapping["all"] = {k: k for k in _keys}
-        # fetch paratemeters that match prefix + "_" + name
-        for idx, prefix_str in enumerate(prefix_list):
-            _keys = config.update_w_prefix(
-                all_args,
-                prefix=prefix_str,
-            )
+        for prefix_str in prefix_list:
+            _keys = config.update_w_prefix(all_args, prefix=prefix_str)
             key_mapping["all"].update(_keys)
 
     if optional_args is not None:
-        # fetch paratemeters that directly match the name
         _keys = config.update(optional_args)
         key_mapping["optional"] = {k: k for k in _keys}
-        # fetch paratemeters that match prefix + "_" + name
-        for idx, prefix_str in enumerate(prefix_list):
-            _keys = config.update_w_prefix(
-                optional_args,
-                prefix=prefix_str,
-            )
+        for prefix_str in prefix_list:
+            _keys = config.update_w_prefix(optional_args, prefix=prefix_str)
             key_mapping["optional"].update(_keys)
 
-    # for logging only, remove the overlapped keys
     if "all" in key_mapping and "optional" in key_mapping:
         key_mapping["all"] = {
-            k: v
-            for k, v in key_mapping["all"].items()
-            if k not in key_mapping["optional"]
+            k: v for k, v in key_mapping["all"].items() if k not in key_mapping["optional"]
         }
 
     final_optional_args = dict(config)
 
-    # for nested argument, it is possible that the positional args contain unnecesary keys
     if len(parent_builders) > 0:
         _positional_args = {
             k: v for k, v in positional_args.items() if k in config.allow_list()
@@ -157,58 +116,49 @@ def instantiate(
     init_args = final_optional_args.copy()
     init_args.update(positional_args)
 
-    # find out argument for the nested keyword
     search_keys = [key for key in init_args if key + "_kwargs" in config.allow_list()]
     for key in search_keys:
         sub_builder = init_args[key]
         if sub_builder is None:
-            # if the builder is None, skip it
             continue
 
-        if not (callable(sub_builder) or inspect.isclass(sub_builder)):
-            if isinstance(sub_builder, str):
-                sub_builder = load_callable(sub_builder, prefix=prefix)
-                final_optional_args[key] = sub_builder
+        if isinstance(sub_builder, str):
+            sub_builder = load_callable(sub_builder, prefix=prefix)
+            final_optional_args[key] = sub_builder
 
-        # add double check to avoid cycle
-        # only overwrite the optional argument, not the positional ones
         if (
-            sub_builder not in parent_builders
+            callable(sub_builder) and sub_builder not in parent_builders
             and key + "_kwargs" not in positional_args
         ):
-            sub_prefix_list = [sub_builder.__name__, key]
-            for prefix in prefix_list:
-                sub_prefix_list = sub_prefix_list + [
-                    prefix,
-                    prefix + "_" + key,
-                ]
+            sub_prefix_list = [sub_builder.__name__, key] + [p + "_" + key for p in prefix_list]
 
             nested_km, nested_kwargs = instantiate(
                 sub_builder,
                 prefix=sub_prefix_list,
-                positional_args=positional_args,
+                positional_args={},
                 optional_args=optional_args,
                 all_args=all_args,
                 remove_kwargs=remove_kwargs,
                 return_args_only=True,
                 parent_builders=[builder] + parent_builders,
             )
-            # the values in kwargs get higher priority
-            nested_kwargs.update(final_optional_args.get(key + "_kwargs", {}))
-            final_optional_args[key + "_kwargs"] = nested_kwargs
+            found_keys = set()
+            if 'all' in nested_km:
+                found_keys.update(nested_km['all'].keys())
+            if 'optional' in nested_km:
+                found_keys.update(nested_km['optional'].keys())
+
+            filtered_nested_kwargs = {k: v for k, v in nested_kwargs.items() if k in found_keys}
+
+            # Now combine the filtered kwargs with any explicitly provided _kwargs dict
+            filtered_nested_kwargs.update(final_optional_args.get(key + "_kwargs", {}))
+            final_optional_args[key + "_kwargs"] = filtered_nested_kwargs
 
             for t in key_mapping:
-                key_mapping[t].update(
-                    {key + "_kwargs." + k: v for k, v in nested_km[t].items()}
-                )
+                key_mapping[t].update({key + "_kwargs." + k: v for k, v in nested_km[t].items()})
         elif sub_builder in parent_builders:
             raise RuntimeError(f"cyclic recursion in builder {parent_builders} {sub_builder}")
-        elif not callable(sub_builder) and not inspect.isclass(sub_builder):
-            logging.warning(f"subbuilder is not callable {sub_builder}")
-        elif key + "_kwargs" in positional_args:
-            logging.warning(f"skip searching for nested argument because {key}_kwargs are defined in positional arguments")
 
-    # remove duplicates
     for key in positional_args:
         final_optional_args.pop(key, None)
         for t in key_mapping:
@@ -217,8 +167,14 @@ def instantiate(
     if return_args_only:
         return key_mapping, final_optional_args
 
-    # debug info
     logging.debug(f"instantiate {builder.__name__}")
+
+    # Final sanitation: remove any arguments that are not actually in the final builder's
+    # signature. This is a safeguard against overly broad MRO scans (e.g. `*args` from `object`)
+    # that `Config` might pick up.
+    allowed_keys = [x for x in config.allow_list() if x != 'args']
+    final_optional_args = {k: v for k, v in final_optional_args.items() if k in allowed_keys}
+
     for t in key_mapping:
         for k, v in key_mapping[t].items():
             string = f" {t:>10s}_args :  {k:>50s}"
@@ -232,10 +188,9 @@ def instantiate(
     try:
         instance = builder(**positional_args, **final_optional_args)
     except Exception as e:
-        raise RuntimeError(f"Failed to build object with prefix `{prefix}` using builder `{builder.__name__}`") from e
+        raise RuntimeError(f"Failed to build object with prefix `{prefix}` using builder `{builder.__name__}` with args: positional={positional_args}, optional={final_optional_args}") from e
 
     return instance, final_optional_args
-
 
 def get_w_prefix(
     key: List[str],
@@ -299,3 +254,4 @@ def get_w_prefix(
             logging.debug(string)
 
     return config.get(key, *kwargs)
+
