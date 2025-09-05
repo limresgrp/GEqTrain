@@ -9,7 +9,7 @@ from ._graph import EmbeddingGraphAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
-from .readout import ReadoutModule, ReadoutModuleWithConditioning, ReadoutModuleWithSimilarity, ReadoutModuleWithVQ
+from .readout import ReadoutModule, AttentionReadoutModule
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
@@ -37,9 +37,7 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
-    ReadoutModuleWithConditioning,
-    ReadoutModuleWithSimilarity,
-    ReadoutModuleWithVQ,
+    AttentionReadoutModule,
     PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
@@ -48,7 +46,6 @@ __all__ = [
     ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
-    select_nonlinearity,
     WeightedTP,
     TransformerBlock,
     AdaLN,
@@ -59,4 +56,5 @@ __all__ = [
     ComputeGradient,
     GotenInteractionModule,
     MACEModule,
+    select_nonlinearity,
 ]
