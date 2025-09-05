@@ -10,6 +10,8 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin
 
 
+ORIG_GRAD_STATE = "_original_grad_state"
+
 @compile_mode("script")
 class EnableGradients(GraphModuleMixin, torch.nn.Module):
     """
@@ -23,12 +25,10 @@ class EnableGradients(GraphModuleMixin, torch.nn.Module):
         self,
         gradient_of: str,
         gradient_wrt: Union[str, List[str]],
-        _original_grad_state_key: str = "_original_grad_state",
         irreps_in = None,
     ):
         super().__init__()
         self.gradient_of = gradient_of
-        self._original_grad_state_key = _original_grad_state_key
 
         if isinstance(gradient_wrt, str):
             gradient_wrt = [gradient_wrt]
@@ -43,7 +43,7 @@ class EnableGradients(GraphModuleMixin, torch.nn.Module):
             data[key].requires_grad_(True)
 
         # Store the original states to be restored by the ComputeGradient module
-        data[self._original_grad_state_key] = torch.tensor(
+        data[ORIG_GRAD_STATE] = torch.tensor(
             original_requires_grad, dtype=torch.bool, device=data[self.gradient_wrt[0]].device
         )
         return data
@@ -65,7 +65,6 @@ class ComputeGradient(GraphModuleMixin, torch.nn.Module):
         out_field: Optional[List[str]] = None,
         sign: float = 1.0,
         scales: Optional[Dict[str, float]] = None,
-        _original_grad_state_key: str = "_original_grad_state",
         irreps_in = None,
     ):
         super().__init__()
@@ -74,7 +73,6 @@ class ComputeGradient(GraphModuleMixin, torch.nn.Module):
         self.sign = sign
         self._negate = sign == -1.0
         self.gradient_of = gradient_of
-        self._original_grad_state_key = _original_grad_state_key
 
         if isinstance(gradient_wrt, str):
             gradient_wrt = [gradient_wrt]
@@ -132,9 +130,8 @@ class ComputeGradient(GraphModuleMixin, torch.nn.Module):
             data[self.out_field[i]] = grad
 
         # Restore original requires_grad state
-        original_requires_grad = data[self._original_grad_state_key]
+        original_requires_grad = data.pop(ORIG_GRAD_STATE)
         for i, required in enumerate(original_requires_grad):
             wrt_tensors[i].requires_grad_(required.item())
 
-        del data[self._original_grad_state_key]
         return data

@@ -89,7 +89,7 @@ class TrainingLoop:
             already_computed_nodes = None
             while True:
                 # Process one chunk of the batch
-                out, center_nodes = self._process_step(
+                center_nodes = self._process_step(
                     data, is_train, summary, already_computed_nodes
                 )
                 
@@ -154,7 +154,7 @@ class TrainingLoop:
         self.trainer._dispatch_callbacks('on_step_end', batch_output=out, summary=summary)
         
         # Return values needed by the chunking controller
-        return out, batch_chunk_center_nodes
+        return batch_chunk_center_nodes
 
     def _lr_sched_step(self, summary: EpochSummary, batch_lvl: bool):
         """Handle LR scheduler steps for both warmup and main phases."""
