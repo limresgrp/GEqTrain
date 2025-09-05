@@ -469,42 +469,58 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         """
         # Start with the main class name and a clear separator
         main_str = f"Model: {self.__class__.__name__}\n"
-        main_str += "=" * 40 + "\n\n"
+        main_str += "=" * 60 + "\n\n"
 
         for name, module in self.named_children():
             # Module header
-            module_lines = [f"Module '{name}': {module.__class__.__name__}"]
-
-            # 1. Get and format saved arguments
-            args = self._get_module_args(module)
-            if args:
-                module_lines.append("  > Arguments:")
-                for key, value in args.items():
-                    if isinstance(value, dict) and ('irreps' in key or 'irreps_in' in key or 'irreps_out' in key):
-                        value_str = f"dict({len(value)} keys)"
-                    else:
-                        value_str = str(value)
-                    module_lines.append(f"    - {key}: {value_str}")
-
-            # 2. Get and format parameters
-            params = list(module.named_parameters(recurse=False))
-            if params:
-                module_lines.append("  > Parameters:")
-                for p_name, p_tensor in params:
-                    module_lines.append(f"    - {p_name} (shape): {list(p_tensor.shape)}")
-
-            # 3. Get and format buffers
-            buffers = list(module.named_buffers(recurse=False))
-            if buffers:
-                module_lines.append("  > Buffers:")
-                for b_name, b_tensor in buffers:
-                    module_lines.append(f"    - {b_name} (shape): {list(b_tensor.shape)}")
-
-            # Add the formatted lines for this module to the main string with indentation
-            main_str += "\n".join("  " + line for line in module_lines) + "\n\n"
+            main_str += f"Layer '{name}': {module.__class__.__name__}\n"
+            main_str += self._repr_module_details(module, indent_level=1)
+            main_str += "\n"
         
-        main_str += "=" * 40 + "\n"
+        main_str += "=" * 60 + "\n"
         return main_str
+
+    def _repr_module_details(self, module: torch.nn.Module, indent_level: int) -> str:
+        """
+        Recursively builds the string representation for a module and its children.
+        """
+        indent = "  " * indent_level
+        module_str = ""
+
+        # 1. Get and format saved arguments
+        args = self._get_module_args(module)
+        if args:
+            module_str += f"{indent}> Arguments:\n"
+            for key, value in args.items():
+                if isinstance(value, dict) and ('irreps' in key or 'irreps_in' in key or 'irreps_out' in key):
+                    value_str = f"dict({len(value)} keys)"
+                else:
+                    value_str = repr(value)
+                module_str += f"{indent}  - {key}: {value_str}\n"
+
+        # 2. Get and format direct parameters
+        params = list(module.named_parameters(recurse=False))
+        if params:
+            module_str += f"{indent}> Direct Parameters:\n"
+            for p_name, p_tensor in params:
+                module_str += f"{indent}  - {p_name} (shape): {list(p_tensor.shape)}\n"
+
+        # 3. Get and format direct buffers
+        buffers = list(module.named_buffers(recurse=False))
+        if buffers:
+            module_str += f"{indent}> Direct Buffers:\n"
+            for b_name, b_tensor in buffers:
+                module_str += f"{indent}  - {b_name} (shape): {list(b_tensor.shape)}\n"
+        
+        # 4. Recurse into submodules
+        submodules = list(module.named_children())
+        if submodules:
+            module_str += f"{indent}> Submodules:\n"
+            for sub_name, sub_module in submodules:
+                module_str += f"{indent}  '{sub_name}': {sub_module.__class__.__name__}\n"
+                module_str += self._repr_module_details(sub_module, indent_level + 2)
+
+        return module_str
 
     def _get_module_args(self, module: torch.nn.Module) -> dict:
         """
