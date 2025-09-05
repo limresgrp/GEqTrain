@@ -7,12 +7,7 @@ from geqtrain.nn import (
     EdgewiseReduce,
     NodewiseReduce,
     InteractionModule,
-    EmbeddingInputAttrs,
-    SphericalHarmonicEdgeAngularAttrs,
-    BasisEdgeRadialAttrs,
-    EmbeddingGraphAttrs,
     ReadoutModule,
-    ReadoutModuleWithConditioning,
 )
 from geqtrain.model._embedding import buildEmbeddingLayers
 
@@ -24,6 +19,7 @@ def GlobalGraphModel(config:Config, model: Optional[SequentialGraphNetwork]) -> 
     """
     layers = buildEmbeddingLayers(config, model)
     layers.update(buildGlobalGraphModelLayers())
+    # layers.update(appendNGNNLayers(config))
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
@@ -47,9 +43,8 @@ def buildGlobalGraphModelLayers():
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "local_update": (ReadoutModuleWithConditioning, dict(
+        "local_update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
         )),
@@ -65,9 +60,8 @@ def buildGlobalGraphModelLayers():
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "global_update": (ReadoutModuleWithConditioning, dict(
+        "global_update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
             resnet=True,
@@ -151,52 +145,3 @@ def appendNGNNLayers(config):
         )),
     })
     return modules
-
-def moreGNNLayers(config:Config):
-    logging.info("--- Building Global Graph Model")
-
-    from geqtrain.model.init_utils import update_config
-    update_config(config)
-
-    if 'node_attributes' in config:
-        node_embedder = (EmbeddingInputAttrs, dict(
-            out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            attributes=config.get('node_attributes'),
-        ))
-    else:
-        raise ValueError('Missing node_attributes in yaml')
-
-    if 'edge_attributes' in config:
-        edge_embedder = (EmbeddingInputAttrs, dict(
-            out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            attributes=config.get('edge_attributes'),
-        ))
-    else:
-        edge_embedder = None
-        logging.info("--- Working without edge_attributes")
-
-    if 'graph_attributes' in config:
-        graph_embedder = EmbeddingGraphAttrs
-    else:
-        graph_embedder = None
-        logging.info("--- Working without graph_attributes")
-
-    layers = {
-        # -- Encode -- #
-        "node_attrs":         node_embedder,
-        "edge_radial_attrs":  BasisEdgeRadialAttrs,
-        "edge_angular_attrs": SphericalHarmonicEdgeAngularAttrs,
-    }
-
-    if edge_embedder != None:
-        layers.update({"edge_attrs": edge_embedder})
-
-    if graph_embedder != None:
-        layers.update({"graph_attrs": graph_embedder})
-
-    layers.update(appendNGNNLayers(config))
-
-    return SequentialGraphNetwork.from_parameters(
-        shared_params=config,
-        layers=layers,
-    )

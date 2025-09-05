@@ -94,9 +94,8 @@ class BaseEdgeEmbedding(BaseEmbedding):
         self.has_edge_attr  = False
         self.proj_to_latent = False
 
-        node_irreps = self.irreps_in[self.node_field]
         edge_radial_irreps = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        edge_dim = 2 * node_irreps.dim + edge_radial_irreps.dim
+        edge_dim = edge_radial_irreps.dim
         out_dim = edge_dim
         
         if self.edge_field in self.irreps_in:
@@ -105,28 +104,21 @@ class BaseEdgeEmbedding(BaseEmbedding):
 
         if latent_dim is not None:
             self.proj_to_latent = True
-            self.register_parameter("linear_proj", torch.nn.Parameter(torch.randn(edge_dim, latent_dim)))
-            torch.nn.init.xavier_uniform_(self.linear_proj)
+            self.linear_proj = torch.nn.Linear(edge_dim, latent_dim)
+            self.linear_proj.reset_parameters()
             out_dim = latent_dim
 
         self.out_irreps = o3.Irreps(f"{out_dim}x0e")
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        edge_neigh  = data[AtomicDataDict.EDGE_INDEX_KEY][1]
-        edge_attr   = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        node_field  = self.node_field
-        assert isinstance(node_field, str)
-        node_attr   = data[node_field]
-
-        edge_attrs_to_cat = [node_attr[edge_center], node_attr[edge_neigh], edge_attr]
+        edge_attrs_to_cat = [data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]]
         if self.has_edge_attr:
             edge_field = self.edge_field
             assert isinstance(edge_field, str)
             edge_attrs_to_cat.append(data.pop(edge_field))
         edge_attrs_emb = torch.cat(edge_attrs_to_cat, dim=-1)
         if self.proj_to_latent:
-            edge_attrs_emb = edge_attrs_emb @ self.linear_proj
+            edge_attrs_emb = self.linear_proj(edge_attrs_emb)
         return edge_attrs_emb
 
 

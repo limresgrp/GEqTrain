@@ -1,6 +1,6 @@
 from ._node_model import NodeModel
 from ._graph_model import GraphModel
-from ._global_graph_model import GlobalGraphModel, moreGNNLayers
+from ._global_graph_model import GlobalGraphModel
 from ._global_node_model import GlobalNodeModel
 from ._heads import Heads
 from ._scale import PerNodeAttrsScale, PerTypeScale
@@ -20,7 +20,6 @@ __all__ = [
     PerNodeAttrsScale,
     PerTypeScale,
     model_from_config,
-    moreGNNLayers,
     WithGradients,
     Combine,
     Module,

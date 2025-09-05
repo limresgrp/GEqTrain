@@ -6,7 +6,7 @@ from geqtrain.nn import (
     SequentialGraphNetwork,
     EdgewiseReduce,
     InteractionModule,
-    ReadoutModuleWithConditioning,
+    ReadoutModule,
 )
 from geqtrain.model._embedding import buildEmbeddingLayers
 
@@ -40,9 +40,8 @@ def buildGlobalNodeModelLayers():
             field=AtomicDataDict.EDGE_FEATURES_KEY,
             out_field=AtomicDataDict.NODE_FEATURES_KEY,
         )),
-        "update": (ReadoutModuleWithConditioning, dict(
+        "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
-            conditioning_field=AtomicDataDict.NODE_ATTRS_KEY,
             out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
             out_irreps=None, # outs tensor of same o3.irreps of out_field
         )),

@@ -45,9 +45,7 @@ def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
 
 def apply_residual_stream(skip_residual: bool, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
     if skip_residual:
-        # Normal (non-residual) update
-        # index_copy replaces, unlike index_add
-        return torch.index_copy(latents, 0, active_edges, new_latents)
+        return torch.index_add(latents, 0, active_edges, new_latents)
 
     assert this_layer_update_coeff is not None
     # At init, we assume new and old to be approximately uncorrelated
@@ -301,6 +299,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center       = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        edge_neigh        = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         edge_length       = data[AtomicDataDict.EDGE_LENGTH_KEY]
         edge_equivariants = data[self.edge_equivariant_field]
         edge_invariants   = data[self.edge_invariant_field]
@@ -309,10 +308,14 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         num_nodes         = node_invariants.shape[0]
 
         # Initialize state
-        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device)
+        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device, requires_grad=True)
         eq_features  = None
         active_edges = torch.arange(num_edges,device=edge_center.device)
-        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device)
+        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device, requires_grad=True)
+        
+        # Update edge_invariants with center-neighbor node_attrs
+        edge_invariants = torch.cat([node_invariants[edge_center], node_invariants[edge_neigh], edge_invariants], dim=-1)            
+        
         # Compute the sigmoids vectorized instead of each loop
         layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
         # Vectorized precompute per layer cutoffs
@@ -509,10 +512,11 @@ class InteractionLayer(torch.nn.Module):
                 shared_weights=True,
             )
             assert previous_latent_dim is None
+            node_invariants_dim = parent.irreps_in[parent.node_invariant_field].num_irreps
             edge_invariants_dim = parent.irreps_in[parent.edge_invariant_field].num_irreps
             # at the first layer, we have no invariants from previous TPs
             self.latent_mlp = two_body_latent(
-                mlp_input_dimension=edge_invariants_dim,
+                mlp_input_dimension=2*node_invariants_dim + edge_invariants_dim,
                 mlp_output_dimension=self.latent_dim,
             )
         else:
@@ -673,7 +677,7 @@ class InteractionLayer(torch.nn.Module):
             local_env_per_active_atom = self.apply_mace(local_env_per_active_atom, node_invariants, active_node_centers)
 
         expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
-        expanded_features_per_node = expanded_features_per_node.index_copy(0, active_node_centers, local_env_per_active_atom)
+        expanded_features_per_node = torch.index_add(expanded_features_per_node, 0, active_node_centers, local_env_per_active_atom)
 
         # Copy to get per-edge
         # Large allocation, but no better way to do this:
