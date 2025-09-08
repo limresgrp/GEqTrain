@@ -1,6 +1,8 @@
 # trainer.py
 import logging
 from time import perf_counter
+
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -89,7 +91,8 @@ class Trainer:
 
         self.logger = logging.getLogger(self.logfile)
         set_seed(self.config.get('seed'))
-        self.dataset_rng = torch.Generator().manual_seed(self.config.get('dataset_seed'))
+        self.dataset_np_rng = np.random.default_rng(self.config.get('dataset_seed'))
+        self.dataset_torch_rng = torch.Generator().manual_seed(self.config.get('dataset_seed'))
 
     def _extract_config_parameters(self):
         """Extract parameters from the config file to trainer attributes for easy access via self. """
@@ -124,7 +127,7 @@ class Trainer:
         2. Master broadcasts indices.
         3. All processes build the final datasets from these indices.
         """
-        builder = DatasetBuilder(self.config, self.dataset_rng, self.logger, self.output)
+        builder = DatasetBuilder(self.config, self.dataset_np_rng, self.logger, self.output)
 
         # --- DDP Synchronization for Index Resolution ---
         # self.train_idcs is initialized from config in _initialize_training_state
@@ -159,7 +162,7 @@ class Trainer:
         use_ensemble = self.config.get("dataset_mode") == "ensemble"
         self.train_sampler = self.dist.get_sampler(self.train_dset, self.shuffle, use_ensemble)
         self.val_sampler = self.dist.get_sampler(self.val_dset, False, use_ensemble)
-        dl_kwargs = {"num_workers": self.config.get('dataloader_num_workers', 0), "pin_memory": self.dist.device.type == 'cuda', "generator": self.dataset_rng}
+        dl_kwargs = {"num_workers": self.config.get('dataloader_num_workers', 0), "pin_memory": self.dist.device.type == 'cuda', "generator": self.dataset_torch_rng}
         self.dl_train = DataLoader(dataset=self.train_dset, batch_size=self.config.get('batch_size'), shuffle=(self.train_sampler is None and self.shuffle), sampler=self.train_sampler, **dl_kwargs)
         self.dl_val = DataLoader(dataset=self.val_dset, batch_size=self.config.get('validation_batch_size'), shuffle=False, sampler=self.val_sampler, **dl_kwargs)
 

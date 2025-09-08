@@ -1,4 +1,5 @@
 # geqtrain/train/components/dataset_builder.py
+from typing import List, Tuple
 import torch
 import logging
 import numpy as np
@@ -10,14 +11,14 @@ def save_txt_file(filename, arrays):
         for arr in arrays:
             if isinstance(arr, torch.Tensor):
                 arr = arr.cpu().numpy()
-            np.savetxt(f, [arr], fmt="%d")  # write as one row
+            np.savetxt(f, [np.asarray(arr)], fmt="%d")  # write as one row
 
 def parse_txt_file(filename):
     arrays = []
     with open(filename, "r") as f:
         for line in f:
             if line.strip():  # skip empty lines
-                arr = np.fromstring(line, sep=" ")
+                arr = np.fromstring(line, sep=" ").astype(int).tolist()
                 arrays.append(arr)
     return arrays
 
@@ -30,7 +31,7 @@ class DatasetBuilder:
         self.dataset_rng = dataset_rng
 
     # --- For generating indices efficiently ---
-    def resolve_split_indices(self):
+    def resolve_split_indices(self) -> Tuple[List[List[int]], List[List[int]]]:
         """
         Resolves train/val indices without loading the full dataset.
         Returns:
@@ -69,32 +70,32 @@ class DatasetBuilder:
     def build_test(self):
         """Builds and returns the final test dataset."""
         # 1. Instantiate the raw datasets
+        self.logger.info("Building test dataset...")
         test_dset = dataset_from_config(self.config, prefix="test")
+
+        test_idcs = self.config.get("test_idcs")
+        n_test = self.config.get("n_test")
         
         # 2. Get the indices
         # --- Step 2.1: Resolve indices from all explicit sources ---
-        if isinstance(self.test_idcs, str):
-            self.logger.info(f"Loading test indices from file: {self.test_idcs}")
-            self.test_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(self.test_idcs)]
+        if isinstance(test_idcs, str):
+            self.logger.info(f"Loading test indices from file: {test_idcs}")
+            test_idcs = parse_txt_file(test_idcs)
         # --- Step 2.2: Update counts from any resolved indices ---
-        if self.test_idcs is not None:
-            if self.n_test is not None:
+        if test_idcs is not None:
+            if n_test is not None:
                 self.logger.info("test_idcs were provided; the value of test_idcs in the config will be ignored and updated to match the actual indices.")
-            self.n_test = [len(t) for t in self.test_idcs]
+            n_test = [len(t) for t in test_idcs]
         # --- Step 2.3: Decide the final strategy based on what has been resolved ---
-        if self.test_idcs is not None:
-            self.logger.info("Using fully provided test indices.")
-        else:
-            if self.n_test is not None and not isinstance(self.n_test, list): self.n_test = [self.n_test]
-            test_idcs = []
-            for i, (n_obs, n_t) in enumerate(zip(test_dset.n_observations, self.n_test)):
-                if n_t > n_obs: raise ValueError(f"n_test[{i}]={n_t} is > n_observations[{i}]={n_obs}")
-                permutation = torch.randperm(n_obs, generator=self.dataset_rng)
-                test_idcs.append(permutation[:n_t])
-            self.test_idcs = test_idcs
+        if test_idcs is None:
+            self.logger.info("Generating new test indices from counts.")
+            if n_test is None:
+                raise ValueError("`test_idcs` or `n_test` must be provided for the test set.")
+            if not isinstance(n_test, list): n_test = [n_test]
+            test_idcs = self._generate_indices_from_pool(test_dset, n_test)
         
         # 3. Create the final indexed datasets
-        final_test_dset = self._index_dataset(test_dset, self.test_idcs)
+        final_test_dset = self._index_dataset(test_dset, test_idcs)
         return final_test_dset
 
     def _resolve_train_val_indices(self):
@@ -112,11 +113,11 @@ class DatasetBuilder:
         # Check for file paths for any indices not already loaded
         if isinstance(train_idcs, str):
             self.logger.info(f"Loading training indices from file: {train_idcs}")
-            train_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(train_idcs)]
+            train_idcs = parse_txt_file(train_idcs)
         
         if isinstance(val_idcs, str):
             self.logger.info(f"Loading validation indices from file: {val_idcs}")
-            val_idcs = [torch.tensor(arr, dtype=torch.long) for arr in parse_txt_file(val_idcs)]
+            val_idcs = parse_txt_file(val_idcs)
 
         # --- Step 2: Update counts from any resolved indices ---
         if train_idcs is not None:
@@ -143,77 +144,66 @@ class DatasetBuilder:
             val_dset_meta = None
         
         if train_idcs is not None: # But val_idcs is None
-            val_idcs = self._generate_val_idcs_from_remaining(train_dset_meta, train_idcs, n_val)
+            self.logger.info("Generating validation set from data points not used for training.")
+            val_idcs = self._generate_indices_from_pool(train_dset_meta, n_val, exclusion_pool=train_idcs, pool_name="validation")
             return train_idcs, val_idcs
-            
         elif val_idcs is not None: # But train_idcs is None
-            train_idcs = self._generate_train_idcs_from_remaining(train_dset_meta, val_idcs, n_train)
+            self.logger.warning("Validation indices were provided, but training indices were not. Selecting training data from remaining samples.")
+            train_idcs = self._generate_indices_from_pool(train_dset_meta, n_train, exclusion_pool=val_idcs, pool_name="training")
             return train_idcs, val_idcs
         else: # Neither is resolved yet, so split from counts or default
             return self._split_from_counts(train_dset_meta, val_dset_meta, n_train, n_val)
 
-    def _generate_val_idcs_from_remaining(self, dset, train_idcs, n_valid_req):
-        """Generates val_idcs by sampling from data not in train_idcs."""
-        self.logger.info("Generating validation set from data points not used for training.")
-        val_idcs = []
-        
-        if n_valid_req is not None and not isinstance(n_valid_req, list): n_valid_req = [n_valid_req]
+    def _generate_indices_from_pool(self, dset, n_to_generate, exclusion_pool=None, pool_name="data"):
+        """
+        Generates a list of lists of indices from a dataset.
 
-        for i, (n_obs, train_idcs_for_i) in enumerate(zip(dset.n_observations, train_idcs)):
-            all_obs = torch.arange(n_obs)
-            is_train_mask = torch.zeros(n_obs, dtype=torch.bool)
-            is_train_mask[train_idcs_for_i.long()] = True
-            available_val_idcs = all_obs[~is_train_mask]
-            n_available = len(available_val_idcs)
+        Args:
+            dset: The dataset to sample from.
+            n_to_generate (list or None): A list with the number of samples to generate for each sub-dataset.
+                                          If None, all available samples are taken.
+            exclusion_pool (list of lists, optional): Indices to exclude from the sampling pool.
+            pool_name (str, optional): Name of the set being generated for logging.
+        """
+        generated_idcs = []
+        if n_to_generate is not None and not isinstance(n_to_generate, list):
+            n_to_generate = [n_to_generate]
 
-            if n_available == 0: val_idcs.append(torch.tensor([], dtype=torch.long)); continue
+        n_observations_list = dset.n_observations.tolist()
+        exclusion_pool = exclusion_pool if exclusion_pool is not None else [[] for _ in n_observations_list]
 
-            if n_valid_req is None:
-                n_to_take = n_available
-                self.logger.info(f"Using all {n_available} remaining samples for validation in dataset {i}.")
-            else:
-                n_req = n_valid_req[i]
-                if n_req > n_available:
-                    self.logger.warning(f"Requested {n_req} validation samples, but only {n_available} are available. Using all available.")
-                    n_to_take = n_available
-                else: n_to_take = n_req
+        for i, (n_obs, exclude_idcs) in enumerate(zip(n_observations_list, exclusion_pool)):
+            if n_obs == 0:
+                generated_idcs.append([])
+                continue
+
+            available_idcs = np.arange(n_obs)
+            if len(exclude_idcs) > 0:
+                is_excluded_mask = np.zeros(n_obs, dtype=bool)
+                is_excluded_mask[exclude_idcs] = True
+                available_idcs = available_idcs[~is_excluded_mask]
             
-            permutation = torch.randperm(n_available, generator=self.dataset_rng)
-            selected_idcs = available_val_idcs[permutation[:n_to_take]]
-            val_idcs.append(selected_idcs)
-        return val_idcs
-
-    def _generate_train_idcs_from_remaining(self, dset, val_idcs, n_train_req):
-        """Generates train_idcs by sampling from data not in val_idcs."""
-        self.logger.warning("Validation indices were provided, but training indices were not. Proceeding to select training data from remaining samples.")
-        train_idcs = []
-        
-        if n_train_req is not None and not isinstance(n_train_req, list): n_train_req = [n_train_req]
-
-        for i, (n_obs, val_idcs_for_i) in enumerate(zip(dset.n_observations, val_idcs)):
-            all_obs = torch.arange(n_obs)
-            is_val_mask = torch.zeros(n_obs, dtype=torch.bool)
-            is_val_mask[val_idcs_for_i.long()] = True
-            available_train_idcs = all_obs[~is_val_mask]
-            n_available = len(available_train_idcs)
-
-            if n_available == 0: train_idcs.append(torch.tensor([], dtype=torch.long)); continue
-
-            if n_train_req is None:
-                n_to_take = n_available
-                self.logger.info(f"Using all {n_available} remaining samples for training in dataset {i}.")
-            else:
-                n_req = n_train_req[i]
-                if n_req > n_available:
-                    self.logger.warning(f"Requested {n_req} training samples, but only {n_available} are available. Using all available.")
-                    n_to_take = n_available
-                else: n_to_take = n_req
+            n_available = len(available_idcs)
+            if n_available == 0:
+                generated_idcs.append([])
+                continue
             
-            permutation = torch.randperm(n_available, generator=self.dataset_rng)
-            selected_idcs = available_train_idcs[permutation[:n_to_take]]
-            train_idcs.append(selected_idcs)
-        return train_idcs
-        
+            n_to_take = n_available
+            if n_to_generate is not None:
+                n_req = n_to_generate[i]
+                if n_req > n_available:
+                    self.logger.warning(f"Requested {n_req} {pool_name} samples for dataset {i}, but only {n_available} are available. Using all available.")
+                else:
+                    n_to_take = n_req
+            else:
+                 self.logger.info(f"Using all {n_available} available samples for {pool_name} in dataset {i}.")
+            
+            permutation = self.dataset_rng.permutation(n_available)
+            selected_idcs = available_idcs[permutation[:n_to_take]]
+            generated_idcs.append(selected_idcs.tolist())
+            
+        return generated_idcs
+
     def _split_from_counts(self, train_dset, val_dset, n_train, n_val):
         """Generates train/validation indices based on n_train/n_val counts."""
         self.logger.info("Generating new train/validation split from counts or default.")
@@ -240,38 +230,34 @@ class DatasetBuilder:
 
         train_idcs, val_idcs = [], []
 
-        for i, (n_obs, n_t) in enumerate(zip(train_dset.n_observations, n_train_list)):
-            if n_t > n_obs: raise ValueError(f"n_train[{i}]={n_t} is > n_observations[{i}]={n_obs}")
-            permutation = torch.randperm(n_obs, generator=self.dataset_rng)
-            train_idcs.append(permutation[:n_t])
-            if not val_dset_provided:
-                n_v = n_valid_list[i]
-                if n_t + n_v > n_obs: raise ValueError("n_train + n_val > n_observations")
-                val_idcs.append(permutation[n_t : n_t + n_v])
+        train_idcs = self._generate_indices_from_pool(train_dset, n_train_list, pool_name="training")
         
         if val_dset_provided:
-            for i, (n_obs, n_v) in enumerate(zip(val_dset.n_observations, n_valid_list)):
-                 if n_v > n_obs: raise ValueError(f"n_val[{i}]={n_v} is > n_observations[{i}]={n_obs}")
-                 permutation = torch.randperm(n_obs, generator=self.dataset_rng)
-                 val_idcs.append(permutation[:n_v])
+            val_idcs = self._generate_indices_from_pool(val_dset, n_valid_list, pool_name="validation")
+        else:
+            val_idcs = self._generate_indices_from_pool(train_dset, n_valid_list, exclusion_pool=train_idcs, pool_name="validation")
 
         return train_idcs, val_idcs
     
     def _index_dataset(self, dataset, indices):
         """Selects a subset of a ConcatDataset using a list of lists of indices."""
         indexed_subdatasets = []
-        if not isinstance(indices, list) or not all(isinstance(i, (list, torch.Tensor)) for i in indices):
-            raise TypeError(f"indices must be a list of lists/tensors, but got {type(indices)}")
+        if not isinstance(indices, list):
+             raise TypeError(f"indices must be a list of lists, but got {type(indices)}")
         
-        for d, idcs in zip(dataset.datasets, indices):
-            if len(idcs) > 0:
+        for d, idcs_list in zip(dataset.datasets, indices):
+            if len(idcs_list) > 0:
+                idcs_tensor = torch.tensor(idcs_list, dtype=torch.long)
+
                 if isinstance(dataset, InMemoryConcatDataset):
-                    indexed_subdatasets.append(d.index_select(idcs))
+                    indexed_subdatasets.append(d.index_select(idcs_tensor))
                 elif isinstance(dataset, LazyLoadingConcatDataset):
-                    indexed_subdatasets.append(d[idcs].reshape(-1))
+                    indexed_subdatasets.append(d[idcs_tensor].reshape(-1))
         
         if isinstance(dataset, InMemoryConcatDataset):
+            if not indexed_subdatasets: return None
             return InMemoryConcatDataset(indexed_subdatasets)
         if isinstance(dataset, LazyLoadingConcatDataset):
+            if not any(len(i) > 0 for i in indices): return None
             return dataset.from_indexed_dataset(indices)
         raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")

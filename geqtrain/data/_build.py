@@ -5,7 +5,7 @@ import inspect
 from typing import List, Optional, Union
 from os.path import isdir
 from functools import partial
-from multiprocessing import Pool
+import torch.multiprocessing as mp
 
 import torch
 import numpy as np
@@ -70,13 +70,13 @@ def dataset_from_config(
 
         worker_func = partial(
             _handle_single_file,
-            config=instance_config, prefix=prefix, class_name=class_name,
+            config_dict=instance_config.as_dict(), prefix=prefix, class_name=class_name,
             inmemory=is_inmemory, key_clean_list=key_clean_list
         )
         
         n_workers = int(min(len(files_to_process), instance_config.get('dataset_num_workers', 1)))
         if n_workers > 1:
-            with Pool(processes=n_workers) as pool:
+            with mp.Pool(processes=n_workers) as pool:
                 results = pool.map(worker_func, files_to_process)
         else:
             results = [worker_func(file_info) for file_info in files_to_process]
@@ -147,14 +147,14 @@ def _update_config(config, _config_dataset, prefix):
     )
     return _config
 
-def _handle_single_file(file_info: tuple, config: Config, prefix: str, class_name: type, inmemory: bool, key_clean_list: list):
+def _handle_single_file(file_info: tuple, config_dict: dict, prefix: str, class_name: type, inmemory: bool, key_clean_list: list):
     """Worker function to process a single data file, including filtering."""
     ensemble_index, dataset_file_name = file_info
-    config[f'{prefix}_file_name'] = dataset_file_name
-    config[f'{prefix}_ensemble_index'] = ensemble_index
+    config_dict[f'{prefix}_file_name'] = dataset_file_name
+    config_dict[f'{prefix}_ensemble_index'] = ensemble_index
 
     try:
-        instance, _ = instantiate(class_name, prefix=prefix, optional_args=config)
+        instance, _ = instantiate(class_name, prefix=prefix, optional_args=config_dict)
     except Exception as e:
         logging.warning(f"Failed to instantiate dataset for file {dataset_file_name}. Error: {e}")
         return None
@@ -162,7 +162,7 @@ def _handle_single_file(file_info: tuple, config: Config, prefix: str, class_nam
     if instance.data is None or instance.data.num_graphs == 0:
         return None
 
-    instance = _filter_dataset(instance, key_clean_list, _node_types_to_keep(config), *_node_types_to_exclude_from_edges(config))
+    instance = _filter_dataset(instance, key_clean_list, _node_types_to_keep(config_dict), *_node_types_to_exclude_from_edges(config_dict))
 
     if instance is None:
         logging.warning(f"All data from {dataset_file_name} was filtered out.")
@@ -172,7 +172,7 @@ def _handle_single_file(file_info: tuple, config: Config, prefix: str, class_nam
         return instance
     else:
         return {
-            "config": config.as_dict(),
+            "config": config_dict,
             f"{prefix}_file_name": dataset_file_name,
             f"{prefix}_ensemble_index": ensemble_index,
             'lazy_dataset': np.arange(instance.data.num_graphs),
