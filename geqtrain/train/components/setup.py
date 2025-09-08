@@ -51,7 +51,6 @@ def setup_optimizer(model, config):
     # Get all params that require grad
     param_dict = {name: param for name, param in model.named_parameters() if param.requires_grad}
 
-    # This dict maps tags to custom optimizer keyword arguments
     param_groups_dict = {
         'dampen': {'lr': config.get('learning_rate', 1e-3) * 1.e-2},
         'nowd':   {'weight_decay': 0.0},
@@ -61,9 +60,9 @@ def setup_optimizer(model, config):
         param_groups_dict.update({'tune': {'lr': config.get('fine_tune_lr')}})
 
     # Helper to create a new group template for a parameter
-    def merge_groups(param, tags: list):
+    def merge_groups(param, tags: set):
         merged_kwargs = {}
-        for tag in tags:
+        for tag in sorted(tags):
             if tag in param_groups_dict:
                 merged_kwargs.update(param_groups_dict[tag])
         return {'params': [param], **merged_kwargs}
@@ -85,16 +84,16 @@ def setup_optimizer(model, config):
     # Main logic to build the final list of parameter groups
     optim_groups = []
     for param in param_dict.values():
-        tags = []
+        tags = set()
         # Add any user-defined tags from the model parameter
         if hasattr(param, 'tags'):
-            tags.extend(param.tags)
+            tags.update(param.tags)
         # Automatically add 'nowd' (no weight decay) for bias and 1D parameters
         if param.dim() < 2:
-            tags.append('nowd')
+            tags.add('nowd')
 
         # Create a group for this parameter
-        group = merge_groups(param, list(set(tags)))
+        group = merge_groups(param, tags)
         # Merge it into the final list
         merge_or_create_group(optim_groups, group)
 
