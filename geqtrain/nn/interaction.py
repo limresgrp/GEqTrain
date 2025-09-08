@@ -308,10 +308,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         num_nodes         = node_invariants.shape[0]
 
         # Initialize state
-        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device, requires_grad=True)
+        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device)
         eq_features  = None
         active_edges = torch.arange(num_edges,device=edge_center.device)
-        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device, requires_grad=True)
+        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device)
         
         # Update edge_invariants with center-neighbor node_attrs
         edge_invariants = torch.cat([node_invariants[edge_center], node_invariants[edge_neigh], edge_invariants], dim=-1)            
