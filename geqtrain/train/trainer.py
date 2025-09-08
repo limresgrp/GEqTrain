@@ -170,8 +170,10 @@ class Trainer:
         if model is None:
             model, _ = model_from_config(config=self.config, initialize=True, dataset=self.train_dset)
         self.num_weights = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        self.logger.info(f"Number of trainable weights: {self.num_weights}")
         self.model = self.dist.wrap_model(model)
+        if self.dist.is_master:
+            self.logger.info(f"Number of trainable weights: {self.num_weights}")
+            self.logger.info(self.model)
 
     def _setup_training_components(self):
         self.loss = setup_loss(self.config)
@@ -209,6 +211,7 @@ class Trainer:
         self.training_loop = TrainingLoop(self)
         self._dispatch_callbacks('on_trainer_begin')
         self.wall = perf_counter()
+        exit()
 
         while not self.should_stop:
             # 1. Create the stateful summary object for the new epoch

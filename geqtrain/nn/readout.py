@@ -245,13 +245,12 @@ class AttentionReadoutModule(ReadoutModule):
             self.scalar_attnt_enabled = False
             
         if self.scalar_attnt_enabled:
-            in_irreps: o3.Irreps = self.irreps_in[self.field]
             self.ensemble_attnt1 = L0IndexedAttention(
-                irreps_in=in_irreps, field=self.field, out_field=self.field, 
+                irreps_in=self.irreps_in, field=self.field, out_field=self.field, 
                 num_heads=num_heads, idx_key=idx_key, update_mlp=True
             )
             self.ensemble_attnt2 = L0IndexedAttention(
-                irreps_in=in_irreps, field=self.field, out_field=self.field, 
+                irreps_in=self.irreps_in, field=self.field, out_field=self.field, 
                 num_heads=num_heads, idx_key=idx_key
             )
         else:

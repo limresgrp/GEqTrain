@@ -1,8 +1,4 @@
-from .auto_init import (
-    instantiate_from_cls_name,
-    instantiate,
-    get_w_prefix,
-)
+from .auto_init import instantiate_from_cls_name, instantiate
 from .savenload import (
     save_file,
     load_file,
@@ -22,7 +18,6 @@ from .evaluate_utils import AccuracyMetric
 __all__ = [
     instantiate_from_cls_name,
     instantiate,
-    get_w_prefix,
     save_file,
     load_file,
     load_callable,
