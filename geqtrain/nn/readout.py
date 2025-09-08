@@ -126,7 +126,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=self.use_internal_weights, pad_to_alignment=1)
             
             if not self.use_internal_weights:
-                self.weights_emb = readout_latent(self.n_scalars_in, self.eq_readout.weight_numel, **readout_latent_kwargs)
+                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
                 if self.conditioner is not None:
                      self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
 
