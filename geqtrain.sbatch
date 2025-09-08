@@ -5,8 +5,8 @@
 #SBATCH --gpus-per-task=1          # Assign one GPU to each task 
 #SBATCH --cpus-per-task=8          # Assign CPUs for each task 
 #SBATCH --mem=64GB
-#SBATCH --time=00:05:00
-#SBATCH --partition=debug
+#SBATCH --time=00:30:00            # Max prod time: 24h. Max debug time: 30min
+#SBATCH --partition=debug          # normal | debug
 #SBATCH --account=lp40
 
 cd $HOME/GEqTrain
@@ -24,6 +24,9 @@ export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 
 # Set a port for the master process. A fixed port is fine for single-node jobs.
 export MASTER_PORT=29500
+
+# Set api key for WANDB
+export WANDB_API_KEY=myapikey
 
 # for debugging
 # export CUDA_LAUNCH_BLOCKING=1
