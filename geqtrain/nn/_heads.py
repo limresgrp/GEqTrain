@@ -16,190 +16,6 @@ from torch.nn import functional as F
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.data import AtomicDataDict
 
-class FFBlock(torch.nn.Module):
-    def __init__(self, inp_size, out_size:Optional[int]=None, residual:bool=True, group_norm:bool=False):
-        super().__init__()
-        self.residual = residual
-        out_size = out_size or inp_size
-        self.block_list = [GroupNorm(num_groups=8, num_channels=inp_size)] if group_norm else [torch.nn.LayerNorm(inp_size)]
-        self.block_list.extend([
-            torch.nn.Linear(inp_size, 4*inp_size, bias=False), # bias = false by default since LN always present
-            torch.nn.SiLU(),
-            torch.nn.Linear(4*inp_size, out_size)
-        ])
-        self.block = torch.nn.Sequential(*self.block_list)
-
-    def forward(self, x):
-        out = self.block(x)
-        if self.residual:
-            out += x
-        return out
-
-
-# class GVPGeqTrain(GraphModuleMixin, nn.Module):
-#     '''https://github.com/lucidrains/geometric-vector-perceptron'''
-#     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
-#         super().__init__()
-#         self.field = field
-#         self.out_field = out_field
-#         in_irreps = irreps_in[field]
-#         self._init_irreps(
-#             irreps_in=irreps_in,
-#             irreps_out={self.out_field: in_irreps}, # TODO FIX not real
-#         )
-
-#         self.dropout = GVPDropout(0.2)
-
-#         self.norm1 = GVPLayerNorm(256)
-#         self.layer1 = GVP(
-#             dim_vectors_in = 256, # env_embed_multiplicity
-#             dim_feats_in = 256, # l0 dim (i.e. latent_dim)
-
-#             dim_vectors_out = 128, # out_multiplicity
-#             dim_feats_out = 128, # new latent_dim
-
-#             vector_gating = True
-#         )
-
-#         self.norm2 = GVPLayerNorm(128)
-#         self.layer2 = GVP(
-#             dim_vectors_in = 128, # env_embed_multiplicity
-#             dim_feats_in = 128, # l0 dim (i.e. latent_dim)
-
-#             dim_vectors_out = 256, # out_multiplicity
-#             dim_feats_out = 256, # new latent_dim
-#             vector_gating = True
-#         )
-
-#         # for scalar property
-#         self.norm3 = GVPLayerNorm(256)
-#         self.final_layer = GVP(
-#             dim_vectors_in = 256, # env_embed_multiplicity # 64x1o
-#             dim_feats_in = 256, # l0 dim (i.e. latent_dim) # 512x0e
-
-#             dim_vectors_out = 64, # out_multiplicity
-#             dim_feats_out = 1, # new latent_dim
-
-#             vector_gating = True
-#         )
-#         self.l0_size = self.irreps_in[self.field][0].dim
-#         self.l1_size = self.irreps_in[self.field][1].dim
-
-#     def forward(self, data):
-#         features = data[self.field]
-
-#         feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-#         vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
-
-#         feats, vectors = self.norm1(feats, vectors)
-#         feats, vectors = self.layer1((feats, vectors))
-#         feats, vectors = self.dropout(feats, vectors)
-
-#         feats, vectors = self.norm2(feats, vectors)
-#         feats, vectors = self.layer2((feats, vectors))
-#         feats, vectors = self.dropout(feats, vectors)
-
-#         feats, vectors = self.norm3(feats, vectors)
-#         feats, vectors = self.final_layer((feats, vectors))
-
-#         data[self.out_field] = feats
-#         return data
-
-
-class WeightedTP(GraphModuleMixin, nn.Module):
-    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
-        '''
-        #! with this i can also use higher lmaxs that get actually used in pred
-        '''
-        super().__init__()
-
-        self.field = field
-        self.out_field = out_field
-        in_irreps = irreps_in[field]
-
-        irreps_out = e3nn.o3.Irreps('1x0e')
-        self._init_irreps(
-            irreps_in=irreps_in,
-            irreps_out={self.out_field: irreps_out},
-        )
-
-        self.l0_size = self.irreps_in[self.field][0].dim
-        self.l1_size = self.irreps_in[self.field][1].dim
-
-        scalars_out = 128
-        irreps_out = f'{scalars_out}x0e'
-
-        self.tp = e3nn.o3.FullyConnectedTensorProduct(
-            irreps_in1=in_irreps,
-            irreps_in2=in_irreps,
-            irreps_out=irreps_out,
-            internal_weights=False,
-            irrep_normalization='component',
-            path_normalization='element',
-            shared_weights = False,
-        )
-
-        self.weights_embedder = FFBlock(self.l0_size, self.tp.weight_numel, residual=False)
-        self.out_mlp = FFBlock(scalars_out, 1, residual=False)
-
-    def __call__(self, data):
-        x = data[self.field]
-        # get scalars
-        feats, _ = torch.split(x, [self.l0_size, self.l1_size], dim=-1)
-
-        tp_weights = self.weights_embedder(feats)
-
-        # x_tp_inpt = rearrange(x, "b (v c) -> b v c ", c=4)
-        x = self.tp(x,x, tp_weights)
-
-        data[self.out_field] = self.out_mlp(x)
-
-        return data
-
-
-class TransformerBlock(GraphModuleMixin, nn.Module):
-    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
-        super().__init__()
-        self.field = field
-        self.out_field = out_field
-
-        irreps_out = e3nn.o3.Irreps('1x0e')
-        self._init_irreps(
-            irreps_in=irreps_in,
-            irreps_out={self.out_field: irreps_out},
-        )
-
-        self.l0_size = self.irreps_in[self.field][0].dim
-        self.l1_size = self.irreps_in[self.field][1].dim
-        self.final_block = FFBlock(self.l0_size, 1, residual=False)
-        self.l1 = L0IndexedAttention(irreps_in, field, out_field)
-        self.l2 = L0IndexedAttention(irreps_in, field, out_field)
-        add_tags_to_module(self, '_wd')
-
-    def forward(self, data):
-        features = data[self.field]
-        feats, _ = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-        feats = self.l1(feats, data['ensemble_index'])
-        feats = self.l2(feats, data['ensemble_index'])
-        data[self.out_field] = self.final_block(feats)
-        return data
-
-
-# TODO: IDEA MAKE IT as a possible replacement for ScalarMLPFunction
-'''mlp_input_dimension: Optional[int],
-mlp_latent_dimensions: List[int],
-mlp_output_dimension: Optional[int],
-mlp_nonlinearity: Optional[str] = "silu",
-use_layer_norm: bool = True,
-use_weight_norm: bool = False,
-dim_weight_norm: int = 0,
-has_bias: bool = False,
-bias: Optional[List] = None,
-zero_init_last_layer_weights: bool = False,
-dropout: Optional[float] = None,
-dampen: bool = False,
-wd: bool = False,
-gain:Optional[float] = None'''
 
 class L0IndexedAttention(GraphModuleMixin, nn.Module):
     # for now let's suppose that the input is a scalar field
@@ -213,6 +29,10 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         num_heads: int = 8,
         dropout: float = 0.0,
         update_mlp:bool=False,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
+        learn_query:bool=False,
     ):
         super().__init__()
         self.field = field
@@ -228,15 +48,16 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
             irreps_out={self.out_field: irreps_out},
         )
 
-        self.n_inpt_scalars = in_irreps.ls.count(0)
+        irreps_as_dict = {i:mul for i, (mul, l) in enumerate(in_irreps)}
+        # assert len(irreps_as_dict) == 1, f'Head to predict {field} has equivariant out: {str(self.irreps_in[self.out_field])}'
+        self.n_inpt_scalars = irreps_as_dict[0]
         self.kqv_norm = nn.LayerNorm(self.n_inpt_scalars)
-        self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars, bias=False)
         self.out_proj = nn.Linear(self.n_inpt_scalars, self.n_inpt_scalars)
 
-        self.head_dim =  self.n_inpt_scalars//self.n_heads
+        self.head_dim = self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
+        self.use_radial_bias = use_radial_bias and (field == AtomicDataDict.NODE_FEATURES_KEY) or (field == AtomicDataDict.NODE_ATTRS_KEY)
         if self.use_radial_bias:
             rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
             self.bias_norm = nn.LayerNorm(rbf_emb_dim)
@@ -247,6 +68,16 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 nn.Linear(rbf_emb_dim, num_heads)
             )
 
+        # from sd3.5 https://arxiv.org/pdf/2403.03206, 5.3.2
+        self.attention_prenorm = attention_prenorm
+        self.pre_norm_k = None
+        self.pre_norm_q = None
+        self.pre_norm_v = None
+        if self.attention_prenorm:
+            self.pre_norm_k = nn.LayerNorm(self.head_dim)
+            self.pre_norm_q = nn.LayerNorm(self.head_dim)
+            self.pre_norm_v = nn.LayerNorm(self.head_dim)
+
         self.mlp = None
         if self.update_mlp:
             self.mlp = ScalarMLPFunction(
@@ -255,15 +86,30 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
                 mlp_output_dimension=self.n_inpt_scalars,
                 mlp_nonlinearity = "swiglu",
             )
-        
-        self.rearrange = Rearrange('batch source target heads -> batch heads source target')
 
-    def _add_edge_based_bias(self, data: AtomicDataDict.Type):
+        self.sparse_attention = sparse_attention
+
+        self.learn_query = learn_query
+        self.kqv_proj_output_size_multiplier = 3
+        if self.learn_query and self.idx_key in ['ensemble_index', AtomicDataDict.GRAPH_FEATURES_KEY]:
+            self.kqv_proj_output_size_multiplier = 2
+
+        self.kqv_proj = nn.Linear(self.n_inpt_scalars, self.kqv_proj_output_size_multiplier*self.n_inpt_scalars, bias=False)
+        self.query_embedding = None
+        if self.kqv_proj_output_size_multiplier == 2:
+            self.query_embedding = nn.Parameter(torch.randn(self.n_inpt_scalars))
+
+        self.rearrange1 = Rearrange('batch source target heads -> batch heads source target')
+        self.rearrange2 = Rearrange('d -> 1 d')
+        # self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.n_scalars, d=self.head_dim)
+
+
+    def _add_edge_based_bias(self, data:AtomicDataDict.Type):
         edge_radial_attrs = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY] # already modulated wrt r_max; shape: (E, rbf_emb_size)
         edge_index        = data[AtomicDataDict.EDGE_INDEX_KEY] # (2, E)
         batch_map         = data[AtomicDataDict.BATCH_KEY] # assings each node to a given mol
         unique_idx, counts = torch.unique(batch_map, return_counts=True) # num_of mols, num of atoms per mol
-        max_count = int(counts.max().item()) # max num of nodes in atoms in batch
+        max_count = counts.max() # max num of nodes in atoms in batch
         num_uniques = unique_idx.shape[0] # num of mols in batch
 
         num_total_edges, num_edge_features = edge_radial_attrs.shape
@@ -294,7 +140,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # --- Initialize the padded output tensor ---
         padding_value = 0.0
         padded_edge_attrs = torch.full(
-            [num_uniques, max_count, max_count, self.n_heads],
+            [int(num_uniques), int(max_count), int(max_count), int(self.n_heads)],
             padding_value,
             dtype=edge_radial_attrs.dtype,
             device=device
@@ -309,43 +155,56 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         # place the edge attributes into the correct locations in the padded tensor.
         padded_edge_attrs[edge_batch_indices, local_src_indices, local_tgt_indices] = updated_edge_radial_attrs
 
-        padded_edge_attrs = self.rearrange(padded_edge_attrs)
+        padded_edge_attrs = self.rearrange1(padded_edge_attrs)
         return padded_edge_attrs
 
-    #! ----------- COMMENT TO JIT COMPILE --------------- #
-    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
-    # --------------------------------------------------- #
-    def forward(self, features, data: AtomicDataDict.Type):
+
+    # @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
+    def forward(self, features, data: AtomicDataDict.Type) -> torch.Tensor:
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
-        attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
+        if self.idx_key == AtomicDataDict.GRAPH_FEATURES_KEY:
+            attention_idxs = torch.arange(features.shape[0], device=features.device)
+        else:
+            attention_idxs = data[self.idx_key] # either 'batch' or 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
 
-        N, emb_dim = features.shape # N = num nodes or N ensemble confs; depends on self.field
+        N, emb_dim = features.shape # N = num nodes or N ensemble confs
         _dtype = features.dtype
         _device = features.device
         residual = features
 
         # fetch and preprocess attnt idxs
         unique_idx, counts = torch.unique(attention_idxs, return_counts=True)
-        max_count = counts.max()
-        num_uniques = unique_idx.shape[0] # bs
+        max_count = counts.max() # max number of atoms or conformers in batch
+        num_uniques = unique_idx.shape[0] # number of unique mols in batch, regardless of self.idx_key
+
+        # mask to select how many atoms or conformers are there in/for that mol
+        mask = torch.arange(max_count, device=_device)[None, :] < counts[:, None] # for each mol select what is NOT padding
+        # assert torch.all(mask.sum(-1) == counts) == True
 
         # map features to kqv
         features = self.kqv_norm(features)
         kvq = self.kqv_proj(features)
-        _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
 
-        k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k
+        if self.kqv_proj_output_size_multiplier == 2:
+            _k, _v = torch.chunk(kvq, 2, dim=-1)
+            if self.query_embedding is not None:
+                _q = self.rearrange2(self.query_embedding)
+            else:
+                # fallback: use _k as _q if no query_embedding is provided
+                _q = _k
+        else:
+            _k, _q, _v = torch.chunk(kvq, 3, dim=-1)
+
         q = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_q
+        k = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_k; in LLMs this is S,T,K
         v = torch.zeros(num_uniques, max_count, emb_dim, device=_device, dtype=_dtype) # padded_v
 
-        mask = torch.arange(max_count, device=_device)[None, :] < counts[:, None]
-
-        k[mask] = _k
+        k[mask] = _k # set data into padded tensors
         q[mask] = _q
         v[mask] = _v
 
-        k = k.view(num_uniques, max_count, self.n_heads, self.head_dim)
+        k = k.view(num_uniques, max_count, self.n_heads, self.head_dim) # split emb in nhead chunks for MHA
         q = q.view(num_uniques, max_count, self.n_heads, self.head_dim)
         v = v.view(num_uniques, max_count, self.n_heads, self.head_dim)
 
@@ -353,20 +212,33 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         q = q.transpose(1,2)
         v = v.transpose(1,2)
 
-        qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
-        qvt /= self.scale
+        if self.attention_prenorm:
+            if self.pre_norm_k is not None: k = self.pre_norm_k(k)
+            if self.pre_norm_q is not None: q = self.pre_norm_q(q)
+            if self.pre_norm_v is not None: v = self.pre_norm_v(v)
 
-        bidirectional_mask = qvt == 0.0
-        row_all_true_mask = bidirectional_mask.all(dim=-1, keepdim=True).expand_as(bidirectional_mask) # to select rows that have only -inf values (s.t. exclude them from softmax otherwise autograd breaks)
+        qvt = q @ k.transpose(-1, -2) # square matrix of size (..., max_count, max_count)
+        qvt = qvt / self.scale # scale by sqrt of head_dim
+
+        bidirectional_mask = qvt == 0.0 # select all elements that come out the prod of rows/cols of zeros
+        row_all_true_mask = bidirectional_mask.all(dim=-1, keepdim=True).expand_as(bidirectional_mask) # select rows that have only zeros (s.t. exclude them from softmax otherwise autograd breaks)
 
         if self.use_radial_bias:
             qvt += self._add_edge_based_bias(data)
 
         fill_value = -torch.inf # Or a large negative number like -1e9
-        qvt.masked_fill_(bidirectional_mask, fill_value)
-        qvt[row_all_true_mask] = 0.0 # replace rows of all -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output.
+        qvt.masked_fill_(bidirectional_mask, fill_value) # set all zeros to -inf
+        qvt[row_all_true_mask] = 0.0 # replace rows of ALL -inf to 0s to avoid #!RuntimeError: Function 'SoftmaxBackward0' returned nan values in its 0th output; (but keep -inf if other vals in row are populated)
+
+        # all the above has been done to set -inf maksing in in rows populated, and zeros in rows that are completely empty (due to padding)
+
+        # if self.sparse_attention:
+        #     # attnt_coeffs = entmax_bisect(qvt, alpha=1.3, dim=-1) # optional values for alpha 1.2. 1.25 1.3
+        #     pass
+        # else:
         attnt_coeffs = F.softmax(qvt, dim=-1)
-        attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all spurious rows
+
+        attnt_coeffs = attnt_coeffs.masked_fill(row_all_true_mask, 0.0) # zero-out all "padding only" rows
 
         # assert torch.allclose(
         #     attnt_coeffs.sum(-1).sum(-1)[:, 0],
@@ -383,52 +255,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         out = self.out_proj(tmp_out)
         out+=residual
 
-        if self.update_mlp:
-            assert self.mlp is not None
-            out = out + self.mlp(out)
+        if self.update_mlp and self.mlp is not None:
+            out = out+self.mlp(out)
 
         return out
-
-
-class L1Scalarizer(GraphModuleMixin, nn.Module):
-    def __init__(self, irreps_in, field: str, out_field: Optional[str] = None, norm_order:int=2, output_l1:bool=True):
-        super().__init__()
-        self.field = field
-        self.out_field = out_field or field
-        self.norm_order = norm_order
-        self.output_l1 = output_l1
-
-        in_irreps = irreps_in[field]
-
-        self.l0_mul = in_irreps.ls.count(0)
-        self.l1_mul = in_irreps.ls.count(1)
-
-        # out_irreps = o3.Irreps(str(irreps_in[self.field])+f'+{self.l1_mul}x0e').regroup()
-        self.reshaper = reshape_irreps(o3.Irreps(str(in_irreps[1]))) # casts to torch.Size([n, mul, 3])
-
-        self.proj = nn.Linear(self.l0_mul+self.l1_mul, self.l0_mul, bias=False)
-
-        self._init_irreps(
-            irreps_in=irreps_in,
-            irreps_out={self.out_field: irreps_in[field]},
-        )
-
-    def forward(self, data):
-        # todo check if this works also for if lmax=2
-        features = data[self.field]
-
-        feats, vectors = torch.split(features, [self.l0_mul, 3*self.l1_mul], dim=-1)
-        reshaped_vectors = self.reshaper(vectors) # torch.Size([n, mul, 3])
-        rolled_vectors = torch.roll(reshaped_vectors, 1, 1)
-
-        # sh = torch.norm(reshaped_vectors, p = self.norm_order, dim = -1)
-        dot_product = torch.einsum('bij,bij->bi', reshaped_vectors, rolled_vectors) # Perform dot product over the 3D vectors in dim=1
-
-        out = torch.cat((feats, dot_product), dim = 1) # scalars with dot prods
-        out = self.proj(out) # send back to og size
-
-        if self.output_l1:
-            out = torch.cat((out, vectors), dim = 1) # scalars with prods and l1s
-
-        data[self.out_field] = out
-        return data

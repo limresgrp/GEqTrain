@@ -92,7 +92,7 @@ class TrainingLoop:
                 center_nodes = self._process_step(
                     data, is_train, summary, already_computed_nodes
                 )
-                
+
                 # Update the state for the next chunk
                 already_computed_nodes = evaluate_end_chunking_condition(
                     already_computed_nodes, center_nodes, len(center_nodes)
@@ -100,7 +100,7 @@ class TrainingLoop:
 
                 if already_computed_nodes is None:
                     break # Finished all chunks for this batch
-    
+
     def _process_step(self, data, is_train: bool, summary: EpochSummary, already_computed_nodes=None):
         """
         Performs the core computation for a single step (a chunk or a full batch).
@@ -152,7 +152,7 @@ class TrainingLoop:
 
         # Dispatch the per-step hook for callbacks
         self.trainer._dispatch_callbacks('on_step_end', batch_output=out, summary=summary)
-        
+
         # Return values needed by the chunking controller
         return batch_chunk_center_nodes
 

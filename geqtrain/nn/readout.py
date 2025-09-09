@@ -1,155 +1,263 @@
-from typing import List, Optional, Union
-
+from typing import Optional, Union, List
 import torch
-import torch.nn as nn
 from e3nn import o3
 from e3nn.util.jit import compile_mode
-
-# Assuming these are the correct import paths from your project structure
 from geqtrain.data import (
     AtomicDataDict,
     _NODE_FIELDS,
+    _EDGE_FIELDS,
     _GRAPH_FIELDS,
 )
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
 from geqtrain.nn._film import FiLMFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
+from geqtrain.utils import add_tags_to_module
+
 from geqtrain.nn._heads import L0IndexedAttention
-from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+
+import re
+
+def is_valid_irreps_string(irrep_string):
+    r'''
+    Examples:
+    print(is_valid_irreps_string('64x0e+64x1o+64x2e'))  # Should return True
+    print(is_valid_irreps_string('64x0e+64x1o+64x2e+128x3o'))  # Should return True
+    print(is_valid_irreps_string('something'))  # Should return False
+    print(is_valid_irreps_string('64x0e+64x1o+64x'))  # Should return False
+    '''
+    pattern = re.compile(r'^(\d+x\d+[eo](\+\d+x\d+[eo])*)$')
+    return bool(pattern.match(irrep_string))
 
 
 @compile_mode("script")
-class ReadoutModule(GraphModuleMixin, nn.Module):
-    """
-    This module takes a feature tensor (`field`) and computes an output tensor
-    (`out_field`). It can optionally condition its internal transformations on a
-    second tensor (`conditioning_field`).
-    """
+class ReadoutModule(GraphModuleMixin, torch.nn.Module):
+    '''
+    out_irreps options evaluated in the following order:
+        1) o3.Irreps obj
+        2) str castable to o3.Irreps obj (eg: 1x0e)
+        3) a irreps_in key (and get its o3.Irreps)
+        4) same irreps of out_field (if out_field in GraphModuleMixin.irreps_in dict)
+        if out_irreps=None is passed, then option 4 is triggered is valid, else 5)
+        5) if none of the above: outs irreps of same size of field
+        if out_irreps is not provided it takes out_irreps from yaml
+    '''
     def __init__(
         self,
         field: str,
-        irreps_in,
         out_field: Optional[str] = None,
-        conditioning_field: Optional[str] = None,
-        out_irreps: Union[o3.Irreps, str, None] = None,
+        out_irreps: Union[o3.Irreps, str] = None, # if none: # outs tensor of same o3.irreps of out_field
         strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
+        eq_has_internal_weights: bool = False,
         resnet: bool = False,
-        ignore_amp: bool = False,
-        bias: Optional[Union[float, List]] = None,
+        dampen: bool = False,
+        input_ls:  Optional[List[int]]              = None,
+        input_mul: Optional[Union[str, int]]        = None,
+        output_ls:  Optional[List[int]]             = None,
+        output_mul: Optional[Union[str, int]]       = None,
+        irreps_in=None, # if output is only scalar, this is required
+        ignore_amp: bool = False, # wheter to adopt amp or not
+        dataset_mode: str = 'single', # single|ensemble
+        normalize_l1:bool=False, # this must be false
+
+        # attention params:
+        scalar_attnt: bool = True,
+        num_heads: int = 32,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
+        learn_query:bool=False,
     ):
         super().__init__()
 
+        # --- start definition of input/output irreps --- #
+
+        # define input irreps
         self.field = field
-        self.out_field = out_field or self.field
-        self.conditioning_field = conditioning_field
-        self.ignore_amp = ignore_amp
-        self.resnet = resnet
+        in_irreps = irreps_in[field]
 
-        # --- Irreps Initialization ---
-        if out_irreps is None:
-            if self.out_field in irreps_in:
-                out_irreps = irreps_in[self.out_field]
+        # --- start in_irreps ls --- #
+        # default behavior: do not modify
+
+        # - [optional] filter in_irreps l degrees if needed:
+        if input_ls is None:
+            input_ls = in_irreps.ls # all ls if none are passed
+        assert isinstance(input_ls, List)
+
+        # [optional] set in_irreps multiplicity
+        if input_mul is None:
+            input_mul = in_irreps[0].mul # take l=0 mul; ok since all ls have same mul
+
+        in_irreps = o3.Irreps([(input_mul, ir) for _, ir in in_irreps if ir.l in input_ls])
+
+        # update dict
+        irreps_in[field] = in_irreps
+
+        # --- end in_irreps ls --- #
+
+        # define output irreps
+        self.out_field = out_field or field
+        if isinstance(out_irreps, o3.Irreps):
+            out_irreps = out_irreps # leave as it is
+        elif isinstance(out_irreps, str):
+            if is_valid_irreps_string(out_irreps):
+                out_irreps = o3.Irreps(out_irreps) # elif eg "1x0e" has been passed, cast it
             else:
-                raise ValueError(
-                    f"out_irreps is None, but out_field '{self.out_field}' is not in irreps_in. "
-                    "Please provide out_irreps explicitly."
-                )
+                assert out_irreps in irreps_in, f"'out_irreps' param is behaving like a key, but '{out_irreps}' is missing from irreps_in"
+                out_irreps = o3.Irreps(irreps_in[out_irreps]) # othewise we expect it to be key for irreps_in[key]
+        elif self.out_field in irreps_in:
+            out_irreps = irreps_in[self.out_field] # outs same irreps of irreps_in[out_field]
+        else:
+           out_irreps = in_irreps # outs same irreps of irreps_in[field]
 
-        required_irreps = [field]
-        if self.conditioning_field is not None:
-            required_irreps.append(self.conditioning_field)
-            
+        # --- start out_irreps ls --- #
+        # default behavior: do not modify
+
+        # - [optional] filter out_irreps l degrees if needed:
+        if output_ls is None:
+            output_ls = out_irreps.ls # all ls if none are passed
+        assert isinstance(output_ls, List)
+
+        # [optional] set out_irreps multiplicity
+        if output_mul is None:
+            output_mul = out_irreps[0].mul # take l=0 mul; ok since all ls have same mul
+
+        out_irreps = o3.Irreps([(output_mul, ir) for _, ir in out_irreps if ir.l in output_ls])
+
+        # --- end out_irreps ls --- #
+
+        self.out_irreps = out_irreps
+        self.out_irreps_muls = [ir.mul for ir in out_irreps]
+
+        # check and init irreps dict
+        my_irreps_in = {field: in_irreps}
+        if resnet:
+            my_irreps_in.update({self.out_field: out_irreps})
         self._init_irreps(
             irreps_in=irreps_in,
-            required_irreps_in=required_irreps,
+            my_irreps_in=my_irreps_in,
             irreps_out={self.out_field: out_irreps},
         )
-        in_irreps: o3.Irreps = self.irreps_in[field]
-        out_irreps: o3.Irreps = self.irreps_out[self.out_field]
-        self.out_irreps_dim = out_irreps.dim
 
-        # --- Resnet ---
-        self._resnet_update_coeff: Optional[nn.Parameter] = None
-        if self.resnet:
-            if self.out_field not in self.irreps_in:
-                 raise ValueError(f"For resnet=True, out_field='{self.out_field}' must be in `irreps_in`")
-            if self.irreps_in[self.out_field] != out_irreps:
-                 raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
-            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0]))
+        # --- end definition of input/output irreps --- #
 
-        # --- Feature Properties ---
-        self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
-        self.n_scalars_out = sum(mul for mul, ir in out_irreps if ir.l == 0)
-        self.has_invariant_output = self.n_scalars_out > 0
-        self.has_equivariant_output = out_irreps.dim > self.n_scalars_out
-        self.split_index = sum(mul for mul, ir in in_irreps if ir in [SCALAR, PSEUDO_SCALAR])
+        # self.use_l1_scalarizer = self.irreps_in[self.field].lmax >=1
+        # if self.field == AtomicDataDict.EDGE_FEATURES_KEY: # self.field == AtomicDataDict.GRAPH_FEATURES_KEY or
+        #     self.use_l1_scalarizer = False
 
-        # --- Conditioning Layers ---
-        self.conditioner = None
-        if self.conditioning_field is not None and self.n_scalars_in > 0:
-            conditioning_dim = self.irreps_in[self.conditioning_field].dim
-            conditioner_modules = {
-                "film1": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-                "fc1": readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.n_scalars_in, **readout_latent_kwargs),
-                "film2": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-            }
-            if self.has_invariant_output:
-                conditioner_modules["film_scalar"] = FiLMFunction(conditioning_dim, [], self.n_scalars_out, mlp_nonlinearity=None)
-            self.conditioner = nn.ModuleDict(conditioner_modules)
+        # --- start layer construction --- #
 
-        # --- Invariant (Scalar) Readout ---
-        self.inv_readout = None
-        if self.has_invariant_output:
-            if self.n_scalars_in == 0:
-                raise ValueError("Cannot produce scalar output with no scalar input features.")
-            self.inv_readout = readout_latent(
+        self.eq_has_internal_weights = eq_has_internal_weights
+        self.has_invariant_output = False # whether self outs scalars
+        self.has_equivariant_output = False # whether self outs l>0
+
+        self.n_scalars_in = in_irreps.ls.count(0)
+        assert self.n_scalars_in > 0
+
+        self.n_scalars_out = out_irreps.ls.count(0)
+        if self.n_scalars_out > 0:
+            self.has_invariant_output = True
+            self.inv_readout = readout_latent( # mlp on scalars ONLY
                 mlp_input_dimension=self.n_scalars_in,
                 mlp_output_dimension=self.n_scalars_out,
                 **readout_latent_kwargs,
             )
 
-        # --- Equivariant (Vectorial) Readout ---
+        # if the out irreps requested has more elements then the request number of scalars to be provided in output
         self.reshape_in: Optional[reshape_irreps] = None
-        self.eq_readout = None
-        self.weights_emb = None
-        self.reshape_back_features = None
-        self.use_internal_weights = self.n_scalars_in == 0
+        if out_irreps.dim > self.n_scalars_out:
+            self.has_equivariant_output = True
+            eq_linear_input_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps  if ir.l>0])
+            eq_linear_output_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l>0])
+            self.reshape_in = reshape_irreps(eq_linear_input_irreps)
+            self.eq_readout = Linear( # equivariant MLP acting on l>0 ONLY
+                    eq_linear_input_irreps,
+                    eq_linear_output_irreps,
+                    shared_weights=self.eq_has_internal_weights,
+                    internal_weights=self.eq_has_internal_weights,
+                    pad_to_alignment=1,
+            )
+            self.reshape_back_features = inverse_reshape_irreps(eq_linear_output_irreps)
+        elif strict_irreps:
+            assert in_irreps.dim == self.n_scalars_in, (
+                    f"Module input contains features with irreps that are not scalars ({in_irreps}). " +
+                    f"However, the irreps of the output is composed of scalars only ({out_irreps}). "   +
+                    "Please remove non-scalar features from the input, which otherwise would remain unused." +
+                    f"If features come from InteractionModule, you can add the parameter 'output_ls: [0]' in the yaml config file." +
+                    "If you want to allow this behavior, set 'strict_irreps=False'."
+                )
 
-        if self.has_equivariant_output:
-            eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
-            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
-            self.reshape_in = reshape_irreps(eq_in_irreps)
-
-            self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=self.use_internal_weights, pad_to_alignment=1)
-            
-            if not self.use_internal_weights:
-                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
-                if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
-
-            self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
-        elif strict_irreps and in_irreps.dim > self.n_scalars_in:
-            raise ValueError(
-                f"Input for field '{self.field}' contains non-scalar irreps ({in_irreps}), "
-                f"but output is all scalars ({out_irreps}). Non-scalar features would be unused. "
-                "To allow this, set 'strict_irreps=False'."
+        if self.has_equivariant_output and not self.eq_has_internal_weights and self.n_scalars_in > 0:
+            self.weights_emb = readout_latent( # mlp on scalars, used to compute the weights of the self.eq_readout
+                mlp_input_dimension=self.n_scalars_in,
+                mlp_output_dimension=self.eq_readout.weight_numel,
+                **readout_latent_kwargs,
             )
 
-        # --- Bias ---
-        self.bias = None
-        if self.has_invariant_output:
-            if bias is not None:
-                if isinstance(bias, float):
-                    bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.float32)
-                elif isinstance(bias, list):
-                    bias_init = torch.tensor(bias, dtype=torch.float32)
-                    assert bias_init.shape[0] == self.n_scalars_out, "Length of bias list must match number of scalar outputs."
-                else: 
-                    raise ValueError("Bias must be a float or a list of floats.")
-                self.bias = nn.Parameter(bias_init)
+        # --- end layer construction --- #
+
+        self.resnet = resnet
+        self._resnet_update_coeff: Optional[torch.nn.Parameter] = None # init to None for jit
+        if self.resnet:
+            assert irreps_in[self.out_field] == out_irreps
+            self._resnet_update_coeff = torch.nn.Parameter(torch.tensor([0.0]))
+        self.out_irreps_dim = self.out_irreps.dim
+
+        self.act_on_nodes = self.field in _NODE_FIELDS
+        self.ignore_amp = ignore_amp
+
+        if dampen:
+            add_tags_to_module(self, 'dampen')
+
+        # to split l0 and l>1
+        self.split_index = [mul for mul,_ in self.irreps_in[self.field]][0]
+
+
+        if self.field in _NODE_FIELDS:
+            idx_key = 'batch'
+        elif self.field in _EDGE_FIELDS: # edge can't attention; node/ensemble can
+            # todo: if self.field == AtomicDataDict.edge then use edge_centers
+            scalar_attnt = False
+        elif self.field in _GRAPH_FIELDS:
+            if dataset_mode == 'ensemble':
+                idx_key = 'ensemble_index'
+            else:
+                idx_key = AtomicDataDict.GRAPH_FEATURES_KEY
+                #! scalar_attnt = False
+        else:
+            raise ValueError(f"Field '{self.field}' is not recognized as a valid node, edge, or graph field. Did you forget registering this field?")
+
+        if self.n_scalars_in == 0:
+            scalar_attnt = False
+
+        if not self.has_invariant_output and self.has_equivariant_output and self.eq_has_internal_weights:
+            scalar_attnt = False
+
+        self.scalar_attnt = scalar_attnt
+        if self.scalar_attnt:
+            assert self.n_scalars_in > 0, 'No scalars recieved for readout but scalar_attnt = True'
+            attention_params = {
+                "irreps_in":irreps_in,
+                "field":field,
+                "out_field":field,
+                "num_heads":num_heads,
+                "idx_key":idx_key,
+                "use_radial_bias":use_radial_bias, # if 'noise' not in self.out_field else False,
+                "sparse_attention":sparse_attention,
+                "attention_prenorm":attention_prenorm,
+                "learn_query":learn_query,
+            }
+            self.ensemble_attnt1 = L0IndexedAttention(
+                update_mlp=True,
+                **attention_params,
+            )
+            self.ensemble_attnt2 = L0IndexedAttention(
+                **attention_params
+            )
+
+        self.normalize_l1=normalize_l1
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         if self.ignore_amp:
@@ -158,119 +266,213 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         return self._forward_impl(data)
 
     def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        features = data[self.field]
-        
-        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+        features, out_features = self._initialize_features(data)
 
-        if self.conditioner is not None and self.conditioning_field is not None:
-            conditioning_tensor = data[self.conditioning_field]
-            scalars = self.conditioner["film1"](scalars, conditioning_tensor)
-            scalars = self.conditioner["fc1"](scalars)
-            scalars = self.conditioner["film2"](scalars, conditioning_tensor)
+        if self.act_on_nodes:
+            active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        else:
+            active_nodes = torch.arange(len(features), device=features.device)
 
-        out_scalars_list = []
+        if self.scalar_attnt:
+            features = self._apply_scalar_attnt(features, data)
+
         if self.has_invariant_output:
-            current_out_scalars = self.inv_readout(scalars)
-            if self.conditioner is not None and "film_scalar" in self.conditioner:
-                current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, data[self.conditioning_field])
-            out_scalars_list.append(current_out_scalars)
-
-        out_equiv_list = []
-        if self.has_equivariant_output:
-            eq_features_in = self.reshape_in(equiv)
-            
-            if self.use_internal_weights:
-                eq_features_out = self.eq_readout(eq_features_in)
-            else:
-                weights = self.weights_emb(scalars)
-                if self.conditioner is not None and "film_vectorial" in self.conditioner:
-                    weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
-                eq_features_out = self.eq_readout(eq_features_in, weights)
-            
-            out_equiv_list.append(self.reshape_back_features(eq_features_out))
-
-        output_components = out_scalars_list + out_equiv_list
-        if not output_components:
-            raise ValueError("ReadoutModule produced no output features.")
-        out_features = torch.cat(output_components, dim=-1)
-        
-        if self.bias is not None:
-            out_scalars = out_features[..., :self.n_scalars_out]
-            out_equiv = out_features[..., self.n_scalars_out:]
-            biased_scalars = out_scalars + self.bias
-            if out_equiv.shape[-1] > 0:
-                out_features = torch.cat([biased_scalars, out_equiv], dim=-1)
-            else:
-                out_features = biased_scalars
-
-        if self.resnet:
-            old_features = data[self.out_field]
-            coeff = self._resnet_update_coeff.sigmoid()
-            coefficient_old = torch.rsqrt(coeff.square() + 1)
-            coefficient_new = coeff * coefficient_old
-            out_features = coefficient_old * old_features + coefficient_new * out_features
+            out_features = self._handle_invariant_output(features, data, active_nodes, out_features)
+        if self.has_equivariant_output and self.reshape_in is not None:
+            out_features = self._handle_vectorial_output(features, data, active_nodes, out_features)
+        if self.resnet: # eq. 2 from https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-023-36329-y/MediaObjects/41467_2023_36329_MOESM1_ESM.pdf
+            out_features = self._apply_residual_update(out_features, data)
 
         data[self.out_field] = out_features
         return data
 
+    def _initialize_features(self, data):
+        # get features from input and create empty tensor to store output
+        features = data[self.field]
+        out_features = torch.zeros(
+            (features.shape[0], self.out_irreps_dim),
+            dtype=torch.float32,
+            device=features.device
+        )
+        return features, out_features
+
+    def _apply_scalar_attnt(self, features, data):
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+        scalars = self.ensemble_attnt1(scalars, data)
+        scalars = self.ensemble_attnt2(scalars, data)
+        features = torch.cat((scalars, equiv), dim=-1)
+        return features
+
+    def _handle_invariant_output(self, features, data, active_nodes, out_features):
+        # invariant output may be present or not
+        # scalarize norms and cos_similarity between l1s
+        # if self.use_l1_scalarizer:
+        #     data = self.l1_scalarizer(data)
+        out_features[active_nodes, :self.n_scalars_out] += self.inv_readout(features[active_nodes, :self.n_scalars_in]) # normal mlp on scalar component (if any)
+        return out_features
+
+    def _handle_vectorial_output(self, features, data, active_nodes, out_features):
+        eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
+        if self.eq_has_internal_weights: # eq linear layer with its own inner weights
+            eq_features = self.eq_readout(eq_features)
+        else:
+            # else the weights are computed via mlp using scalars
+            weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
+
+            if self.normalize_l1:
+                eq_features = eq_features/torch.norm(eq_features, dim=-1, keepdim=True)
+
+            eq_features = self.eq_readout(eq_features, weights)
+        out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
+        return out_features
+
+    def _apply_residual_update(self, out_features, data):
+        assert self._resnet_update_coeff is not None
+        old_features = data[self.out_field]
+        _coeff = self._resnet_update_coeff.sigmoid()
+        coefficient_old = torch.rsqrt(_coeff.square() + 1)
+        coefficient_new = _coeff * coefficient_old
+        # Residual update
+        return coefficient_old * old_features + coefficient_new * out_features
+
 
 @compile_mode("script")
-class AttentionReadoutModule(ReadoutModule):
-    """
-    Extends ReadoutModule to include a non-local attention mechanism.
-
-    Attention is applied to the scalar part of the input features *before*
-    the standard readout process. This breaks strict locality, allowing
-    information to be aggregated across nodes or graphs.
-    """
+class ReadoutModuleWithConditioning(ReadoutModule):
+    '''
+    '''
     def __init__(
         self,
-        num_heads: int = 8,
+        field: str,
+        conditioning_field: str,
+        out_field: Optional[str] = None,
+        out_irreps: Union[o3.Irreps, str] = None, # if none: # outs tensor of same o3.irreps of out_field
+        strict_irreps: bool = True,
+        readout_latent=ScalarMLPFunction,
+        readout_latent_kwargs={},
+        eq_has_internal_weights: bool = False,
+        resnet: bool = False,
+        dampen: bool = False,
+        input_ls:  Optional[List[int]]              = None,
+        input_mul: Optional[Union[str, int]]        = None,
+        output_ls:  Optional[List[int]]             = None,
+        output_mul: Optional[Union[str, int]]       = None,
+        irreps_in=None, # if output is only scalar, this is required
+        ignore_amp: bool = False, # wheter to adopt amp or not
         dataset_mode: str = 'single', # single|ensemble
-        **kwargs
-    ):
-        super().__init__(**kwargs)
+        normalize_l1:bool=False, # this must be false
+        conditioning_vec_size:int=None, # if conditioning_field not yet registered in self.irreps_in[self.conditioning_field but present in data
 
-        if self.n_scalars_in == 0:
-            raise ValueError("AttentionReadoutModule requires scalar input features.")
-        
-        self.scalar_attnt_enabled = True
-        idx_key = ""
-        
-        if self.field in _NODE_FIELDS:
-            idx_key = 'batch'
-        elif self.field in _GRAPH_FIELDS and dataset_mode == 'ensemble':
-            idx_key = 'ensemble_index'
+        # attention params:
+        scalar_attnt: bool = True,
+        num_heads: int = 32,
+        use_radial_bias:bool=True,
+        sparse_attention:bool=False,
+        attention_prenorm:bool=False,
+        learn_query:bool=False,
+
+    ):
+        super().__init__(
+            field=field,
+            out_field=out_field,
+            out_irreps=out_irreps,
+            strict_irreps=strict_irreps,
+            readout_latent=readout_latent,
+            readout_latent_kwargs=readout_latent_kwargs,
+            eq_has_internal_weights=eq_has_internal_weights,
+            resnet=resnet,
+            dampen=dampen,
+            input_ls=input_ls,
+            input_mul=input_mul,
+            output_ls=output_ls,
+            output_mul=output_mul,
+            irreps_in=irreps_in,
+            ignore_amp=ignore_amp,
+            dataset_mode=dataset_mode,
+            normalize_l1=normalize_l1,
+
+            # attention params:
+            scalar_attnt=scalar_attnt,
+            num_heads=num_heads,
+            use_radial_bias=use_radial_bias,
+            sparse_attention=sparse_attention,
+            attention_prenorm=attention_prenorm,
+            learn_query=learn_query,
+        )
+
+        self.conditioning_field = conditioning_field
+        if self.conditioning_field in self.irreps_in:
+            self.conditioning_dim = self.irreps_in[self.conditioning_field].dim
+        elif conditioning_vec_size is not None:
+            self.conditioning_dim = conditioning_vec_size
         else:
             self.scalar_attnt_enabled = False
-            
+
         if self.scalar_attnt_enabled:
             self.ensemble_attnt1 = L0IndexedAttention(
-                irreps_in=self.irreps_in, field=self.field, out_field=self.field, 
+                irreps_in=self.irreps_in, field=self.field, out_field=self.field,
                 num_heads=num_heads, idx_key=idx_key, update_mlp=True
             )
             self.ensemble_attnt2 = L0IndexedAttention(
-                irreps_in=self.irreps_in, field=self.field, out_field=self.field, 
+                irreps_in=self.irreps_in, field=self.field, out_field=self.field,
                 num_heads=num_heads, idx_key=idx_key
             )
+
+    def _initialize_features(self, data: AtomicDataDict.Type):
+        # get features from input and create empty tensor to store output
+        features, out_features = super()._initialize_features(data)
+        conditioning = data[self.conditioning_field]
+        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+
+        if self.act_on_nodes:
+            active_nodes = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
         else:
-            self.ensemble_attnt1 = None
-            self.ensemble_attnt2 = None
+            active_nodes = torch.arange(len(features), device=features.device)
 
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        """
-        Applies attention to scalar features, then passes to the base ReadoutModule.
-        """
-        if self.scalar_attnt_enabled and self.ensemble_attnt1 is not None:
-            # This is a pre-processing step for the main readout forward pass.
-            # We modify the feature tensor in `data` before calling super().forward().
-            features = data[self.field]
-            scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
-            
-            # The original L0IndexedAttention implementation seems to operate on a tensor of scalars.
-            scalars = self.ensemble_attnt1(scalars, data)
-            scalars = self.ensemble_attnt2(scalars, data)
-            
-            data[self.field] = torch.cat((scalars, equiv), dim=-1)
+        # now it ammits graph features as conditioning that are broadcasted to all nodes
+        if scalars.shape[0] != conditioning.shape[0]:
+            conditioning = conditioning[data['batch']]
+            conditioning = conditioning[active_nodes]
 
-        return super().forward(data)
+        scalars = self.film1(scalars, conditioning)
+        scalars = self.fc1(scalars)
+        scalars = self.film2(scalars, conditioning)
+        return torch.cat((scalars, equiv), dim=-1), out_features
+
+    def _handle_invariant_output(self, features, data, active_nodes, out_features):
+        super()._handle_invariant_output(features, data, active_nodes, out_features)
+
+        scalars = out_features[active_nodes, :self.n_scalars_out]
+        conditioning = data[self.conditioning_field]
+
+        # now it ammits graph features as conditioning that are broadcasted to all nodes
+        if scalars.shape[0] != conditioning.shape[0]:
+            conditioning = conditioning[data['batch']]
+            conditioning = conditioning[active_nodes]
+
+        out_features[active_nodes, :self.n_scalars_out] = self.film_scalar(
+            scalars,
+            conditioning,
+        )
+        return out_features
+
+    def _handle_vectorial_output(self, features, data, active_nodes, out_features):
+        eq_features = self.reshape_in(features[active_nodes, self.n_scalars_in:])
+        if self.eq_has_internal_weights: # eq linear layer with its own inner weights
+            eq_features = self.eq_readout(eq_features)
+        else:
+            # else the weights are computed via mlp using scalars
+            if self.normalize_l1:
+                eq_features = eq_features/torch.norm(eq_features, dim=-1, keepdim=True)
+
+            weights = self.weights_emb(features[active_nodes, :self.n_scalars_in])
+
+            conditioning = data[self.conditioning_field]
+            if weights.shape[0] != conditioning.shape[0]:
+                conditioning = conditioning[data['batch']]
+                conditioning = conditioning[active_nodes]
+
+            weights = self.film_vectorial(weights, conditioning)
+            eq_features = self.eq_readout(eq_features, weights)
+
+        out_features[active_nodes, self.n_scalars_out:] += self.reshape_back_features(eq_features) # set features for l>=1
+        return out_features

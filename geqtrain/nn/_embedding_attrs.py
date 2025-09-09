@@ -36,7 +36,7 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
     output = x.clone()
     random_mask = torch.rand(x.shape, device=x.device)
     mask = (random_mask > 0.8)  # 20% masking
-    
+
     # step 2: determine whether to use mask token or random token
     random_choice = torch.rand(x.shape, device=x.device)
     use_random_token = random_choice > 0.5  # 50% chance of random token
@@ -70,7 +70,7 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
 
 @compile_mode("script")
 class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
-    
+
     fields_to_mask: List[str]
 
     def __init__(
@@ -93,7 +93,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         self.use_masking = use_masking
         self.fields_to_mask = fields_to_mask
         self.n_types = 0
-        
+
         output_embedding_dim = 0
         for field, values in attributes.items():
             embedding_mode = values.get('embedding_mode', 'embedding')
@@ -115,11 +115,11 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                     # Use Embedding
                     assert embedding_mode == 'embedding'
                     emb_module = torch.nn.Embedding(self.n_types, embedding_dim)
-                    torch.nn.init.xavier_uniform_(emb_module.weight)
+                    torch.nn.init.normal_(emb_module.weight, mean=0.0, std=1.0) # Large Initial Magnitudes -> Large Initial Outputs -> Large Initial Gradients
                     output_embedding_dim_incr = embedding_dim
                 output_embedding_dim += output_embedding_dim_incr
                 self._categorical_attrs_modules[field] = emb_module
-        
+
         eq_output_embedding_dim = 0
         eq_irreps = None
         if eq_attributes is None: eq_attributes = {}
@@ -159,16 +159,16 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 x = apply_masking(x, mask_token_index=self.n_types - 1) # last index is reserved for masking, make sure to match this in yaml
             x_emb = emb_layer(x)
             out.append(x_emb)
-        
+
         if self._has_numericals:
             assert hasattr(self, '_numerical_attrs') # Needed to jit compile
             for attribute_name in self._numerical_attrs:
                 x = data[attribute_name]
                 out.append(x)
-        
+
         dtype = data[AtomicDataDict.POSITIONS_KEY].dtype
         data[self.out_field] = torch.cat(out, dim=-1).to(dtype)
-        
+
         if self._has_equivariants:
             eq_out = []
             assert hasattr(self, '_eq_numerical_attrs') # Needed to jit compile
@@ -176,7 +176,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 x = data[eq_attribute_name]
                 eq_out.append(x)
             data[self.eq_out_field] = torch.cat(eq_out, dim=-1).to()
-        
+
         return data
 
 
@@ -226,10 +226,10 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             required_irreps_in=[AtomicDataDict.EDGE_RADIAL_EMB_KEY, AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
         )
         assert self.node_field in self.irreps_in
-        
+
         ### architectural choices
         irreps_out = self.irreps_in.copy()
-        
+
         # node scalar
         self.node_emb = node_emb(
             node_field    = self.node_field,
@@ -244,7 +244,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         else:
             node_irreps_out = self.node_emb.out_irreps
         irreps_out[self.node_out_field] = node_irreps_out
-        
+
         # node equivariant
         self.node_eq_emb = node_eq_emb(
             node_field    = self.node_out_field,
@@ -259,7 +259,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
                 irreps_out[self.node_eq_out_field] = self.irreps_in[self.node_eq_field]
         else:
             irreps_out[self.node_eq_out_field] = self.node_eq_emb.out_irreps
-        
+
         # edge scalar
         self.edge_emb = edge_emb(
             node_field    = self.node_out_field,
@@ -274,7 +274,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         else:
             edge_irreps_out = self.edge_emb.out_irreps
         irreps_out[self.edge_out_field] = edge_irreps_out
-        
+
         # edge equivariant
         self.edge_eq_emb = edge_eq_emb(
             node_field    = self.node_out_field,
@@ -299,7 +299,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         else:
             node_attr: torch.Tensor = self.node_emb(data)
         data[self.node_out_field] = node_attr
-        
+
         # node equivariant (optional)
         node_eq_attr: Optional[torch.Tensor] = None
         if self.node_eq_emb is None:
@@ -309,19 +309,19 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             node_eq_attr = self.node_emb(data)
         if node_eq_attr is not None:
             data[self.node_eq_out_field] = node_eq_attr
-        
+
         # edge scalar
         if self.edge_emb is None:
             edge_attr = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY] # default embedding
         else:
             edge_attr = self.edge_emb(data)
         data[self.edge_out_field] = edge_attr
-        
+
         # edge equivariant
         if self.edge_emb is None:
             edge_eq_attr = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY] # default embedding
         else:
             edge_eq_attr = self.edge_eq_emb(data)
         data[self.edge_eq_out_field] = edge_eq_attr
-        
+
         return data

@@ -59,9 +59,9 @@ def init_n_update_wandb(config):
     upload_zipped_code_on_wandb(source, 'geqtrain_source_code')
 
     # upload ad-hoc code
-    if 'code_folder_name' in config:
-        source = Path().resolve() / config['code_folder_name']
-        upload_zipped_code_on_wandb(source, f'{config["code_folder_name"]}_source_code')
+    # if 'code_folder_name' in config:
+    #     source = Path().resolve() / config['code_folder_name']
+    #     upload_zipped_code_on_wandb(source, f'{config["code_folder_name"]}_source_code')
 
     # download from wandb set up
     updated_parameters = dict(wandb.config)

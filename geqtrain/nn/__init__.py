@@ -9,11 +9,10 @@ from ._graph import EmbeddingGraphAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
-from .readout import ReadoutModule, AttentionReadoutModule
+from .readout import ReadoutModule, ReadoutModuleWithConditioning
 from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
-from ._heads import WeightedTP, TransformerBlock
 from .AdaLN import AdaLN
 from ._norm import Norm
 from ._combine import CombineModule
@@ -37,7 +36,7 @@ __all__ = [
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
-    AttentionReadoutModule,
+    ReadoutModuleWithConditioning,
     PerNodeAttrsScaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
@@ -46,8 +45,7 @@ __all__ = [
     ScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
-    WeightedTP,
-    TransformerBlock,
+    select_nonlinearity,
     AdaLN,
     Norm,
     CombineModule,
