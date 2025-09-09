@@ -3,6 +3,7 @@
 
 import torch
 from typing import List
+from geqtrain.data import AtomicDataDict
 from geqtrain.utils.torch_geometric import Batch, Data
 
 
@@ -27,7 +28,7 @@ class Collater(object):
         for graph in batch:
             batch_ensemble_index.append(graph.ensemble_index)
 
-        batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union(["ensemble_index"]))
+        batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union([AtomicDataDict.ENSEMBLE_INDEX_KEY]))
         _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
 
         return batch_graphs

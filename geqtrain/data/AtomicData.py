@@ -49,6 +49,7 @@ _DEFAULT_EDGE_FIELDS: Set[str] = {
 _DEFAULT_GRAPH_FIELDS: Set[str] = {
     AtomicDataDict.GRAPH_ATTRS_KEY,
     AtomicDataDict.GRAPH_FEATURES_KEY,
+    AtomicDataDict.ENSEMBLE_INDEX_KEY,
     AtomicDataDict.CELL_KEY,
 }
 _DEFAULT_EXTRA_FIELDS: Set[str] = {}

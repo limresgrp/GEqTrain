@@ -19,7 +19,7 @@ class EnsembleAggregator(GraphModuleMixin, Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
-        ensemble_indices = data["ensemble_index"]
+        ensemble_indices = data[AtomicDataDict.ENSEMBLE_INDEX_KEY]
 
         # Use torch_scatter for aggregation
         if self.aggregation_method == "mean":
@@ -47,7 +47,7 @@ class WeightedEnsembleAggregator(GraphModuleMixin, Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
-        ensemble_indices = data["ensemble_index"]
+        ensemble_indices = data[AtomicDataDict.ENSEMBLE_INDEX_KEY]
 
         # Compute weights using ScalarMLPFunction
         weights = self.weight_mlp(features).squeeze(-1)

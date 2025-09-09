@@ -580,10 +580,20 @@ class AtomicInMemoryDataset(AtomicDataset):
 
     def get(self, idx):
         out = self.data.get_example(idx)
-        out.ensemble_index = self.ensemble_index
+        
         # Add back fixed fields
         for f, v in self.fixed_fields.items():
             out[f] = v
+
+        # If 'ensemble_index' is loaded from the npz, it will be a tensor for the specific frame.
+        # We use it and convert to a scalar integer.
+        # Otherwise, if it's not present, we fall back to the dataset's default integer index.
+        if AtomicDataDict.ENSEMBLE_INDEX_KEY in out:
+            # It's a 1-element tensor (e.g., tensor([3])), get the scalar value
+            out.ensemble_index = int(out.ensemble_index.item())
+        else:
+            out.ensemble_index = self.ensemble_index
+            
         return out
 
 
