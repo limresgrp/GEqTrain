@@ -33,7 +33,6 @@ _DEFAULT_NODE_FIELDS: Set[str] = {
     AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.NODE_FEATURES_KEY,
     AtomicDataDict.NODE_ATTRS_KEY,
-    AtomicDataDict.NODE_TYPE_KEY,
     AtomicDataDict.BATCH_KEY,
     AtomicDataDict.NOISE_KEY,
 }
@@ -98,10 +97,10 @@ def register_fields(
     processes, they will inherit the complete field configuration from the
     main process, solving state synchronization issues.
     """
-    node_fields_set:  set = set(node_fields)
-    edge_fields_set:  set = set(edge_fields)
-    graph_fields_set: set = set(graph_fields)
-    extra_fields_set: set = set(extra_fields)
+    node_fields_set  = FieldSet(node_fields)
+    edge_fields_set  = FieldSet(edge_fields)
+    graph_fields_set = FieldSet(graph_fields)
+    extra_fields_set = FieldSet(extra_fields)
     allfields = node_fields_set.union(edge_fields_set, graph_fields_set, extra_fields_set)
     assert len(allfields) == len(node_fields_set) + len(edge_fields_set) + len(graph_fields_set) + len(extra_fields_set)
 
@@ -360,9 +359,9 @@ class AtomicData(Data):
             root_key = mask_key[:-8] # Remove '__mask__' suffix to get the root key
             mask = torch.as_tensor(kwargs[mask_key], dtype=torch.bool)
             if root_key in kwargs:
-                kwargs[root_key] = kwargs[root_key][mask]
+                kwargs[root_key] = kwargs[root_key][~mask]
             elif root_key == 'pos':
-                pos = pos[mask]
+                pos = pos[~mask]
             else:
                 raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
             del kwargs[mask_key] # Remove the '__mask__' key from kwargs

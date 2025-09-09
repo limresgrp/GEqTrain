@@ -211,7 +211,6 @@ class Trainer:
         self.training_loop = TrainingLoop(self)
         self._dispatch_callbacks('on_trainer_begin')
         self.wall = perf_counter()
-        exit()
 
         while not self.should_stop:
             # 1. Create the stateful summary object for the new epoch
