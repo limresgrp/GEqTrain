@@ -6,12 +6,16 @@ import torch
 import torch.distributed as dist
 from e3nn.o3 import Irreps
 from time import perf_counter
+import math
+
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
 from geqtrain.utils.wandb import init_n_update_wandb, resume_wandb_run
+from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
+
 
 class Callback:
     """Base class for callbacks."""
@@ -24,6 +28,7 @@ class Callback:
     def on_epoch_end(self, **kwargs): pass
     def on_batch_begin(self, **kwargs): pass
     def on_after_backward(self, **kwargs): pass
+    def on_before_step(self, **kwargs): pass
     def on_step_end(self, **kwargs): pass
     def on_batch_end(self, **kwargs): pass
     def on_train_begin(self, **kwargs): pass
@@ -189,6 +194,60 @@ class WandbCallback(Callback):
             for key, norm_list in summary.node_feature_norms.items():
                 for norm in norm_list:
                     wandb.log({f"train_{key}_step": norm.item()})
+
+class SanitizeGradCallback(Callback):
+    """
+    Turns NaN gradients into zeros before the optimizer step.
+    This should be placed before any callback that uses gradients, like clipping.
+    """
+    def on_before_step(self, **kwargs):
+        if not self.trainer.config.get('sanitize_gradients', False):
+            return
+        
+        for p in self.trainer.model.parameters():
+            if p.grad is not None:
+                torch.nan_to_num(p.grad, nan=0.0, out=p.grad)
+
+class GradientClippingCallback(Callback):
+    """
+    Handles gradient clipping before the optimizer step.
+    Supports both 'fixed' value clipping and 'dynamic' clipping based on history.
+    """
+    def on_trainer_begin(self, **kwargs):
+        """Initialize the queue for dynamic clipping if needed."""
+        self.mode = self.trainer.config.get('gradient_clipping_mode', 'dynamic')
+        self.max_gradient_norm = self.trainer.config.get('max_gradient_norm', math.inf)
+        
+        if self.mode == 'dynamic' and self.max_gradient_norm != math.inf:
+            self.gradnorms_queue = Queue()
+        else:
+            self.gradnorms_queue = None
+
+    def on_before_step(self, summary: EpochSummary, **kwargs):
+        if self.max_gradient_norm == math.inf:
+            return
+
+        model_params = self.trainer.model.parameters()
+
+        if self.mode == 'dynamic':
+            grad_norm, max_grad_norm_val = gradient_clipping(
+                self.trainer.model,
+                self.gradnorms_queue,
+                self.max_gradient_norm,
+                self.trainer.dist.is_master,
+            )
+        elif self.mode == 'fixed':
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model_params, 
+                max_norm=self.max_gradient_norm, 
+                norm_type=2.0
+            )
+            max_grad_norm_val = self.max_gradient_norm
+        else:
+            raise ValueError(f"Unknown gradient_clipping_mode: {self.mode}")
+
+        if self.trainer.dist.is_master:
+            summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
 
 class CheckpointCallback(Callback):
     def on_epoch_end(self, summary: EpochSummary):

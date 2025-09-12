@@ -15,7 +15,9 @@ from geqtrain.model import model_from_config
 
 # Import the new components
 from .components.distributed import DistributedManager
-from .components.callbacks import ActivationNormCallback, GrokFastCallback, Logger, CheckpointCallback, EarlyStoppingCallback
+from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger, 
+                                   CheckpointCallback, EarlyStoppingCallback, 
+                                   SanitizeGradCallback, GradientClippingCallback)
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -184,20 +186,32 @@ class Trainer:
         self.early_stopping_conds = setup_early_stopping(self.config)
 
     def _setup_callbacks(self):
+        # Core callbacks
         callbacks = [Logger(), CheckpointCallback(), EarlyStoppingCallback()]
+
+        # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):
             from .components.callbacks import WandbCallback
-            callbacks.insert(1, WandbCallback()) # Insert Wandb before checkpointing
+            callbacks.insert(1, WandbCallback()) # Insert Wandb after Logger, before Checkpointing
+
+        # Gradient processing callbacks (ORDER MATTERS for shared hooks)
+        if self.config.get('sanitize_gradients', False):
+            callbacks.append(SanitizeGradCallback())
         
         if self.config.get('use_grokfast', False):
             callbacks.append(GrokFastCallback())
-        
-        if self.config.get('track_activation_norms', True): # Enabled by default
+
+        callbacks.append(GradientClippingCallback())
+
+        # Other optional callbacks
+        if self.config.get('track_activation_norms', True):
             callbacks.append(ActivationNormCallback())
         
+        # User-defined external callbacks from config
         for cb_string in self.config.get('callbacks', []):
             callbacks.append(load_callable(cb_string)())
         
+        # Register trainer with all callbacks
         for cb in callbacks:
             cb.set_trainer(self)
         self.callbacks = callbacks

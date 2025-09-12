@@ -7,7 +7,6 @@ import contextlib
 from geqtrain.train.components.epoch_summary import EpochSummary
 
 from .inference import run_inference
-from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.train._key import TRAIN, VALIDATION
 
@@ -24,7 +23,6 @@ class TrainingLoop:
         self.dist = trainer.dist
         self.lr_sched = trainer.lr_sched
         self.warmup_sched = trainer.warmup_sched
-        self.gradnorms_queue = Queue()
 
     def run_epoch(self, summary: EpochSummary, validation_only=False):
         """
@@ -125,14 +123,8 @@ class TrainingLoop:
             self.trainer._dispatch_callbacks('on_after_backward')
 
             if self.trainer.accumulation_counter == accumulation_steps:
-                grad_norm, max_grad_norm_val = gradient_clipping(
-                    self.model,
-                    self.gradnorms_queue,
-                    self.trainer.config.get('max_gradient_norm', math.inf),
-                    self.dist.is_master,
-                )
-                if self.dist.is_master:
-                    summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
+                # Dispatch hook for gradient processing (clipping, sanitizing, etc.)
+                self.trainer._dispatch_callbacks('on_before_step', summary=summary)
 
                 self.optim.step()
                 if self.ema: self.ema.update()
