@@ -179,8 +179,8 @@ class TransformerBlock(GraphModuleMixin, nn.Module):
     def forward(self, data):
         features = data[self.field]
         feats, _ = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-        feats = self.l1(feats, data['ensemble_index'])
-        feats = self.l2(feats, data['ensemble_index'])
+        feats = self.l1(feats, data[AtomicDataDict.ENSEMBLE_INDEX_KEY])
+        feats = self.l2(feats, data[AtomicDataDict.ENSEMBLE_INDEX_KEY])
         data[self.out_field] = self.final_block(feats)
         return data
 

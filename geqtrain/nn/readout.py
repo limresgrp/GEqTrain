@@ -238,9 +238,9 @@ class AttentionReadoutModule(ReadoutModule):
         idx_key = ""
         
         if self.field in _NODE_FIELDS:
-            idx_key = 'batch'
+            idx_key = AtomicDataDict.BATCH_KEY
         elif self.field in _GRAPH_FIELDS and dataset_mode == 'ensemble':
-            idx_key = 'ensemble_index'
+            idx_key = AtomicDataDict.ENSEMBLE_INDEX_KEY
         else:
             self.scalar_attnt_enabled = False
             
