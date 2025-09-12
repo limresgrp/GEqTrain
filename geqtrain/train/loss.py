@@ -85,7 +85,7 @@ class Loss:
                 from . import _loss
                 # Try loading from our custom _loss.py module first
                 loss_class = getattr(_loss, func)
-            except NameError:
+            except Exception:
                 # If not found locally, assume it's a full path to a user's class
                 loss_class = _instantiate_from_path(func)
             

@@ -22,8 +22,8 @@ def run_inference(
     model,
     data,
     device,
-    loss_fn: Loss,
     config: dict,
+    loss_fn: Optional[Loss] = None,
     already_computed_nodes=None,
     is_train: bool=False,
 ):

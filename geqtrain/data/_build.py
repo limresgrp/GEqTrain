@@ -93,6 +93,7 @@ def dataset_from_config(
     and prefix-based definitions, lazy loading, and data filtering.
     """
     list_key = f"{prefix}_dataset_list"
+    if isinstance(config, dict): config = Config(config)
     
     if list_key in config:
         logging.info(f"Building dataset from list '{list_key}'")

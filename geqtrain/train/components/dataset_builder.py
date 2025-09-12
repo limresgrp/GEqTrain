@@ -213,11 +213,40 @@ class DatasetBuilder:
         val_dset_provided = val_dset is not None
 
         def get_n_train_list():
+            # This logic remains the same: if user provides explicit counts, use them.
             if n_train: return n_train
             if val_dset_provided: return train_dset.n_observations.tolist()
             if n_val: return [n - v for n, v in zip(train_dset.n_observations, n_val)]
-            self.logger.warning("No 'n_train' or 'n_val' provided; using default 80/20 split.")
-            return (train_dset.n_observations * 0.8).astype(int).tolist()
+            
+            self.logger.warning("No 'n_train' or 'n_val' provided; using default 80/20 split on the total dataset size.")
+            
+            n_observations_list = train_dset.n_observations.tolist()
+            num_datasets = len(n_observations_list)
+            total_observations = sum(n_observations_list)
+
+            if total_observations == 0:
+                return [0] * num_datasets # Handle empty dataset case
+
+            # 1. Calculate the total number of training samples required (80% of the grand total)
+            target_n_train = int(total_observations * 0.8)
+
+            # 2. Distribute this total count across the sub-datasets
+            # We "deal" one training sample to each dataset in a round-robin fashion
+            # until we've allocated the total number of required training samples.
+            n_train_list = [0] * num_datasets
+            allocated_count = 0
+            current_dset_idx = 0
+            
+            while allocated_count < target_n_train:
+                # If the current sub-dataset still has unallocated samples, assign one to train
+                if n_train_list[current_dset_idx] < n_observations_list[current_dset_idx]:
+                    n_train_list[current_dset_idx] += 1
+                    allocated_count += 1
+                
+                # Move to the next dataset for the next allocation
+                current_dset_idx = (current_dset_idx + 1) % num_datasets
+            
+            return n_train_list
 
         def get_n_valid_list(n_train_list):
             if n_val: return n_val

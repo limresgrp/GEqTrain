@@ -21,7 +21,7 @@ import numpy as np  # noqa: F401
 
 from e3nn.util.jit import script
 
-from geqtrain.train import Trainer
+from geqtrain.train.components.checkpointing import CheckpointHandler
 from geqtrain.utils import Config
 from geqtrain.utils._global_options import _set_global_options
 
@@ -142,7 +142,7 @@ def load_deployed_model(
         model = torch.jit.load(model_path, map_location=device, _extra_files=metadata)
     except RuntimeError as e:
         raise ValueError(
-            f"{model_path} does not seem to be a deployed model file. Did you forget to deploy it using `nequip-deploy`? \n\n(Underlying error: {e})"
+            f"{model_path} does not seem to be a deployed model file. Did you forget to deploy it using `deploy`? \n\n(Underlying error: {e})"
         )
     # Confirm its TorchScript
     assert isinstance(model, torch.jit.ScriptModule)
@@ -245,9 +245,11 @@ def main(args=None):
     _set_global_options(config)
 
     # -- load model --
-    model, model_config = Trainer.load_model_from_training_session(
-        model_path.parent, model_name=model_path.name, device="cpu", for_inference=True
-    )
+    model, model_config = CheckpointHandler.load_model_from_training_session(
+            traindir=model_path.parent, 
+            model_name=model_path.name, 
+            device="cpu",
+        )
 
     _sanity_checks(model_config)
 
