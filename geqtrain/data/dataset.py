@@ -697,9 +697,11 @@ class NpzDataset(AtomicInMemoryDataset):
         # only the keys explicitly mentioned in the yaml file will be parsed (registered via register fields section)
         keys = set(list(self.key_mapping.keys()))
         # Check that all mapped keys exist in the data
-        missing_keys = [k for k in self.key_mapping.keys() if k not in data]
-        if missing_keys:
-            raise KeyError(f"The following mapped keys are missing in the npz data: {missing_keys}")
+        ################ AT INFERENCE TIME SOME KEYS MAY BE MISSING
+        # missing_keys = [k for k in self.key_mapping.keys() if k not in data]
+        # if missing_keys:
+        #     raise KeyError(f"The following mapped keys are missing in the npz data: {missing_keys}")
+        ################
         keys.update(list(self.extra_fixed_fields.keys()))
         keys = keys.intersection(set(list(data.keys())))
 
