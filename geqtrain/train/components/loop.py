@@ -121,6 +121,11 @@ class TrainingLoop:
             accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
             loss = loss / accumulation_steps
             loss.backward()
+
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and param.grad is None:
+                    raise RuntimeError(f"Gradient for parameter '{name}' is None after backward pass.")
+
             self.trainer.accumulation_counter += 1
             self.trainer._dispatch_callbacks('on_after_backward')
 

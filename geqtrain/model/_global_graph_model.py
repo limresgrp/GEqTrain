@@ -18,8 +18,7 @@ def GlobalGraphModel(config:Config, model: Optional[SequentialGraphNetwork]) -> 
 
     """
     layers = buildEmbeddingLayers(config, model)
-    layers.update(buildGlobalGraphModelLayers())
-    # layers.update(appendNGNNLayers(config))
+    layers.update(appendNGNNLayers(config))
 
     return SequentialGraphNetwork.from_parameters(
         shared_params=config,
@@ -83,16 +82,16 @@ def appendNGNNLayers(config):
     modules = {}
     logging.info(f"--- Number of GNN layers {N}")
 
-    # # attention on embeddings
-    modules.update({
-        "update_emb": (ReadoutModule, dict(
-            field=AtomicDataDict.NODE_ATTRS_KEY,
-            out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
-            out_irreps=None, # outs tensor of same o3.irreps of out_field
-            resnet=True,
-            num_heads=8, # this number must be a 0 reminder of the sum of catted nn.embedded features (node and edges)
-        ))
-    })
+    # # # attention on embeddings
+    # modules.update({
+    #     "update_emb": (ReadoutModule, dict(
+    #         field=AtomicDataDict.NODE_ATTRS_KEY,
+    #         out_field=AtomicDataDict.NODE_ATTRS_KEY, # scalars only
+    #         out_irreps=None, # outs tensor of same o3.irreps of out_field
+    #         resnet=True,
+    #         num_heads=8, # this number must be a 0 reminder of the sum of catted nn.embedded features (node and edges)
+    #     ))
+    # })
 
     for layer_idx in range(N-1):
         layer_name:str = 'local_interaction' if layer_idx == 0 else f"interaction_{layer_idx}"
@@ -100,8 +99,9 @@ def appendNGNNLayers(config):
             layer_name : (InteractionModule, dict(
                 name = layer_name,
                 node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-                edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
-                edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+                node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+                edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+                edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
                 out_field=AtomicDataDict.EDGE_FEATURES_KEY,
                 out_irreps=None,
                 output_ls=[0],
@@ -123,8 +123,9 @@ def appendNGNNLayers(config):
         "last_interaction_layer": (InteractionModule, dict(
             name = "last_interaction_layer",
             node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
-            edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
-            edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+            node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+            edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+            edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
             output_mul="hidden",
         )),
