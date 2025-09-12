@@ -148,7 +148,7 @@ class SimpleLossWithNaNsFilter(SimpleLoss):
             assert 'ensemble_index' in ref
             pred_key, ref_key = ensemble_predictions_and_targets(pred_key.squeeze(), ref_key.squeeze(), pred['ensemble_index'])
             n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
-            ref_key /= n_ens
+            ref_key = ref_key/n_ens
             not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
             not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
             not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
@@ -336,7 +336,7 @@ class BinaryAUROCMetric:
             assert 'ensemble_index' in ref
             logits, target = ensemble_predictions_and_targets(logits, target, pred['ensemble_index'])
             n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
-            target /= n_ens
+            target = target/n_ens
             not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
             not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
             not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
