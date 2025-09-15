@@ -535,7 +535,7 @@ def neighbor_list(
                 edge_cell_shift,
                 cell_tensor,
             )
-        assert torch.norm(z, dim=-1).max() < r_max
+        assert torch.norm(z, dim=-1).max() <= r_max
     else:
         dist_matrix = torch.norm(pos[:, None, ...] - pos[None, ...], dim=-1).fill_diagonal_(torch.inf)
         edge_index = torch.argwhere(dist_matrix <= r_max).T.long().to(device=pos.device)

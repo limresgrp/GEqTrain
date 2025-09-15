@@ -113,7 +113,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         # --- Equivariant (Vectorial) Readout ---
         self.reshape_in: Optional[reshape_irreps] = None
-        self.eq_readout = None
+        self.eq_readout_internal = None
+        self.eq_readout_external = None
         self.weights_emb = None
         self.reshape_back_features = None
         self.use_internal_weights = self.n_scalars_in == 0
@@ -123,12 +124,15 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
             self.reshape_in = reshape_irreps(eq_in_irreps)
 
-            self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=self.use_internal_weights, pad_to_alignment=1)
-            
-            if not self.use_internal_weights:
-                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
+            if self.use_internal_weights:
+                # Path 1: Internal weights. Initialize only this module.
+                self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, pad_to_alignment=1)
+            else:
+                # Path 2: External weights. Initialize the other module.
+                self.eq_readout_external = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
+                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout_external.weight_numel, **readout_latent_kwargs)
                 if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
+                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout_external.weight_numel, mlp_nonlinearity=None)
 
             self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
         elif strict_irreps and in_irreps.dim > self.n_scalars_in:
@@ -152,7 +156,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 self.bias = nn.Parameter(bias_init)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        if self.ignore_amp:
+        if not torch.jit.is_scripting() and self.ignore_amp:
             with torch.amp.autocast('cuda', enabled=False):
                 return self._forward_impl(data)
         return self._forward_impl(data)
@@ -170,6 +174,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         out_scalars_list = []
         if self.has_invariant_output:
+            assert self.inv_readout is not None
             current_out_scalars = self.inv_readout(scalars)
             if self.conditioner is not None and "film_scalar" in self.conditioner:
                 current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, data[self.conditioning_field])
@@ -177,17 +182,27 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         out_equiv_list = []
         if self.has_equivariant_output:
-            eq_features_in = self.reshape_in(equiv)
-            
-            if self.use_internal_weights:
-                eq_features_out = self.eq_readout(eq_features_in)
-            else:
-                weights = self.weights_emb(scalars)
-                if self.conditioner is not None and "film_vectorial" in self.conditioner:
-                    weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
-                eq_features_out = self.eq_readout(eq_features_in, weights)
-            
-            out_equiv_list.append(self.reshape_back_features(eq_features_out))
+            # The input `equiv` to reshape_in should not have a zero dimension if there are no equivariant features.
+            # This check ensures we don't call it unnecessarily.
+            if equiv.shape[-1] > 0:
+                assert self.reshape_in is not None
+                eq_features_in = self.reshape_in(equiv)
+                
+                if self.use_internal_weights:
+                    # Call the internal-weights module (one argument)
+                    assert self.eq_readout_internal is not None, "eq_readout_internal was not initialized for this configuration."
+                    eq_features_out = self.eq_readout_internal(eq_features_in)
+                else:
+                    # Call the external-weights module (two arguments)
+                    assert self.eq_readout_external is not None, "eq_readout_external was not initialized for this configuration."
+                    assert self.weights_emb is not None
+                    weights = self.weights_emb(scalars)
+                    if self.conditioner is not None:
+                        weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
+                    eq_features_out = self.eq_readout_external(eq_features_in, weights)
+                
+                assert self.reshape_back_features is not None
+                out_equiv_list.append(self.reshape_back_features(eq_features_out))
 
         output_components = out_scalars_list + out_equiv_list
         if not output_components:
@@ -205,6 +220,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         if self.resnet:
             old_features = data[self.out_field]
+            assert self._resnet_update_coeff is not None
             coeff = self._resnet_update_coeff.sigmoid()
             coefficient_old = torch.rsqrt(coeff.square() + 1)
             coefficient_new = coeff * coefficient_old

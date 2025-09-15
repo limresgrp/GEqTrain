@@ -1,4 +1,4 @@
-from typing import Dict, Iterator, Tuple, Callable, Any, Sequence, Union, Mapping, Optional
+from typing import Dict, Iterator, List, Tuple, Callable, Any, Sequence, Union, Mapping, Optional
 from collections import OrderedDict
 from torch._jit_internal import _copy_to_script_wrapper
 
@@ -160,6 +160,8 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         modules (list or dict of ``GraphModuleMixin``s): the sequence of graph modules. If a list, the modules will be named ``"module0", "module1", ...``.
     """
 
+    _ref_data_keys: List[str]
+
     def __init__(self, modules: Union[Sequence[GraphModuleMixin], Dict[str, GraphModuleMixin]]):
 
         # convert to (ordered) list GraphModuleMixin s
@@ -217,13 +219,13 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         super().__init__(flat_modules) # update the torch.nn.Sequential with the flattened version
 
         # Store key that are computed by the model and must be predicted (e.g. noise for diffusion)
-        self._ref_data_keys = set()
+        self._ref_data_keys = []
         for module in self.modules():
             if hasattr(module, 'ref_data_keys'):
-                self._ref_data_keys.update(module.ref_data_keys)
+                self._ref_data_keys.extend(module.ref_data_keys)
 
     @property
-    def ref_data_keys(self):
+    def ref_data_keys(self) -> List[str]:
         return self._ref_data_keys
 
     @classmethod
