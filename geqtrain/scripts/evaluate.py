@@ -15,7 +15,7 @@ from geqtrain.train.components.setup import setup_loss, setup_metrics
 from geqtrain.train.components.inference import run_inference
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train.components.checkpointing import CheckpointHandler
-from geqtrain.utils._global_options import _set_global_options
+from geqtrain.utils._global_options import apply_global_config
 
 
 class Evaluator:
@@ -177,7 +177,7 @@ def main(args=None):
     config = train_config
     config.update(test_config)
     config['extra_fields_to_log'] = args.extra_fields_to_log
-    _set_global_options(config)
+    apply_global_config(config)
 
     # 2. Create the dataset
     builder = DatasetBuilder(config, torch.Generator())

@@ -11,29 +11,12 @@ from geqtrain.data.AtomicData import register_fields
 from .auto_init import instantiate
 
 
-# for multiprocessing, we need to keep track of our latest global options so
-# that we can reload/reset them in worker processes. While we could be more careful here,
-# to keep only relevant keys, configs should have only small values (no big objects)
-# and those should have references elsewhere anyway, so keeping references here is fine.
 _latest_global_config = {}
+_fields_registered = False
 
 
-def _get_latest_global_options() -> dict:
-    """Get the config used latest to ``_set_global_options``.
-
-    This is useful for getting worker processes into the same state as the parent.
-    """
-    global _latest_global_config
-    return _latest_global_config
-
-
-def _set_global_options(config, warn_on_override: bool = False) -> None:
-    """Configure global options of libraries like `torch` and `e3nn` based on `config`.
-
-    Args:
-        warn_on_override: if True, will try to warn if new options are inconsistant with previously set ones.
-    """
-    # update these options into the latest global config.
+def set_global_options(config, warn_on_override: bool = False) -> None:
+    """Set global options for torch, e3nn, etc. Does NOT register fields."""
     global _latest_global_config
     _latest_global_config.update(dict(config))
     # Set TF32 support
@@ -67,6 +50,16 @@ def _set_global_options(config, warn_on_override: bool = False) -> None:
 
     e3nn.set_optimization_defaults(**config.get("e3nn_optimization_defaults", {}))
 
-    # Register fields:
-    instantiate(register_fields, all_args=config)
-    return
+
+def register_all_fields(config):
+    """Register fields for AtomicData. Idempotent."""
+    global _fields_registered
+    if not _fields_registered:
+        instantiate(register_fields, all_args=config)
+        _fields_registered = True
+
+
+def apply_global_config(config, warn_on_override: bool = False):
+    """Set global options and register fields, only once per process."""
+    set_global_options(config, warn_on_override=warn_on_override)
+    register_all_fields(config)

@@ -44,7 +44,7 @@ DEFAULT_CONFIG = dict(
     equivariance_test=False,
     grad_anomaly_mode=False,
     append=False,
-    _jit_fusion_strategy=[("DYNAMIC", 3)],
+    _jit_fusion_strategy=[("DYNAMIC", 10)],
 )
 
 

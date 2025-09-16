@@ -151,10 +151,7 @@ class Batch(Data):
                     batch[key] = torch.cat(items, cat_dim)
             elif isinstance(item, (int, float)):
                 batch[key] = torch.tensor(items)
-
-        # if torch_geometric.is_debug_enabled():
-        #     batch.debug()
-
+        
         return batch.contiguous()
 
     def get_example(self, idx: int) -> Data:
@@ -177,11 +174,8 @@ class Batch(Data):
         for key in self.__slices__.keys():
             item = self[key]
             if self.__cat_dims__[key] is None:
-                # The item was concatenated along a new batch dimension,
-                # so just index in that dimension:
                 item = item[idx]
             else:
-                # Narrow the item based on the values in `__slices__`.
                 if isinstance(item, Tensor):
                     dim = self.__cat_dims__[key]
                     start = self.__slices__[key][idx]
@@ -193,7 +187,6 @@ class Batch(Data):
                     item = item[start:end]
                     item = item[0] if len(item) == 1 else item
 
-            # Decrease its value by `cumsum` value:
             cum = self.__cumsum__[key][idx]
             if isinstance(item, Tensor):
                 if not isinstance(cum, int) or cum != 0:
@@ -211,29 +204,22 @@ class Batch(Data):
     def index_select(self, idx: IndexType) -> List[Data]:
         if isinstance(idx, slice):
             idx = list(range(self.num_graphs)[idx])
-
         elif isinstance(idx, Tensor) and idx.dtype == torch.long:
             idx = idx.flatten().tolist()
-
         elif isinstance(idx, Tensor) and idx.dtype == torch.bool:
             idx = idx.flatten().nonzero(as_tuple=False).flatten().tolist()
-
         elif isinstance(idx, np.ndarray) and idx.dtype == np.int64:
             idx = idx.flatten().tolist()
-
         elif isinstance(idx, np.ndarray) and idx.dtype == np.bool:
             idx = idx.flatten().nonzero()[0].flatten().tolist()
-
         elif isinstance(idx, Sequence) and not isinstance(idx, str):
             pass
-
         else:
             raise IndexError(
                 f"Only integers, slices (':'), list, tuples, torch.tensor and "
                 f"np.ndarray of dtype long or bool are valid indices (got "
                 f"'{type(idx).__name__}')"
             )
-
         return [self.get_example(i) for i in idx]
 
     def __getitem__(self, idx):
@@ -245,31 +231,37 @@ class Batch(Data):
             return self.index_select(idx)
 
     def to_data_list(self) -> List[Data]:
-        r"""Reconstructs the list of :class:`torch_geometric.data.Data` objects
-        from the batch object.
-        The batch object must have been created via :meth:`from_data_list` in
-        order to be able to reconstruct the initial objects."""
         return [self.get_example(i) for i in range(self.num_graphs)]
 
-    def subgraph(self, subset: torch.Tensor, edge_index: Optional[Tensor] = None) -> "Batch":
+    def subgraph(self, subset: torch.Tensor, edge_index: Optional[Tensor] = None, ignore_keys: List[str] = None) -> "Batch":
         """
         Returns a new Batch object containing only the nodes in `subset`
         and the edges between them.
         """
+        from geqtrain.data import _EDGE_FIELDS, _GRAPH_FIELDS, _NODE_FIELDS
+        
+        ignore_keys = ignore_keys or []
+
         if subset.dtype != torch.bool:
-            node_mask = torch.zeros(self.num_nodes, dtype=torch.bool)
+            node_mask = torch.zeros(self.num_nodes, dtype=torch.bool, device=subset.device)
             node_mask[subset] = True
             subset = node_mask
 
-        # --- 1. Filter all attributes and remap edge_index ---
-        self.edge_index = edge_index if edge_index is not None else self.edge_index
-        edge_mask = subset[self.edge_index[0]] & subset[self.edge_index[1]]
-        node_map = torch.full((self.num_nodes,), -1, dtype=torch.long)
-        node_map[subset] = torch.arange(subset.sum())
+        current_edge_index = edge_index if edge_index is not None else self.edge_index        
+        edge_set = set(map(tuple, current_edge_index.t().tolist()))
+        edge_mask = torch.tensor(
+            [tuple(e) in edge_set for e in self.edge_index.t().tolist()],
+            dtype=torch.bool,
+            device=self.edge_index.device,
+        )
+
+        node_map = torch.full((self.num_nodes,), -1, dtype=torch.long, device=subset.device)
+        node_map[subset] = torch.arange(subset.sum(), device=subset.device)
 
         new_data_kwargs = {}
         for key, value in self:
-            if key in ['batch', 'ptr']: continue
+            if key in ['batch', 'ptr'] or key in ignore_keys: continue
+            
             if key == 'edge_index':
                 new_data_kwargs[key] = node_map[value[:, edge_mask]]
             elif torch.is_tensor(value) and value.size(0) == self.num_nodes:
@@ -279,38 +271,33 @@ class Batch(Data):
             else:
                 new_data_kwargs[key] = value
 
-        # --- 2. Recompute `batch`, `ptr`, and identify kept graphs ---
         new_batch_tensor = self.batch[subset]
-        new_ptr = torch.cat([torch.tensor([0]), torch.cumsum(torch.bincount(new_batch_tensor), 0)])
-        # Find which of the original graphs still have nodes left
+        new_ptr = torch.cat([torch.tensor([0], device=new_batch_tensor.device), torch.cumsum(torch.bincount(new_batch_tensor), 0)])
         unique_graphs, new_graph_node_counts = torch.unique(new_batch_tensor, return_counts=True)
         
-        # If no graphs are left, return None
-        if len(unique_graphs) == 0:
-            return None
+        if len(unique_graphs) == 0: return None
 
-        # --- 3. Recompute slices and cumsum for the new batch ---
-        from geqtrain.data.AtomicData import _EDGE_FIELDS, _GRAPH_FIELDS, _NODE_FIELDS
         new_slices, new_cumsum = {}, {}
-        
-        # Create a map from old graph index to new graph index
-        graph_map = torch.full((self.num_graphs,), -1, dtype=torch.long)
-        graph_map[unique_graphs] = torch.arange(len(unique_graphs))
-
-        # This tensor is what we will use to increment the cumsum for edge-like properties
+        graph_map = torch.full((self.num_graphs,), -1, dtype=torch.long, device=new_batch_tensor.device)
+        graph_map[unique_graphs] = torch.arange(len(unique_graphs), device=new_batch_tensor.device)
         node_increments = torch.cat([torch.tensor([0], device=self.batch.device), torch.cumsum(new_graph_node_counts, 0)])
         
-        for key, old_slice in self.__slices__.items():
-            item_sizes = torch.tensor(old_slice, device=self.batch.device).diff()
+        all_keys = set(self.__slices__.keys())
+        for key, value in self:
+             if key.endswith('_slices'):
+                 all_keys.add(key.replace('_slices', ''))
 
+        for key in all_keys:
+            if key not in self.__slices__: continue
+
+            item_sizes = torch.tensor(self.__slices__[key], device=self.batch.device).diff()
+            
             if key in _NODE_FIELDS or key == 'batch':
                 new_item_sizes = new_graph_node_counts
-                # Node-like properties have a cumsum increment of 0
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
             elif key in _EDGE_FIELDS or key == 'edge_index':
                 edge_batch = self.batch[self.edge_index[0, edge_mask]]
                 new_item_sizes = torch.bincount(graph_map[edge_batch], minlength=len(unique_graphs))
-                # Edge-like properties increment by the number of nodes in each graph
                 new_cumsum[key] = node_increments.tolist()
             elif key in _GRAPH_FIELDS:
                 new_item_sizes = torch.ones(len(unique_graphs), dtype=torch.long, device=self.batch.device)
@@ -318,10 +305,16 @@ class Batch(Data):
             else:
                 new_item_sizes = item_sizes[unique_graphs]
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
+                slice_key = f"{key}_slices"
+                if slice_key in self:
+                    new_slice_tensor = torch.cat([
+                        torch.tensor([0], device=self.batch.device),
+                        torch.cumsum(new_item_sizes, 0)
+                    ])
+                    new_data_kwargs[slice_key] = new_slice_tensor
 
             new_slices[key] = torch.cat([torch.tensor([0], device=self.batch.device), torch.cumsum(new_item_sizes, 0)]).tolist()
 
-        # --- 4. Create the final Batch object ---
         new_batch_obj = Batch(batch=new_batch_tensor, ptr=new_ptr, **new_data_kwargs)
         new_batch_obj.__slices__ = new_slices
         new_batch_obj.__cumsum__ = new_cumsum
@@ -343,3 +336,4 @@ class Batch(Data):
             return int(self.batch.max()) + 1
         else:
             raise ValueError
+

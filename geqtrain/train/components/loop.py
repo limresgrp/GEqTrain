@@ -4,6 +4,7 @@ import math
 import torch
 import contextlib
 
+from geqtrain.data import AtomicDataDict
 from geqtrain.train.components.epoch_summary import EpochSummary
 
 from .inference import run_inference
@@ -85,6 +86,8 @@ class TrainingLoop:
         else:
             # Chunking is enabled, so we loop.
             already_computed_nodes = None
+            batch_edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
+            num_batch_center_nodes = len(batch_edge_index[0].unique())
             while True:
                 # Process one chunk of the batch
                 center_nodes = self._process_step(
@@ -93,7 +96,7 @@ class TrainingLoop:
                 
                 # Update the state for the next chunk
                 already_computed_nodes = evaluate_end_chunking_condition(
-                    already_computed_nodes, center_nodes, len(center_nodes)
+                    already_computed_nodes, center_nodes, num_batch_center_nodes
                 )
 
                 if already_computed_nodes is None:
