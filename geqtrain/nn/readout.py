@@ -114,7 +114,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         # --- Equivariant (Vectorial) Readout ---
         self.reshape_in: Optional[reshape_irreps] = None
         self.eq_readout_internal = None
-        self.eq_readout_external = None
+        self.eq_readout = None
         self.weights_emb = None
         self.reshape_back_features = None
         self.use_internal_weights = self.n_scalars_in == 0
@@ -129,10 +129,10 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, pad_to_alignment=1)
             else:
                 # Path 2: External weights. Initialize the other module.
-                self.eq_readout_external = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
-                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout_external.weight_numel, **readout_latent_kwargs)
+                self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
+                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
                 if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout_external.weight_numel, mlp_nonlinearity=None)
+                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
 
             self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
         elif strict_irreps and in_irreps.dim > self.n_scalars_in:
@@ -194,12 +194,12 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                     eq_features_out = self.eq_readout_internal(eq_features_in)
                 else:
                     # Call the external-weights module (two arguments)
-                    assert self.eq_readout_external is not None, "eq_readout_external was not initialized for this configuration."
+                    assert self.eq_readout is not None, "eq_readout was not initialized for this configuration."
                     assert self.weights_emb is not None
                     weights = self.weights_emb(scalars)
                     if self.conditioner is not None:
                         weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
-                    eq_features_out = self.eq_readout_external(eq_features_in, weights)
+                    eq_features_out = self.eq_readout(eq_features_in, weights)
                 
                 assert self.reshape_back_features is not None
                 out_equiv_list.append(self.reshape_back_features(eq_features_out))
