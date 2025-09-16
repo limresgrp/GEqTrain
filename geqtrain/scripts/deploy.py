@@ -23,7 +23,7 @@ from e3nn.util.jit import script
 
 from geqtrain.train.components.checkpointing import CheckpointHandler
 from geqtrain.utils import Config
-from geqtrain.utils._global_options import _set_global_options
+from geqtrain.utils._global_options import set_global_options as set_global_options_func, apply_global_config
 
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 allow_ops_in_compiled_graph() # needed to compile einops. See https://github.com/arogozhnikov/einops/wiki/Using-torch.compile-with-einops
@@ -38,6 +38,11 @@ TYPE_NAMES_KEY: Final[str] = "type_names"
 JIT_FUSION_STRATEGY: Final[str] = "_jit_fusion_strategy"
 TF32_KEY: Final[str] = "allow_tf32"
 
+# New keys for backmapping metadata
+MAPPING_KEY: Final[str] = "mapping"
+BEAD_TYPES_KEY: Final[str] = "bead_types_filename"
+BEAD_STATS_KEY: Final[str] = "bead_stats"
+
 _ALL_METADATA_KEYS = [
     CONFIG_KEY,
     TORCH_VERSION_KEY,
@@ -47,6 +52,10 @@ _ALL_METADATA_KEYS = [
     TYPE_NAMES_KEY,
     JIT_FUSION_STRATEGY,
     TF32_KEY,
+    # New keys
+    MAPPING_KEY,
+    BEAD_TYPES_KEY,
+    BEAD_STATS_KEY,
 ]
 
 
@@ -112,8 +121,6 @@ def debug(sequential_module_to_test):
 def _compile_for_deploy(model):
     model.eval()
 
-    debug(model)
-
     if not isinstance(model, torch.jit.ScriptModule):
         model = script(model)
     
@@ -144,6 +151,7 @@ def load_deployed_model(
         raise ValueError(
             f"{model_path} does not seem to be a deployed model file. Did you forget to deploy it using `deploy`? \n\n(Underlying error: {e})"
         )
+
     # Confirm its TorchScript
     assert isinstance(model, torch.jit.ScriptModule)
     # Make sure we're in eval mode
@@ -153,13 +161,16 @@ def load_deployed_model(
         # hasattr is how torch checks whether model is unfrozen
         # only freeze if already unfrozen
         model = torch.jit.freeze(model)
+        
     # Everything we store right now is ASCII, so decode for printing
     metadata = {k: v.decode("ascii") for k, v in metadata.items()}
+
     # Set up global settings:
     assert set_global_options in (True, False, "warn")
     if set_global_options:
         global_config_dict = {}
-        global_config_dict["allow_tf32"] = bool(int(metadata[TF32_KEY]))
+        if metadata.get(TF32_KEY):
+            global_config_dict["allow_tf32"] = bool(int(metadata[TF32_KEY]))
         # JIT strategy
         strategy = metadata.get(JIT_FUSION_STRATEGY, "")
         if strategy != "":
@@ -170,7 +181,7 @@ def load_deployed_model(
         global_config_dict[JIT_FUSION_STRATEGY] = strategy
         
         # call to actually set the global options
-        _set_global_options(
+        set_global_options_func(
             global_config_dict,
             warn_on_override=set_global_options == "warn",
         )
@@ -211,7 +222,7 @@ def main(args=None):
         default="deployed_model.pth",
         type=pathlib.Path,
     )
-    parser.add_argument(
+    build_parser.add_argument(
         "-e",
         "--extra-metadata",
         help="Additional key-value pairs to add to the metadata dictionary. Format: key=value. Use quotation marks for values with spaces, e.g., key=\"value with spaces\".",
@@ -224,7 +235,25 @@ def main(args=None):
         help="Debug submodules before compiling. If issues are found, compilation will not proceed.",
         action="store_true",
     )
-
+    # New arguments for embedding backmapping info
+    build_parser.add_argument(
+        "--mapping",
+        help="Path to mapping file to embed in metadata.",
+        type=Path,
+        default=None,
+    )
+    build_parser.add_argument(
+        "--bead-types-filename",
+        help="Path to bead types YAML file to embed in metadata.",
+        type=Path,
+        default=None,
+    )
+    build_parser.add_argument(
+        "--bead-stats",
+        help="Path to bead stats CSV file to embed in metadata.",
+        type=Path,
+        default=None,
+    )
 
     args = parser.parse_args(args=args)
 
@@ -240,9 +269,11 @@ def main(args=None):
         model_path = args.model
     
     logging.info(f"Loading {model_path} from training session...")
-    config = Config.from_file(str(model_path.parent / "config.yaml"))
-
-    _set_global_options(config)
+    config_path = model_path.parent / "config.yaml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file not found at {config_path}. Please ensure a 'config.yaml' is present in the model's directory.")
+    config = Config.from_file(str(config_path))
+    apply_global_config(config)
 
     # -- load model --
     model, model_config = CheckpointHandler.load_model_from_training_session(
@@ -282,7 +313,21 @@ def main(args=None):
     if int(torch.__version__.split(".")[1]) >= 11 and JIT_FUSION_STRATEGY in config:
         metadata[JIT_FUSION_STRATEGY] = ";".join("%s,%i" % e for e in config[JIT_FUSION_STRATEGY])
     metadata[TF32_KEY] = str(int(config["allow_tf32"]))
-    metadata[CONFIG_KEY] = yaml.dump(dict(config))
+    metadata[CONFIG_KEY] = yaml.safe_dump(dict(config))
+    
+    # Add new backmapping-specific metadata
+    if args.mapping:
+        logging.info(f"Embedding mapping file: {args.mapping}")
+        metadata[MAPPING_KEY] = str(args.mapping)
+
+    if args.bead_types_filename:
+        logging.info(f"Embedding bead types file: {args.bead_types_filename}")
+        metadata[BEAD_TYPES_KEY] = str(args.bead_types_filename)
+    
+    if args.bead_stats:
+        logging.info(f"Embedding bead stats file: {args.bead_stats}")
+        with open(args.bead_stats, 'r') as f:
+            metadata[BEAD_STATS_KEY] = f.read()
 
     # Add extra metadata from command line arguments
     for item in args.extra_metadata:
@@ -294,9 +339,23 @@ def main(args=None):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     torch.jit.save(model, args.out_file, _extra_files=metadata)
+    logging.info(f"Successfully deployed model to {args.out_file}")
+
+    # --- VERIFICATION STEP ---
+    logging.info("Verifying saved model metadata...")
+    try:
+        _, verification_meta = load_deployed_model(args.out_file, device="cpu")
+        if not verification_meta:
+            logging.error("VERIFICATION FAILED: Loaded metadata is empty immediately after saving.")
+        else:
+            logging.info("VERIFICATION SUCCEEDED: Metadata was loaded correctly.")
+    except Exception as e:
+        logging.error(f"VERIFICATION FAILED: An error occurred while trying to reload the model: {e}")
+
 
     return
 
 
 if __name__ == "__main__":
     main()
+
