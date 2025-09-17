@@ -503,6 +503,9 @@ class InteractionLayer(torch.nn.Module):
         ) if len(set(linear_out_irreps.ls)) > 0 else None
         self.latest_linear_out_irreps = linear_out_irreps
 
+        node_invariants_dim = parent.irreps_in[parent.node_invariant_field].num_irreps
+        edge_invariants_dim_0 = 2*node_invariants_dim + parent.irreps_in[parent.edge_invariant_field].num_irreps
+        edge_invariants_dim = self.latent_dim + self.env_embed_multiplicity * parent._tp_n_scalar_outs[self.layer_index - 1]
         if self.layer_index == 0:
             input_eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
             self.eq_features_linear = Linear(
@@ -512,11 +515,9 @@ class InteractionLayer(torch.nn.Module):
                 shared_weights=True,
             )
             assert previous_latent_dim is None
-            node_invariants_dim = parent.irreps_in[parent.node_invariant_field].num_irreps
-            edge_invariants_dim = parent.irreps_in[parent.edge_invariant_field].num_irreps
             # at the first layer, we have no invariants from previous TPs
             self.latent_mlp = two_body_latent(
-                mlp_input_dimension=2*node_invariants_dim + edge_invariants_dim,
+                mlp_input_dimension=edge_invariants_dim_0,
                 mlp_output_dimension=self.latent_dim,
             )
         else:
@@ -525,8 +526,7 @@ class InteractionLayer(torch.nn.Module):
             self.latent_dim = previous_latent_dim
             # the embedded latent invariants from the previous layer(s)
             # and the invariants extracted from the last layer's TP:
-            edge_invariants_dim = self.latent_dim + self.env_embed_multiplicity * parent._tp_n_scalar_outs[self.layer_index - 1]
-                    
+            
             self.latent_mlp = latent(
                 mlp_input_dimension=edge_invariants_dim,
                 mlp_output_dimension=self.latent_dim,
@@ -548,7 +548,7 @@ class InteractionLayer(torch.nn.Module):
 
         # Take the node attrs and obtain a query matrix
         self.edge_attr_to_query = ScalarMLPFunction(
-            mlp_input_dimension=edge_invariants_dim,
+            mlp_input_dimension=edge_invariants_dim_0 if self.layer_index==0 else edge_invariants_dim,
             mlp_latent_dimensions = [],
             mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
             mlp_nonlinearity = None,
