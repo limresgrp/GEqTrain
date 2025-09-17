@@ -121,6 +121,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         if self.has_equivariant_output:
             eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
+            assert len(eq_in_irreps) > 0, "No equivariant (l > 0) input irreps found for field '{}'. Cannot perform equivariant readout.".format(self.field)
             eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
             self.reshape_in = reshape_irreps(eq_in_irreps)
 
