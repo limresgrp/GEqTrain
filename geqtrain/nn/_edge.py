@@ -89,10 +89,10 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
 @compile_mode("script")
 class BaseEdgeEmbedding(BaseEmbedding):
 
-    def __init__(self, latent_dim=None, **kwargs):
+    def __init__(self, latent_dim=None, proj_to_latent=True, **kwargs):
         super().__init__(**kwargs)
         self.has_edge_attr  = False
-        self.proj_to_latent = False
+        self.proj_to_latent = proj_to_latent
 
         edge_radial_irreps = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
         edge_dim = edge_radial_irreps.dim
@@ -102,8 +102,7 @@ class BaseEdgeEmbedding(BaseEmbedding):
             self.has_edge_attr = True
             edge_dim += self.irreps_in[self.edge_field].dim
 
-        if latent_dim is not None:
-            self.proj_to_latent = True
+        if self.proj_to_latent and latent_dim is not None:
             self.linear_proj = torch.nn.Linear(edge_dim, latent_dim)
             self.linear_proj.reset_parameters()
             out_dim = latent_dim
