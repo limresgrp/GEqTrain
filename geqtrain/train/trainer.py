@@ -1432,6 +1432,13 @@ class Trainer:
                 # ref for how ddp works: https://pytorch.org/docs/stable/notes/ddp.html#internal-design;
                 # TLDR: every process must call gradfilter_ema (if grokfast), gradient_clipping, optim.step() ema.update(), lr_sched_step and accumulation_counter++
                 loss.backward()
+                # verify that all params that require gradients have a gradient tensor after backward
+                model_unwrapped = self.model.module if self.is_ddp else self.model
+                none_grad_names = [name for name, p in model_unwrapped.named_parameters() if p.requires_grad and p.grad is None]
+                if len(none_grad_names) > 0:
+                    raise AssertionError(f"Parameters with requires_grad=True but grad is None after backward: {none_grad_names}")
+
+
                 self.accumulation_counter += 1
 
                 if self.use_grokfast:
