@@ -6,7 +6,7 @@ Original authors: Albert Musaelian
 import json
 import logging
 import os
-from typing import Union, Dict, Set, Sequence
+from typing import Any, Tuple, Union, Dict, Set, Sequence
 from collections.abc import Mapping
 
 import numpy as np
@@ -123,7 +123,6 @@ def register_fields(
     os.environ[prefix + 'FIXED'] = json.dumps(list(_FIXED_FIELDS))
     os.environ[prefix + 'LONG'] = json.dumps(list(_LONG_FIELDS))
 
-
 def _initialize_fields_from_env():
     """
     On module import, overwrite default fields with any found in env vars.
@@ -141,7 +140,6 @@ def _initialize_fields_from_env():
         _EXTRA_FIELDS = FieldSet(json.loads(os.environ[prefix + 'EXTRA']))
         _FIXED_FIELDS = FieldSet(json.loads(os.environ[prefix + 'FIXED']))
         _LONG_FIELDS  = FieldSet(json.loads(os.environ[prefix + 'LONG']))
-
 
 def _process_dict(kwargs, ignore_fields):
     """Convert a dict of data into correct dtypes/shapes according to key"""
@@ -222,6 +220,83 @@ def _process_dict(kwargs, ignore_fields):
                 if v.shape[0] != num_frames: str_msg += f"{v.shape[0]} != {num_frames}, but they should be equal"
                 raise ValueError(str_msg)
 
+def process_and_filter_data(
+    **kwargs: Any
+) -> Dict[str, Any]:
+    """
+    Filters numpy arrays based on masks and converts them to PyTorch tensors.
+
+    This function removes elements/rows from `pos` and any arrays in `kwargs`
+    according to associated masks. It handles masks from `numpy.ma.MaskedArray`
+    and explicit '__mask__' keyword arguments.
+    """
+    processed_kwargs = kwargs.copy()
+    mask_keys = [key for key in processed_kwargs if key.endswith('__mask__')]
+    
+    for mask_key in mask_keys:
+        root_key = mask_key[:-8]
+        mask_array = processed_kwargs[mask_key]
+
+        if root_key in processed_kwargs:
+            data_to_filter = processed_kwargs[root_key]
+            row_mask = _get_row_mask(mask_array, data_to_filter.shape)
+            processed_kwargs[root_key] = data_to_filter[~row_mask]
+        else:
+            raise ValueError(
+                f"Mask key '{mask_key}' found, but its corresponding "
+                f"data key '{root_key}' is missing."
+            )
+    
+    final_kwargs = {}
+    for key, value in processed_kwargs.items():
+        if key.endswith('__mask__'):
+            continue
+        final_kwargs[key] = value
+
+    return final_kwargs
+
+def _get_row_mask(mask: np.ndarray, data_shape: Tuple[int, ...]) -> np.ndarray:
+    """
+    Validates a mask and converts it into a 1D row-wise boolean mask.
+
+    - A 1D mask is returned as is after a length check.
+    - A multi-dimensional mask is valid only if each row is entirely
+      True or entirely False. It's then collapsed into a 1D mask.
+
+    Args:
+        mask (np.ndarray): The mask to process. Can be 1D or multi-dimensional.
+        data_shape (Tuple[int, ...]): The shape of the data array to be masked.
+
+    Returns:
+        np.ndarray: A 1D boolean array where True means "discard this row".
+    """
+    mask = np.asarray(mask, dtype=bool)
+
+    if mask.ndim == 1:
+        if mask.shape[0] != data_shape[0]:
+            raise ValueError(
+                f"1D mask length {mask.shape[0]} does not match data's "
+                f"first dimension {data_shape[0]}."
+            )
+        return mask
+    
+    if mask.shape != data_shape:
+        raise ValueError(
+            f"Mask shape {mask.shape} is incompatible with data shape {data_shape}."
+        )
+
+    # For multi-dimensional masks, validate that each row is consistent
+    # (all True or all False) as per the initial requirement.
+    is_row_valid = np.all(mask, axis=1) == np.any(mask, axis=1)
+    if not np.all(is_row_valid):
+        raise ValueError(
+            "Invalid multi-dimensional mask: each row must contain "
+            "either all True or all False values."
+        )
+
+    # Collapse the ND mask into a 1D mask for row-wise filtering.
+    # A row is masked if all its elements are True.
+    return np.all(mask, axis=1)
 
 class AtomicData(Data):
     """A neighbor graph for points in real space.
@@ -337,47 +412,14 @@ class AtomicData(Data):
             raise ValueError("pos and r_max must be given.")
 
         if pbc is None:
-            if cell is not None:
-                logging.info("A cell was provided, assuming PBC on all dimensions.")
-                pbc = True
-            else:
-                pbc = False
+            if cell is not None: pbc = True; logging.info("A cell was provided, assuming PBC on all dimensions.")
+            else: pbc = False
 
-        if isinstance(pbc, bool):
-            pbc = (pbc,) * 3
-        else:
-            assert len(pbc) == 3
+        if isinstance(pbc, bool): pbc = (pbc,) * 3
+        else: assert len(pbc) == 3
 
-        # Handle numpy masked array for pos
-        if hasattr(pos, 'mask'):
-            pos = pos[~pos.mask].reshape(-1, pos.shape[-1]) if pos.mask.any() else pos
-
-        pos = torch.as_tensor(pos, dtype=torch.float32)
-
-        # Process '__mask__' arguments in kwargs
-        mask_keys = [key for key in kwargs.keys() if key.endswith('__mask__')]
-        for mask_key in mask_keys:
-            root_key = mask_key[:-8] # Remove '__mask__' suffix to get the root key
-            mask = torch.as_tensor(kwargs[mask_key], dtype=torch.bool)
-            if root_key in kwargs:
-                kwargs[root_key] = kwargs[root_key][~mask]
-            elif root_key == 'pos':
-                pos = pos[~mask]
-            else:
-                raise ValueError(f"Mask key '{mask_key}' found, but '{root_key}' is missing in kwargs.")
-            del kwargs[mask_key] # Remove the '__mask__' key from kwargs
-
-        # Handle numpy masked arrays in kwargs
-        for k in list(kwargs.keys()):
-            v = kwargs[k]
-            if hasattr(v, 'mask'):
-                # v is a numpy masked array
-                valid = ~v.mask
-                if v.ndim > 1:
-                    valid_idx = np.where(valid.any(axis=tuple(range(1, v.ndim))))
-                    kwargs[k] = v[valid_idx]
-                else:
-                    kwargs[k] = v[valid]
+        kwargs = process_and_filter_data(pos=pos, **kwargs)
+        pos = kwargs.pop('pos')
         
         edge_index = kwargs.get(AtomicDataDict.EDGE_INDEX_KEY, None)
         edge_cell_shift = kwargs.get(AtomicDataDict.EDGE_CELL_SHIFT_KEY, None)
@@ -528,6 +570,7 @@ def neighbor_list(
             device=out_device,
         )
         # Check pbc consistency
+        pos = torch.as_tensor(pos, device=out_device)
         x = pos[edge_index]
         dist_vec = x[1] - x[0]
         z = dist_vec + torch.einsum(
