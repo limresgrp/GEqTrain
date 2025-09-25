@@ -318,7 +318,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         data[self.edge_out_field] = edge_attr
         
         # edge equivariant
-        if self.edge_emb is None:
+        if self.edge_eq_emb is None:
             edge_eq_attr = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY] # default embedding
         else:
             edge_eq_attr = self.edge_eq_emb(data)
