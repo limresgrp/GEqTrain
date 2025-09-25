@@ -168,7 +168,6 @@ class RunningStats:
                 N = N.reshape(N.shape + (1,) * (len(new_sum.shape) - len(N.shape)))
 
         else:
-
             # can only handle 1 dimensional accumulate_by
             accumulate_by = accumulate_by.reshape([-1])
             if accumulate_by.shape[0] != batch.shape[0]:

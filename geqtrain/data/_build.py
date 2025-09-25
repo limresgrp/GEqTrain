@@ -306,6 +306,8 @@ def _filter_dataset(
     # --- 2. Compute the final edge mask based on all conditions ---
     edge_index = data.edge_index
     edges_to_keep_mask = torch.ones(data.num_edges, dtype=torch.bool, device=edge_index.device)
+    # Remove edges where at least one node is not in nodes_to_keep_mask
+    edges_to_keep_mask &= nodes_to_keep_mask[edge_index[0]] & nodes_to_keep_mask[edge_index[1]]
 
     nan_filters = []
     for key in key_clean_list:
