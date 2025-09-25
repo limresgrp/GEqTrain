@@ -99,6 +99,7 @@ def load_deployed_model(
     device: Union[str, torch.device] = "cpu",
     freeze: bool = True,
     set_global_options: Union[str, bool] = "warn",
+    extra_metadata: Optional[Dict[str, str]] = None,
 ) -> Tuple[torch.jit.ScriptModule, Dict[str, str]]:
     r"""Load a deployed model.
 
@@ -109,6 +110,7 @@ def load_deployed_model(
         model, metadata dictionary
     """
     metadata = {k: "" for k in _ALL_METADATA_KEYS}
+    if extra_metadata is not None: metadata.update(extra_metadata)
     try:
         model = torch.jit.load(model_path, map_location=device, _extra_files=metadata)
     except RuntimeError as e:
@@ -149,13 +151,14 @@ def load_deployed_model(
         )
     return model, metadata
 
-def verify_deployment(out_file):
+def verify_deployment(out_file, extra_metadata):
     try:
-        _, verification_meta = load_deployed_model(out_file, device="cpu")
-        if not verification_meta:
-            logging.error("VERIFICATION FAILED: Loaded metadata is empty immediately after saving.")
-        else:
-            logging.info("VERIFICATION SUCCEEDED: Metadata was loaded correctly.")
+        _, verification_meta = load_deployed_model(out_file, device="cpu", extra_metadata=extra_metadata)
+        for k in extra_metadata.keys():
+            if k not in verification_meta.keys():
+                logging.error(f"VERIFICATION FAILED: Loaded metadata is missing key {k}.")
+                return
+        logging.info("VERIFICATION SUCCEEDED: Metadata was loaded correctly.")
     except Exception as e:
         logging.error(f"VERIFICATION FAILED: An error occurred while trying to reload the model: {e}")
 
@@ -200,4 +203,4 @@ def build_deployment(
 
     # Your verification step here...
     logging.info("Verifying saved model...")
-    verify_deployment(out_file)
+    verify_deployment(out_file, extra_metadata)
