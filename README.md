@@ -1,141 +1,169 @@
 # GEqTrain
 
 GEqTrain is a framework to dynamically build, train, and deploy E(3)-equivariant graph-based models using PyTorch and e3nn.
+This guide provides instructions for installation, usage on local machines, and deployment on High-Performance Computing (HPC) clusters.
 
-## Installation
+## 🚀 Installation
 
-GEqTrain requires PyTorch. Since PyTorch must be installed for your specific hardware (CPU or a particular CUDA version), you need to install it manually before installing GEqTrain.
-
-### For Users (from PyPI)
-
-1.  **Install PyTorch**: Visit the [official PyTorch website](https://pytorch.org/get-started/locally/) and run the installation command that matches your system. For example, for CUDA 12.1:
-
+GEqTrain requires PyTorch to be installed first, as the correct version depends on your specific hardware (CPU or a particular CUDA version).
+**For Users**
+1. **Install PyTorch**: Visit the official PyTorch website and run the installation command that matches your system. For example, for CUDA 12.1:
     ```bash
-    pip install torch --index-url https://download.pytorch.org/whl/cu121
+    pip install torch --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
     ```
-
-2.  **Install GEqTrain**: Once PyTorch is installed, you can install this package from PyPI:
-
+2. **Install GEqTrain**: Once PyTorch is installed, you can install the package from PyPI:
     ```bash
     pip install geqtrain
     ```
 
-### For Developers (from source)
+**For Developers**
+If you want to contribute to the project, follow these steps to set up an editable installation.
 
-1.  **Clone the repository**:
+1. **Clone the Repository**:
 
     ```bash
-    git clone https://github.com/limresgrp/GEqTrain.git
+    git clone [https://github.com/limresgrp/GEqTrain.git](https://github.com/limresgrp/GEqTrain.git)
     cd GEqTrain
     ```
 
-2.  **Create and activate a virtual environment**:
+2. **Create a Virtual Environment**:
 
     ```bash
     python -m venv .venv
     source .venv/bin/activate
     ```
 
-3.  **Install PyTorch**: Follow step 1 from the user installation guide above.
+3. **Install PyTorch**: Follow step 1 from the user installation guide above.
 
-4.  **Install GEqTrain in editable mode**:
+4. **Install GEqTrain in Editable Mode**: This allows your changes to the source code to be immediately reflected.
 
     ```bash
     pip install -e .
     ```
 
------
+## ▶️ Usage
+You can run training jobs using the geqtrain-train command-line script.
 
-## Quick Start
+**Single-GPU Training**
+To start a training run with a configuration file on a single GPU:
+    ```bash
+    geqtrain-train path/to/your/config.yaml --device cuda:0
+    ```
 
-After installation, you can use the command-line scripts provided by GEqTrain. For example, to start a training run with a configuration file on a single GPU:
+**Multi-GPU Distributed Training**
+For larger models, you can train in parallel across multiple GPUs on a single machine using torchrun.
 
-```bash
-geqtrain-train path/to/your/config.yaml --device cuda:0
-```
-
-## Distributed Training (Multi-GPU)
-
-For larger models and datasets, you can train in parallel across multiple GPUs using PyTorch's Distributed Data Parallel (DDP).
-
-### Using `torchrun` on a Single Machine
-
-`torchrun` is the standard tool for launching distributed training on a single multi-GPU machine.
-
-1.  **(Optional) Select specific GPUs:** You can control which GPUs are visible to your script using the `CUDA_VISIBLE_DEVICES` environment variable. For example, to only use GPUs 0 and 2:
-
+1. **(Optional) Select GPUs**: You can control which GPUs are visible to your script using the CUDA_VISIBLE_DEVICES environment variable. For example, to use only GPUs 0 and 2:
+    
     ```bash
     export CUDA_VISIBLE_DEVICES=0,2
     ```
 
-2.  **(Optional) Set NCCL Workaround:** On some systems, low-level hardware or driver conflicts can cause hangs. If you experience this, setting the following variable forces a more robust communication path:
-
+2. **Launch the Training**: Use torchrun and set `--nproc_per_node` to the number of GPUs you want to use. The `--ddp` flag enables distributed mode.
+    
     ```bash
-    export NCCL_P2P_DISABLE=1
-    ```
-
-3.  **Launch the training:** Use `torchrun` and set `--nproc_per_node` to the number of GPUs you want to use. The `--ddp` flag enables distributed mode in the script.
-
-    ```bash
-    # This example will launch 2 processes, one for each visible GPU (0 and 2)
+    # This will launch 2 processes, one for each visible GPU (0 and 2)
     torchrun --nproc_per_node=2 geqtrain/scripts/train.py --ddp path/to/your/config.yaml
     ```
 
-### Using SLURM on an HPC Cluster
+# 💻 Running on an HPC Cluster (SLURM)
+Running on a supercomputer typically involves three main steps: loading a pre-configured software environment, installing GEqTrain into a personal Python virtual environment, and submitting your job to the workload manager (e.g., SLURM).
 
-On a cluster managed by the SLURM workload manager, you can submit your training job using an `sbatch` script.
+## Step 1: Set Up the Environment**
+While specific commands vary between clusters, the general process is similar. Here, we use a CSCS-like system with the uenv environment manager as a representative example.Find a Suitable Environment:
 
-#### Step 1: Create a submission script (`train.sbatch`)
+First, search for a pre-built environment that includes a recent version of PyTorch and CUDA.
 
-Create a file named `train.sbatch` with the following content. You will need to replace the placeholder values (like `<your_account>`) with the specific details of your cluster.
+    ```bash
+    # Example: Find PyTorch images available on the system
+    uenv image find pytorch
+    ```
 
-```bash
+**Pull the Image**: If the desired image is not available locally, pull it from the registry.
+
+    ```bash
+    # Example: Pull a specific PyTorch version
+    uenv image pull pytorch/v2.6.0:v1
+    ```
+
+**List Local Images**: You can check all the environments you have downloaded.
+
+    ```bash
+    # Show all downloaded and available uenvs
+    uenv image ls
+    ```
+
+**Load the Environment**: Start an interactive session within the chosen containerized environment. This gives you access to its pre-installed software, like PyTorch.
+
+    ```bash
+    # Example: Start a shell in the 'pytorch/v2.6.0:v1' environment
+    uenv run --view=default pytorch/v2.6.0:v1 -- bash
+    ```
+
+**Create a Local Python Virtual Environment**: To keep your packages isolated, create a virtual environment. Using `--system-site-packages` allows your new environment to inherit packages (like PyTorch) from the base HPC environment.
+
+    ```bash
+    python -m venv --system-site-packages ./geqtrain-venv
+    source ./geqtrain-venv/bin/activate
+    ```
+
+**Install GEqTrain**: Install the package and all its dependencies.
+
+    ```bash
+    pip install -e .
+    ```
+
+## Step 2: Submit a Training Job with SLURM
+Create a submission script (e.g., train.sbatch) to define the resources you need and the commands to run.
+```
 #!/bin/bash
 #SBATCH --job-name=geqtrain-ddp
-#SBATCH --nodes=1
-#SBATCH --ntasks=4                 # Request 4 tasks (one for each GPU process)
-#SBATCH --gpus-per-task=1          # Assign one GPU to each task
-#SBATCH --cpus-per-task=8          # Assign CPUs for each task
-#SBATCH --mem=<memory_amount>      # e.g., 64GB
-#SBATCH --time=<hh:mm:ss>          # e.g., 08:00:00
-#SBATCH --partition=<your_partition> # e.g., normal or debug
-#SBATCH --account=<your_account>
+#SBATCH --nodes=1                    # Number of compute nodes
+#SBATCH --ntasks=4                   # Total number of processes (e.g., for 4 GPUs)
+#SBATCH --gpus-per-task=1            # Assign one GPU to each process
+#SBATCH --cpus-per-task=8            # Assign 8 CPU cores to each process
+#SBATCH --mem=64GB                   # Memory per node
+#SBATCH --time=08:00:00              # Max walltime
+#SBATCH --partition=<your_partition> # Cluster-specific partition (e.g., debug, normal)
+#SBATCH --account=<your_account>     # Your project account
 
 # Navigate to your project directory
 cd <path_to_your_project>/GEqTrain
 
-# Get the config file path from the command line
+# Get the config file path from the command line argument
 CONFIG=$1
-if [ -z "$CONFIG" ];
-then
-  echo "Missing CONFIG file argument"
+if [ -z "$CONFIG" ]; then
+  echo "Error: Missing CONFIG file argument" >&2
   exit 1
 fi
 
-# Set MASTER_ADDR and MASTER_PORT for process communication
+# Set MASTER_ADDR to the first node in the job allocation
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT=29500
+export MASTER_PORT=29500 # A free port for communication
 
-echo "MASTER_ADDR=${MASTER_ADDR}"
-echo "MASTER_PORT=${MASTER_PORT}"
-
-# Set Wandb api key if you need to log training on W&B
-export WANDB_API_KEY=myapikey
-
-# srun will launch 4 independent copies of the following command.
-# You may need to adapt this line to your cluster's module or environment system.
+# Launch the distributed training job using srun
+# This command runs your code inside the previously set up virtual environment
 srun bash -c "
-  source <path_to_your_project>/GEqTrain/.venv/bin/activate && \
+  source <path_to_your_project>/GEqTrain/geqtrain-venv/bin/activate && \
   geqtrain-train --ddp --master-addr \$MASTER_ADDR --master-port \$MASTER_PORT \$CONFIG
 "
 
 echo "Job finished"
 ```
 
-#### Step 2: Submit the Job
+Submit your job to the scheduler, passing your configuration file as an argument:
 
-Submit your script to the SLURM scheduler, passing your configuration file as an argument.
+    ```bash
+    sbatch train.sbatch path/to/your/config.yaml
+    ```
 
+## Step 3: Manage Your SLURM Jobs
+Here are some common commands for checking on your jobs:
 ```bash
-sbatch train.sbatch path/to/your/config.yaml
+    # List your jobs:
+    squeue -u $USER
+    # Cancel a job:
+    scancel <job_id>
+    # View detailed job information:
+    scontrol show job <job_id>
 ```
