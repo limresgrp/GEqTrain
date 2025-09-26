@@ -69,9 +69,10 @@ For larger models, you can train in parallel across multiple GPUs on a single ma
 # 💻 Running on an HPC Cluster (SLURM)
 Running on a supercomputer typically involves three main steps: loading a pre-configured software environment, installing GEqTrain into a personal Python virtual environment, and submitting your job to the workload manager (e.g., SLURM).
 
-## Step 1: Set Up the Environment**
-While specific commands vary between clusters, the general process is similar. Here, we use a CSCS-like system with the uenv environment manager as a representative example.Find a Suitable Environment:
+## Step 1: Set Up the Environment
+While specific commands vary between clusters, the general process is similar. Here, we use a CSCS-like system with the uenv environment manager as a representative example.
 
+1. **Find a Suitable Environment**:
 First, search for a pre-built environment that includes a recent version of PyTorch and CUDA.
 
     ```bash
@@ -79,35 +80,40 @@ First, search for a pre-built environment that includes a recent version of PyTo
     uenv image find pytorch
     ```
 
-**Pull the Image**: If the desired image is not available locally, pull it from the registry.
+2. **Pull the Image**:
+If the desired image is not available locally, pull it from the registry.
 
     ```bash
     # Example: Pull a specific PyTorch version
     uenv image pull pytorch/v2.6.0:v1
     ```
 
-**List Local Images**: You can check all the environments you have downloaded.
+3. **List Local Images**:
+You can check all the environments you have downloaded.
 
     ```bash
     # Show all downloaded and available uenvs
     uenv image ls
     ```
 
-**Load the Environment**: Start an interactive session within the chosen containerized environment. This gives you access to its pre-installed software, like PyTorch.
+4. **Load the Environment**:
+Start an interactive session within the chosen containerized environment. This gives you access to its pre-installed software, like PyTorch.
 
     ```bash
     # Example: Start a shell in the 'pytorch/v2.6.0:v1' environment
     uenv run --view=default pytorch/v2.6.0:v1 -- bash
     ```
 
-**Create a Local Python Virtual Environment**: To keep your packages isolated, create a virtual environment. Using `--system-site-packages` allows your new environment to inherit packages (like PyTorch) from the base HPC environment.
+5. **Create a Local Python Virtual Environment**:
+To keep your packages isolated, create a virtual environment. Using `--system-site-packages` allows your new environment to inherit packages (like PyTorch) from the base HPC environment.
 
     ```bash
     python -m venv --system-site-packages ./geqtrain-venv
     source ./geqtrain-venv/bin/activate
     ```
 
-**Install GEqTrain**: Install the package and all its dependencies.
+6. **Install GEqTrain**:
+Install the package and all its dependencies.
 
     ```bash
     pip install -e .
@@ -151,7 +157,7 @@ srun bash -c "
 echo "Job finished"
 ```
 
-Submit your job to the scheduler, passing your configuration file as an argument:
+1. **Submit your job to the scheduler**:
 
     ```bash
     sbatch train.sbatch path/to/your/config.yaml
