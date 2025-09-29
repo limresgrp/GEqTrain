@@ -14,11 +14,14 @@ class DistributedManager:
         self.config = {} if config is None else config
         self._is_initialized = False
 
-        if not dist.is_available() or not torch.cuda.is_available() or not self.config.get('ddp', False):
+        if not self.config.get('ddp', False):
             self.world_size, self.rank, self.local_rank = 1, 0, 0
             self.is_distributed = False
             self.device = torch.device(self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
             return
+        else:
+            assert dist.is_available()
+            assert torch.cuda.is_available()
 
         # This logic is portable between SLURM and torchrun
         self.rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
