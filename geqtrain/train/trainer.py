@@ -1,5 +1,7 @@
 # trainer.py
 import logging
+from pathlib import Path
+import shutil
 from time import perf_counter
 
 import numpy as np
@@ -10,7 +12,8 @@ from geqtrain.data.dataloader import DataLoader
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
 from geqtrain.train.components.epoch_summary import EpochSummary
-from geqtrain.utils import Config, Output, load_callable
+from geqtrain.utils import Config, Output, load_callable, load_file
+from geqtrain.utils._global_options import apply_global_config
 from geqtrain.model import model_from_config
 
 # Import the new components
@@ -22,6 +25,61 @@ from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
 from .components.loop import TrainingLoop
+
+def check_for_config_updates(new_config):
+    """
+    Load a saved config, merge new parameters, enforce current runtime settings,
+    and return a clean, final Config object.
+    """
+    restart_file = f"{new_config['root']}/{new_config['run_name']}/trainer.pth"
+    saved_state = load_file(
+        filename=restart_file,
+        supported_formats=dict(torch=["pt", "pth"]),
+        enforced_format="torch",
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    # Start with the dictionary from the saved run
+    final_config_dict = saved_state['config'].as_dict()
+    new_config_dict = new_config.as_dict()
+    
+    # 1. Update user-modifiable parameters
+    modifiable_params = [
+        "max_epochs", "learning_rate", "loss_coeffs", "metrics_components", "log_batch_freq",
+        "use_ema", "wandb", "dataset_list", "validation_dataset_list", "test_dataset_list",
+        "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
+        "device", "filepath", "ddp",
+    ]
+    logging.info("Checking for updated user-modifiable parameters...")
+    for key in new_config_dict:
+        if key in final_config_dict and new_config_dict[key] != final_config_dict[key]:
+            if key in modifiable_params:
+                logging.info(f'Updating parameter "{key}" from `{final_config_dict[key]}` to `{new_config_dict[key]}`')
+                final_config_dict[key] = new_config_dict[key]
+            else:
+                raise ValueError(f'Parameter "{key}" is not user-modifiable and cannot be changed during restart.')
+
+    # 2. Enforce critical runtime parameters from the new command
+    # This ensures DDP status, device, etc., are always from the new command.
+    runtime_params = ['ddp', 'device', 'find_unused_parameters']
+    logging.info("Enforcing current runtime parameters...")
+    for key in runtime_params:
+        if key in new_config_dict and new_config_dict[key] is not None:
+            if final_config_dict.get(key) != new_config_dict[key]:
+                 logging.info(f"Overwriting runtime parameter '{key}' with new value '{new_config_dict[key]}'")
+            final_config_dict[key] = new_config_dict[key]
+        else:
+            # If not specified in the new command, remove the old key
+            if key in final_config_dict:
+                logging.info(f"Removing stale runtime parameter '{key}' from loaded config.")
+                final_config_dict.pop(key)
+    
+    # 3. Create a brand new, clean Config object from the final dictionary
+    final_config = Config.from_dict(final_config_dict)
+    final_config.filepath = new_config.filepath
+            
+    return final_config
 
 class Trainer:
     """
@@ -37,46 +95,87 @@ class Trainer:
         self.config = Config.from_dict(config) if not isinstance(config, Config) else config
         self.dist = DistributedManager(config=self.config)
 
-        # 2. Environment Setup (logging, output paths, seeds)
+        # 2. All ranks participate and synchronize on the final configuration.
+        self.config = self._resolve_config_and_restart_status(self.config)
+        apply_global_config(self.config)
+
+        # 3. Environment Setup (logging, output paths, seeds)
         self._initialize_env()
         self.checkpoint_handler = CheckpointHandler(trainer=self)
 
+        # 4. Load trainer state only if the synchronized config says to restart
         trainer_state = None
         if self.config.get('restart'):
-            # 3. Load the raw state dictionary FIRST.
+            # 5. Load the raw state dictionary FIRST.
             trainer_state = self.checkpoint_handler.load_raw_state_for_restart()
 
-            # 4. Inject the essential dataset indices into the config.
+            # 6. Inject the essential dataset indices into the config.
             # This ensures the DatasetBuilder uses the correct, restored indices.
             logging.info("Updating config with train/validation indices from checkpoint.")
             self.config['train_idcs'] = trainer_state['train_idcs']
             self.config['val_idcs'] = trainer_state['val_idcs']
 
-        # 5. Extract config parameters (now includes restored indices if restarting)
+        # 7. Extract config parameters (now includes restored indices if restarting)
         self._extract_config_parameters()
 
-        # 6. Initialize training state variables
+        # 8. Initialize training state variables
         self._initialize_training_state()
 
-        # 7. Handle fine-tuning (only if it's a new run, not a restart).
+        # 9. Handle fine-tuning (only if it's a new run, not a restart).
         if self.config.get('fine_tune') and not self.config.get('restart'):
             model, self.config = self.checkpoint_handler.load_model_for_resume()
 
-        # 8. Setup dataset and dataloaders
-        # This will now correctly use the restored indices on a restart.
+        # 10. Setup dataset and dataloaders
+        # This will use the restored indices on a restart.
         self._build_datasets()
         self._init_dataloaders()
 
-        # 9. Setup model and training-related objects
+        # 11. Setup model and training-related objects
         self._setup_model(model)
         self._setup_training_components()
 
-        # 10. If restarting, APPLY the rest of the state to the components we just built.
+        # 12. If restarting, APPLY the rest of the state to the components we just built.
         if self.config.get('restart') and trainer_state is not None:
              self.checkpoint_handler.apply_state_for_restart(trainer_state)
 
-        # 11. Callbacks
+        # 13. Callbacks
         self._setup_callbacks()
+
+    def _resolve_config_and_restart_status(self, new_config: Config) -> Config:
+        """
+        Determines the definitive restart status and synchronizes the final config.
+        Only the master rank checks the filesystem and determines the status.
+        """
+        # 1. Rank 0 checks the filesystem
+        if self.dist.is_master:
+            import os.path
+            run_dir = f"{new_config.root}/{new_config.run_name}"
+            is_restart = os.path.isdir(run_dir)
+            
+            if is_restart:
+                logging.info(f"Master rank found existing run directory ({run_dir}), attempting to restart training.")
+                final_config = check_for_config_updates(new_config)
+            else:
+                logging.info("Master rank starting a fresh training run.")
+                final_config = new_config
+            
+            final_config['restart'] = is_restart
+            
+        else:
+            # Non-master ranks wait to receive the final config
+            is_restart = None
+            final_config = None
+
+        # 2. Synchronize (barrier for robustness, then broadcast)
+        if self.dist.is_distributed:
+            dist.barrier()
+
+        # 3. Broadcast the final, resolved config object
+        final_config = self.dist.broadcast_object(final_config, src=0)
+
+        # The master's final_config is returned on Rank 0, 
+        # the broadcasted final_config is returned on other ranks.
+        return final_config
 
     def _initialize_env(self):
         """Set up the environment: logging, output paths, and seeds."""
@@ -88,6 +187,10 @@ class Trainer:
                 TRAIN: self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
                 VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
             }
+            config_path = self.output.generate_file("config.yaml")
+            # Note: Must use the initial config's filepath to copy the *source* config.
+            shutil.copyfile(Path(self.config.filepath).resolve(), config_path) 
+            logging.info(f"Copied config file to {config_path}")
         else:
             self.output = None; self.logfile = "dummy"
 
@@ -175,7 +278,7 @@ class Trainer:
         self.model = self.dist.wrap_model(model)
         if self.dist.is_master:
             self.logger.info(f"Number of trainable weights: {self.num_weights}")
-            self.logger.info(self.model)
+            # self.logger.info(self.model)
 
     def _setup_training_components(self):
         self.loss = setup_loss(self.config)

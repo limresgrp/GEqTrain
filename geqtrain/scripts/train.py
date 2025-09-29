@@ -1,15 +1,11 @@
 """ Train a network. """
 import logging
 import argparse
-import shutil
 import os
 import torch.distributed as dist
-from pathlib import Path
-from os.path import isdir
-from geqtrain.utils import Config, load_file
+from geqtrain.utils import Config
 from geqtrain.scripts._logger import set_up_script_logger
 from geqtrain.train.trainer import Trainer
-from geqtrain.utils._global_options import apply_global_config
 
 
 def parse_command_line(args=None):
@@ -37,95 +33,29 @@ def parse_command_line(args=None):
         
     return config
 
-def check_for_config_updates(new_config):
-    """
-    Load a saved config, merge new parameters, enforce current runtime settings,
-    and return a clean, final Config object.
-    """
-    restart_file = f"{new_config['root']}/{new_config['run_name']}/trainer.pth"
-    saved_state = load_file(
-        filename=restart_file,
-        supported_formats=dict(torch=["pt", "pth"]),
-        enforced_format="torch",
-        map_location="cpu",
-        weights_only=False,
-    )
-
-    # Start with the dictionary from the saved run
-    final_config_dict = saved_state['config'].as_dict()
-    new_config_dict = new_config.as_dict()
-    
-    # 1. Update user-modifiable parameters
-    modifiable_params = [
-        "max_epochs", "learning_rate", "loss_coeffs", "metrics_components", "log_batch_freq",
-        "use_ema", "wandb", "dataset_list", "validation_dataset_list", "test_dataset_list",
-        "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
-        "device", "filepath", "ddp",
-    ]
-    logging.info("Checking for updated user-modifiable parameters...")
-    for key in new_config_dict:
-        if key in final_config_dict and new_config_dict[key] != final_config_dict[key]:
-            if key in modifiable_params:
-                logging.info(f'Updating parameter "{key}" from `{final_config_dict[key]}` to `{new_config_dict[key]}`')
-                final_config_dict[key] = new_config_dict[key]
-            else:
-                raise ValueError(f'Parameter "{key}" is not user-modifiable and cannot be changed during restart.')
-
-    # 2. Enforce critical runtime parameters from the new command
-    # This ensures DDP status, device, etc., are always from the new command.
-    runtime_params = ['ddp', 'device', 'find_unused_parameters']
-    logging.info("Enforcing current runtime parameters...")
-    for key in runtime_params:
-        if key in new_config_dict and new_config_dict[key] is not None:
-            if final_config_dict.get(key) != new_config_dict[key]:
-                 logging.info(f"Overwriting runtime parameter '{key}' with new value '{new_config_dict[key]}'")
-            final_config_dict[key] = new_config_dict[key]
-        else:
-            # If not specified in the new command, remove the old key
-            if key in final_config_dict:
-                logging.info(f"Removing stale runtime parameter '{key}' from loaded config.")
-                final_config_dict.pop(key)
-    
-    # 3. Create a brand new, clean Config object from the final dictionary
-    final_config = Config.from_dict(final_config_dict)
-    final_config.filepath = new_config.filepath
-            
-    return final_config
-
 def main(args=None):
     """The main entry point for training."""
     # 1. Parse config from current command line
     config = parse_command_line(args)
     set_up_script_logger(config.verbose)
 
-    # 2. Determine if it's a restart and create the final config
-    is_restart = isdir(f"{config.root}/{config.run_name}")
-    if is_restart:
-        logging.info("Found existing run directory, attempting to restart training.")
-        final_config = check_for_config_updates(config)
-        final_config['restart'] = True
-    else:
-        logging.info("Starting a fresh training run.")
-        final_config = config
-        final_config['restart'] = False
-    
-    # 3. Set up environment and global options
-    if final_config.get('wandb') and final_config.get('ddp'):
-        os.environ["WANDB_START_METHOD"] = "thread"
-    apply_global_config(final_config)
-
+    # 2. Initialize Trainer
     trainer = None
     try:
-        # 4. Initialize and run the Trainer
-        trainer = Trainer(config=final_config)
+        # 3. Initialize and run Trainer
+        # The Trainer's __init__ will handle:
+        #   a. Initializing DDP.
+        #   b. Rank 0 checking the directory.
+        #   c. Rank 0 broadcasting the result (`is_restart`).
+        #   d. All ranks loading or creating the final_config based on the broadcasted status.
+        trainer = Trainer(config=config)
+        final_config = trainer.config # Get the final, resolved config from the trainer
         
-        if trainer.dist.is_master and not is_restart:
-            config_path = trainer.output.generate_file("config.yaml")
-            shutil.copyfile(Path(config.filepath).resolve(), config_path)
-            logging.info(f"Copied config file to {config_path}")
+        # 4. Set up environment
+        if final_config.get('wandb') and final_config.get('ddp'):
+            os.environ["WANDB_START_METHOD"] = "thread"
 
         trainer.train()
-
     except KeyboardInterrupt:
         logging.warning("Training manually interrupted. Initiating synchronized shutdown.")
         raise
