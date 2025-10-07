@@ -10,6 +10,7 @@ from ._module import Module
 from ._goten_model import GotenModel
 from ._build import model_from_config
 from ._mace_model import MACEModel
+from ._recycle import RecycleModel
 
 __all__ = [
     NodeModel,
@@ -25,4 +26,5 @@ __all__ = [
     Module,
     GotenModel,
     MACEModel,
+    RecycleModel,
 ]

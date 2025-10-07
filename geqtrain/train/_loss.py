@@ -38,20 +38,83 @@ class LossWrapper:
     def __init__(self, func_name: str, params: dict = {}):
         self.func_name = func_name
         self.params = params
-        self.ignore_nan = params.get("ignore_nan", False)
-        self.node_level_filter = params.get("node_level_filter", "auto") # node filtering mode: 'auto', True, or False
 
-        torch_params = {
-            k: v for k, v in params.items() if k not in ["ignore_nan", "node_level_filter"]
-        }
+        self.ignore_nan = self.params.pop("ignore_nan", False)
+        self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
 
+        # New: Handle deep supervision parameters
+        self.supervision_weights = self.params.pop("supervision_weights", None)
+
+        if self.supervision_weights is not None:
+            if not isinstance(self.supervision_weights, list) or not all(isinstance(w, (int, float)) for w in self.supervision_weights):
+                raise ValueError(
+                    f"Invalid 'supervision_weights': {self.supervision_weights}. "
+                    "Must be a list of numbers (floats or ints)."
+                )
+            # Will be initialized as a tensor on the correct device in __call__
+            self._supervision_weights_tensor = None
+            self.supervision_output_dim = len(self.supervision_weights)
+        else:
+            self._supervision_weights_tensor = None
+            self.supervision_output_dim = None
+
+        torch_params = self.params  # Remaining params are for the torch loss function
+
+        # Instantiate the underlying torch loss function
         self.func, _ = instantiate_from_cls_name(
             torch.nn, class_name=func_name, prefix="",
             positional_args=dict(reduction="none"), optional_args=torch_params, all_args={},
         )
 
     def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
-        pred_key, ref_key = self._prepare_tensors(pred, ref, key)
+        # If using deep supervision, the prediction is stored under a different key
+        if self.supervision_weights is not None:
+            pred_key_name = key + AtomicDataDict.DEEP_SUPERVISION_SUFFIX
+        else:
+            pred_key_name = key
+
+        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key)
+        
+        # Initialize supervision weights tensor on the correct device if needed
+        if self.supervision_output_dim is not None and self._supervision_weights_tensor is None:
+            self._supervision_weights_tensor = torch.tensor(
+                self.supervision_weights,
+                device=pred_key.device,
+                dtype=pred_key.dtype
+            )
+
+        # 1. Handle supervision dimension and weights
+        if self.supervision_output_dim is not None:
+            # Check if pred_key has the expected supervision dimension
+            if pred_key.dim() < 1 or pred_key.shape[-1] != self.supervision_output_dim:
+                raise ValueError(
+                    f"Prediction for key '{pred_key_name}' has shape {pred_key.shape}, "
+                    f"but the number of supervision weights is {self.supervision_output_dim}. "
+                    "The last dimension of the prediction must match the number of weights."
+                )
+
+            # Reshape ref_key to match pred_key's supervision dimension
+            # Example: pred_key [N, F, K], ref_key [N, F] -> ref_key [N, F, 1] -> broadcast to [N, F, K]
+            if ref_key.dim() == pred_key.dim() - 1: # If ref_key is missing the last supervision dim
+                ref_key = ref_key.unsqueeze(-1).expand_as(pred_key)
+            elif ref_key.dim() == pred_key.dim(): # If ref_key already has the same number of dims
+                if ref_key.shape[-1] == 1: # If ref_key is [..., 1], expand it
+                    ref_key = ref_key.expand_as(pred_key)
+                elif ref_key.shape[-1] != self.supervision_output_dim: # If ref_key has a different last dim, it's an error
+                    raise ValueError(
+                        f"Reference for key '{key}' has shape {ref_key.shape}, "
+                        f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
+                        f"and prediction shape {pred_key.shape}."
+                    )
+            else: # If ref_key has a completely different number of dimensions
+                 raise ValueError(
+                    f"Reference for key '{key}' has shape {ref_key.shape}, "
+                    f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
+                    f"and prediction shape {pred_key.shape}."
+                )
+        else: # No supervision, ensure shapes match for non-supervision case
+            if ref_key.shape != pred_key.shape:
+                ref_key = ref_key.reshape(pred_key.shape)
 
         # 1. Determine if node-level filtering should be applied
         apply_filter = False
@@ -71,9 +134,6 @@ class LossWrapper:
             if ref_key.shape[0] == num_atoms:
                 ref_key = ref_key[center_nodes_idx]
 
-        if ref_key.shape != pred_key.shape:
-            ref_key = ref_key.reshape(pred_key.shape)
-
         # 3. Handle NaNs (on the potentially filtered tensors)
         if self.ignore_nan:
             not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
@@ -82,21 +142,30 @@ class LossWrapper:
 
             loss = self.func(pred_key, ref_key)
             loss = loss * not_nan_mask
+            
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor # Apply supervision weights
+                loss = loss.sum(dim=-1) # Sum over supervision dimension
+                not_nan_mask_sum = not_nan_mask.sum(dim=-1) # Sum mask over supervision dimension
+                if mean: return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
+                loss[not_nan_mask_sum == 0] = torch.nan # Mark samples with no valid predictions as nan
+                return loss
 
-            if mean:
-                return loss.sum() / not_nan_mask.sum().clamp(min=1)
-
-            loss[~not_nan_mask] = torch.nan
+            if mean: return loss.sum() / not_nan_mask.sum().clamp(min=1)
+            loss[~not_nan_mask] = torch.nan # Mark samples with no valid predictions as nan
             return loss
         else:
             loss = self.func(pred_key, ref_key)
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor # Apply recycling weights
+                loss = loss.sum(dim=-1) # Sum over recycling dimension
             return loss.mean() if mean else loss
 
-    def _prepare_tensors(self, pred: dict, ref: dict, key: str):
-        pred_key = pred.get(key)
-        assert isinstance(pred_key, torch.Tensor), f"Prediction for '{key}' not a tensor."
-        ref_key = ref.get(key)
-        assert isinstance(ref_key, torch.Tensor), f"Reference for '{key}' not a tensor."
+    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str):
+        pred_key = pred.get(pred_key_name)
+        assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
+        ref_key = ref.get(ref_key_name)
+        assert isinstance(ref_key, torch.Tensor), f"Reference for '{ref_key_name}' not a tensor."
         return pred_key, ref_key
 
     def __str__(self):

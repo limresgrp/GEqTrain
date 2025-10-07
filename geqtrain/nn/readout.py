@@ -30,8 +30,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         self,
         field: str,
         irreps_in,
-        out_field: Optional[str] = None,
-        conditioning_field: Optional[str] = None,
+        out_field: Optional[str] = None, # The key where the output will be stored
+        conditioning_fields: Optional[List[str]] = None, # List of keys to use for conditioning
         out_irreps: Union[o3.Irreps, str, None] = None,
         strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
@@ -44,7 +44,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         self.field = field
         self.out_field = out_field or self.field
-        self.conditioning_field = conditioning_field
+        self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         self.ignore_amp = ignore_amp
         self.resnet = resnet
 
@@ -59,9 +59,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 )
 
         required_irreps = [field]
-        if self.conditioning_field is not None:
-            required_irreps.append(self.conditioning_field)
-            
+        required_irreps.extend(self.conditioning_fields)
+
         self._init_irreps(
             irreps_in=irreps_in,
             required_irreps_in=required_irreps,
@@ -79,6 +78,18 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             if self.irreps_in[self.out_field] != out_irreps:
                  raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
             self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0]))
+        
+        # --- Conditioning Fields Validation and Dimension Calculation ---
+        self.total_conditioning_dim = 0
+        for cond_field in self.conditioning_fields:
+            if cond_field not in self.irreps_in:
+                raise ValueError(f"Conditioning field '{cond_field}' not found in irreps_in.")
+            cond_irreps = self.irreps_in[cond_field]
+            if not all(ir.l == 0 for _, ir in cond_irreps):
+                raise ValueError(f"Conditioning field '{cond_field}' must have scalar (0e) irreps, but got {cond_irreps}.")
+            self.total_conditioning_dim += cond_irreps.dim
+
+        has_conditioning = self.total_conditioning_dim > 0
 
         # --- Feature Properties ---
         self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
@@ -88,16 +99,15 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         self.split_index = sum(mul for mul, ir in in_irreps if ir in [SCALAR, PSEUDO_SCALAR])
 
         # --- Conditioning Layers ---
-        self.conditioner = None
-        if self.conditioning_field is not None and self.n_scalars_in > 0:
-            conditioning_dim = self.irreps_in[self.conditioning_field].dim
+        self.conditioner = nn.ModuleDict()
+        if has_conditioning and self.n_scalars_in > 0:
             conditioner_modules = {
-                "film1": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
+                "film1": FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
                 "fc1": readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.n_scalars_in, **readout_latent_kwargs),
-                "film2": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
+                "film2": FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
             }
             if self.has_invariant_output:
-                conditioner_modules["film_scalar"] = FiLMFunction(conditioning_dim, [], self.n_scalars_out, mlp_nonlinearity=None)
+                conditioner_modules["film_scalar"] = FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_out, mlp_nonlinearity=None)
             self.conditioner = nn.ModuleDict(conditioner_modules)
 
         # --- Invariant (Scalar) Readout ---
@@ -133,7 +143,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
                 self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
                 if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
+                     self.conditioner["film_vectorial"] = FiLMFunction(self.total_conditioning_dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
 
             self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
         elif strict_irreps and in_irreps.dim > self.n_scalars_in:
@@ -167,18 +177,22 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         
         scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
 
-        if self.conditioner is not None and self.conditioning_field is not None:
-            conditioning_tensor = data[self.conditioning_field]
+        if self.conditioner and self.conditioning_fields:
+            # Concatenate all conditioning tensors
+            conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
+            conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
+
             scalars = self.conditioner["film1"](scalars, conditioning_tensor)
             scalars = self.conditioner["fc1"](scalars)
             scalars = self.conditioner["film2"](scalars, conditioning_tensor)
+
 
         out_scalars_list = []
         if self.has_invariant_output:
             assert self.inv_readout is not None
             current_out_scalars = self.inv_readout(scalars)
             if self.conditioner is not None and "film_scalar" in self.conditioner:
-                current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, data[self.conditioning_field])
+                current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, conditioning_tensor)
             out_scalars_list.append(current_out_scalars)
 
         out_equiv_list = []
@@ -198,8 +212,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                     assert self.eq_readout is not None, "eq_readout was not initialized for this configuration."
                     assert self.weights_emb is not None
                     weights = self.weights_emb(scalars)
-                    if self.conditioner is not None:
-                        weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
+                    if self.conditioner and "film_vectorial" in self.conditioner:
+                        weights = self.conditioner["film_vectorial"](weights, conditioning_tensor)
                     eq_features_out = self.eq_readout(eq_features_in, weights)
                 assert self.reshape_back_features is not None
                 out_equiv_list.append(self.reshape_back_features(eq_features_out))

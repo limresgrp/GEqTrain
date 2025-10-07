@@ -82,6 +82,10 @@ GRAPH_ATTRS_KEY:         Final[str] = "graph_attrs"         # graph scalar attri
 # [n_graphs, dim]
 GRAPH_FEATURES_KEY:      Final[str] = "graph_features"      # processed version of GRAPH_ATTRS_KEY
 
+# (1)
+RECYCLE_STEP_KEY:        Final[str] = "recycle_step"        # step of recycling [integer]
+DEEP_SUPERVISION_SUFFIX: Final[str] = "_deep_supervision"   # suffix for deep supervision outputs
+
 # Make a list of allowed keys
 ALLOWED_KEYS: List[str] = [
     getattr(sys.modules[__name__], k)
