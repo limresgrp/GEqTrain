@@ -132,7 +132,11 @@ class Config(object):
     __setattr__ = __setitem__
 
     def __getattr__(self, key):
-        return self.__getitem__(key)
+        try:
+            return self.__getitem__(key)
+        except KeyError:
+            # Raise AttributeError to allow normal attribute lookup to continue for methods like __deepcopy__
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{key}'")
 
     def __contains__(self, key):
         return key in self._items
