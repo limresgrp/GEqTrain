@@ -2,6 +2,7 @@
 import logging
 from pathlib import Path
 from os.path import isfile
+from typing import Dict, Tuple
 
 import torch
 
@@ -178,3 +179,38 @@ class CheckpointHandler:
         model.eval()
         
         return model, config
+    
+    @staticmethod
+    def load_model(model_path_str: str, device="cpu") -> Tuple[torch.jit.ScriptModule, Config, Dict]:
+        """
+        Loads a model, intelligently handling both deployed models and training checkpoints.
+
+        Returns:
+            A tuple containing:
+            - The loaded PyTorch model (torch.jit.ScriptModule).
+            - The model's configuration (Config object).
+            - A dictionary of metadata (empty if loaded from training).
+        """
+        from geqtrain.utils.deploy import _ALL_METADATA_KEYS, CONFIG_KEY
+        metadata = {k: "" for k in _ALL_METADATA_KEYS}
+        try:
+            # First, try to load as a deployed model
+            import yaml
+            from geqtrain.utils.deploy import load_deployed_model
+            model, metadata = load_deployed_model(model_path_str, device=device, freeze=False, extra_metadata=metadata)
+            # The config is stored as a YAML string within the metadata
+            model_config_str = metadata.get(CONFIG_KEY, "{}")
+            model_config = Config(yaml.safe_load(model_config_str))
+            logging.info("Successfully loaded deployed model and its metadata.")
+        except (ValueError, RuntimeError, FileNotFoundError): 
+            # If it fails, fall back to loading from a training session directory
+            logging.warning("Could not load as a deployed model. Falling back to loading from a training session.")
+            from geqtrain.train.components.checkpointing import CheckpointHandler
+            model_path = Path(model_path_str)
+            model, model_config = CheckpointHandler.load_model_from_training_session(
+                traindir=model_path.parent, 
+                model_name=model_path.name, 
+                device=device,
+            )
+            metadata = {} # No metadata available for simple training checkpoints
+        return model, model_config, metadata

@@ -201,7 +201,6 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                     if self.conditioner is not None:
                         weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
                     eq_features_out = self.eq_readout(eq_features_in, weights)
-                
                 assert self.reshape_back_features is not None
                 out_equiv_list.append(self.reshape_back_features(eq_features_out))
 
