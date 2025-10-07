@@ -65,107 +65,162 @@ class LossWrapper:
             torch.nn, class_name=func_name, prefix="",
             positional_args=dict(reduction="none"), optional_args=torch_params, all_args={},
         )
-
-    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
-        # If using deep supervision, the prediction is stored under a different key
+    
+    def _get_pred_key_name(self, base_key: str) -> str:
+        """Determines the correct prediction key based on whether deep supervision is used."""
         if self.supervision_weights is not None:
-            pred_key_name = key + AtomicDataDict.DEEP_SUPERVISION_SUFFIX
-        else:
-            pred_key_name = key
+            return base_key + AtomicDataDict.DEEP_SUPERVISION_SUFFIX
+        return base_key
 
-        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key)
-        
-        # Initialize supervision weights tensor on the correct device if needed
+    def _initialize_supervision_weights(self, device, dtype):
+        """Initializes the supervision weights tensor on the correct device, if not already done."""
         if self.supervision_output_dim is not None and self._supervision_weights_tensor is None:
             self._supervision_weights_tensor = torch.tensor(
                 self.supervision_weights,
-                device=pred_key.device,
-                dtype=pred_key.dtype
+                device=device,
+                dtype=dtype
             )
 
-        # 1. Handle supervision dimension and weights
+    def _handle_supervision_shapes(self, pred_key: torch.Tensor, ref_key: torch.Tensor, pred_key_name: str, ref_key_name: str) -> torch.Tensor:
+        """Ensures reference tensor shape is compatible with the prediction tensor, especially for deep supervision."""
         if self.supervision_output_dim is not None:
-            # Check if pred_key has the expected supervision dimension
             if pred_key.dim() < 1 or pred_key.shape[-1] != self.supervision_output_dim:
                 raise ValueError(
                     f"Prediction for key '{pred_key_name}' has shape {pred_key.shape}, "
                     f"but the number of supervision weights is {self.supervision_output_dim}. "
                     "The last dimension of the prediction must match the number of weights."
                 )
-
-            # Reshape ref_key to match pred_key's supervision dimension
-            # Example: pred_key [N, F, K], ref_key [N, F] -> ref_key [N, F, 1] -> broadcast to [N, F, K]
-            if ref_key.dim() == pred_key.dim() - 1: # If ref_key is missing the last supervision dim
+            if ref_key.dim() == pred_key.dim() - 1:
                 ref_key = ref_key.unsqueeze(-1).expand_as(pred_key)
-            elif ref_key.dim() == pred_key.dim(): # If ref_key already has the same number of dims
-                if ref_key.shape[-1] == 1: # If ref_key is [..., 1], expand it
+            elif ref_key.dim() == pred_key.dim():
+                if ref_key.shape[-1] == 1:
                     ref_key = ref_key.expand_as(pred_key)
-                elif ref_key.shape[-1] != self.supervision_output_dim: # If ref_key has a different last dim, it's an error
+                elif ref_key.shape[-1] != self.supervision_output_dim:
                     raise ValueError(
-                        f"Reference for key '{key}' has shape {ref_key.shape}, "
+                        f"Reference for key '{ref_key_name}' has shape {ref_key.shape}, "
                         f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
                         f"and prediction shape {pred_key.shape}."
                     )
-            else: # If ref_key has a completely different number of dimensions
-                 raise ValueError(
-                    f"Reference for key '{key}' has shape {ref_key.shape}, "
+            else:
+                raise ValueError(
+                    f"Reference for key '{ref_key_name}' has shape {ref_key.shape}, "
                     f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
                     f"and prediction shape {pred_key.shape}."
                 )
-        else: # No supervision, ensure shapes match for non-supervision case
+        else:
             if ref_key.shape != pred_key.shape:
                 ref_key = ref_key.reshape(pred_key.shape)
+        return ref_key
 
-        # 1. Determine if node-level filtering should be applied
+    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> (torch.Tensor, torch.Tensor):
+        """Filters tensors to include only center nodes if the key is a node-level property."""
         apply_filter = False
         if self.node_level_filter is True:
             apply_filter = True
         elif self.node_level_filter == 'auto' and key in _NODE_FIELDS:
             apply_filter = True
 
-        # 2. Apply the filter if required
         if apply_filter:
-            num_atoms = pred.get(AtomicDataDict.POSITIONS_KEY).shape[0]
-            # Get the unique indices of nodes that are the center of an edge
-            center_nodes_idx = pred[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-            # Safety check: only filter tensors that are per-atom
+            num_atoms = data.get(AtomicDataDict.POSITIONS_KEY).shape[0]
+            center_nodes_idx = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
             if pred_key.shape[0] == num_atoms:
                 pred_key = pred_key[center_nodes_idx]
             if ref_key.shape[0] == num_atoms:
                 ref_key = ref_key[center_nodes_idx]
+        return pred_key, ref_key
 
-        # 3. Handle NaNs (on the potentially filtered tensors)
+    def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
+        """Computes the loss, handling NaNs and applying supervision weights."""
         if self.ignore_nan:
             not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
             pred_key = torch.nan_to_num(pred_key, nan=0.0)
             ref_key = torch.nan_to_num(ref_key, nan=0.0)
-
             loss = self.func(pred_key, ref_key)
             loss = loss * not_nan_mask
-            
+
             if self.supervision_output_dim is not None:
-                loss = loss * self._supervision_weights_tensor # Apply supervision weights
-                loss = loss.sum(dim=-1) # Sum over supervision dimension
-                not_nan_mask_sum = not_nan_mask.sum(dim=-1) # Sum mask over supervision dimension
-                if mean: return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
-                loss[not_nan_mask_sum == 0] = torch.nan # Mark samples with no valid predictions as nan
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
+                not_nan_mask_sum = not_nan_mask.sum(dim=-1)
+                if mean:
+                    return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
+                loss[not_nan_mask_sum == 0] = torch.nan
                 return loss
 
-            if mean: return loss.sum() / not_nan_mask.sum().clamp(min=1)
-            loss[~not_nan_mask] = torch.nan # Mark samples with no valid predictions as nan
+            if mean:
+                return loss.sum() / not_nan_mask.sum().clamp(min=1)
+            loss[~not_nan_mask] = torch.nan
             return loss
         else:
             loss = self.func(pred_key, ref_key)
             if self.supervision_output_dim is not None:
-                loss = loss * self._supervision_weights_tensor # Apply recycling weights
-                loss = loss.sum(dim=-1) # Sum over recycling dimension
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
             return loss.mean() if mean else loss
 
-    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str):
+    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
+        # 1. Determine prediction key and prepare tensors
+        pred_key_name = self._get_pred_key_name(key)
+        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean)
+
+        # 2. Initialize supervision weights if needed
+        self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
+
+        # 3. Ensure reference and prediction shapes are compatible
+        ref_key = self._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
+
+        # 4. Apply node-level filtering if necessary
+        pred_key, ref_key = self._apply_node_filter(pred_key, ref_key, pred, key)
+
+        # 5. Calculate and return the loss
+        return self._calculate_loss(pred_key, ref_key, mean)
+
+    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool):
         pred_key = pred.get(pred_key_name)
         assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
         ref_key = ref.get(ref_key_name)
         assert isinstance(ref_key, torch.Tensor), f"Reference for '{ref_key_name}' not a tensor."
+
+        # De-standardization for metrics (when mean=False)
+        if not mean:
+            # Define prefixes for standardization keys
+            MEAN_KEY_PREFIX = "_mean_"
+            STD_KEY_PREFIX = "_std_"
+            PER_TYPE_PREFIX = "per_type"
+            GLOBAL_PREFIX = "global"
+
+            # Check for per-type standardization stats
+            per_type_mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{ref_key_name}"
+            per_type_std_key = f"{STD_KEY_PREFIX}.{PER_TYPE_PREFIX}.{ref_key_name}"
+            
+            # Check for global standardization stats
+            global_mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
+            global_std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
+
+            if per_type_mean_key in ref and per_type_std_key in ref:
+                mean = ref[per_type_mean_key].to(pred_key.device)
+                std = ref[per_type_std_key].to(pred_key.device)
+                node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+
+                # Prepare for broadcasting by adding necessary dimensions
+                mean_bc = mean[node_types].view(-1, *([1] * (pred_key.dim() - 1)))
+                std_bc = std[node_types].view(-1, *([1] * (pred_key.dim() - 1)))
+
+                pred_key = pred_key * std_bc + mean_bc
+                
+                # Also de-standardize ref_key, preparing for broadcasting
+                mean_bc_ref = mean[node_types].view(-1, *([1] * (ref_key.dim() - 1)))
+                std_bc_ref = std[node_types].view(-1, *([1] * (ref_key.dim() - 1)))
+                ref_key = ref_key * std_bc_ref + mean_bc_ref
+                
+            elif global_mean_key in ref and global_std_key in ref:
+                mean = ref[global_mean_key].item()
+                std = ref[global_std_key].item()
+                
+                if std > 1e-8:
+                    pred_key = pred_key * std + mean
+                    ref_key = ref_key * std + mean
+
         return pred_key, ref_key
 
     def __str__(self):
