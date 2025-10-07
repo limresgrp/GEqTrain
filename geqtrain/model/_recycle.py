@@ -150,7 +150,6 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
         deep_supervision_predictions = []
         final_prediction = None
         pos = data[AtomicDataDict.POSITIONS_KEY]
-        num_atoms = pos.shape[0]
         device = pos.device
 
         for k in range(self.recycling_steps):

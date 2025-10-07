@@ -127,3 +127,72 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
         data[self.out_field] = node_features
 
         return data
+
+
+@compile_mode("script")
+class PerTypeUnscaleModule(GraphModuleMixin, torch.nn.Module):
+    """
+    PerTypeUnscaleModule applies the inverse of PerTypeScaleModule.
+    It un-scales a specified field of the input data by first subtracting a bias
+    and then dividing by a standard deviation.
+
+    The operation is only performed if the specified `field` is present in the data.
+    This is useful for unscaling model outputs that were trained on scaled targets.
+
+    Args:
+        field (str): The field in the input data to be un-scaled.
+        out_field (str): The field where the output data will be stored.
+        num_types (int): The number of types for the per-type bias and std.
+        per_type_bias (Optional[List], optional): The per-type bias values. Defaults to None.
+        per_type_std (Optional[List], optional): The per-type standard deviation values. Defaults to None.
+    """
+
+    def __init__(
+        self,
+        field: str,
+        num_types: int,
+        out_field: Optional[str] = None,
+        per_type_bias: Optional[List] = None,
+        per_type_std: Optional[List] = None,
+        # Other:
+        irreps_in=None,
+    ):
+        super().__init__()
+        self.field = field
+        self.out_field = out_field if out_field is not None else field
+
+        if per_type_bias is not None:
+            assert len(per_type_bias) == num_types
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
+            self.register_buffer("per_type_bias", per_type_bias.reshape(num_types, -1))
+        else:
+            self.per_type_bias = None
+
+        if per_type_std is not None:
+            assert len(per_type_std) == num_types
+            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
+            # Add a small epsilon to prevent division by zero
+            self.register_buffer("per_type_std", per_type_std.reshape(num_types, -1) + 1e-8)
+        else:
+            self.per_type_std = None
+
+        self._init_irreps(irreps_in=irreps_in)
+        self.irreps_out.update({self.out_field: Irreps("0e")})
+
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        if self.field not in data:
+            return data  # No-op if the field to unscale is not present
+
+        node_features = data[self.field]
+        if torch.all(node_features == 0):
+            return data  # No-op if the field is the initialized zero tensor
+        edge_center = torch.unique(data[AtomicDataDict.EDGE_INDEX_KEY][0])
+        center_species = data[AtomicDataDict.NODE_TYPE_KEY][edge_center].squeeze(dim=-1)
+
+        if self.per_type_bias is not None:
+            node_features[edge_center] -= self.per_type_bias[center_species]
+        if self.per_type_std is not None:
+            node_features[edge_center] /= self.per_type_std[center_species]
+
+        data[self.out_field] = node_features
+        return data

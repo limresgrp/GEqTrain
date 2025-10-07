@@ -10,7 +10,7 @@ from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
 from .readout import ReadoutModule, AttentionReadoutModule
-from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
+from ._scale import PerNodeAttrsScaleModule, PerTypeUnscaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 from ._heads import WeightedTP, TransformerBlock
@@ -39,6 +39,7 @@ __all__ = [
     ReadoutModule,
     AttentionReadoutModule,
     PerNodeAttrsScaleModule,
+    PerTypeUnscaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
     FiLMFunction,
