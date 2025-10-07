@@ -101,7 +101,7 @@ Start an interactive session within the chosen containerized environment. This g
 
     ```bash
     # Example: Start a shell in the 'pytorch/v2.6.0:v1' environment
-    uenv run --view=default pytorch/v2.6.0:v1 -- bash
+    uenv run --view=default pytorch/v2.6.0:v1 bash
     ```
 
 5. **Create a Local Python Virtual Environment**:

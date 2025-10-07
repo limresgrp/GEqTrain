@@ -148,10 +148,14 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
             irreps_out[self.eq_out_field] = eq_irreps
         self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
 
-    #! ----------- COMMENT TO JIT COMPILE --------------- #
-    #@torch.amp.autocast('cuda', enabled=False) # embeddings always kept to high precision, regardless of AMP
     # --------------------------------------------------- #
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        if not torch.jit.is_scripting():
+            with torch.amp.autocast('cuda', enabled=False): # embeddings always kept to high precision, regardless of AMP
+                return self._forward_impl(data)
+        return self._forward_impl(data)
+
+    def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         out = []
         for attribute_name, emb_layer in self._categorical_attrs_modules.items():
             x = data[attribute_name].squeeze(-1)

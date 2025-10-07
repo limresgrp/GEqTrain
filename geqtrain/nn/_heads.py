@@ -312,10 +312,14 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         padded_edge_attrs = self.rearrange(padded_edge_attrs)
         return padded_edge_attrs
 
-    #! ----------- COMMENT TO JIT COMPILE --------------- #
-    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
     # --------------------------------------------------- #
-    def forward(self, features, data: AtomicDataDict.Type):
+    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+        if not torch.jit.is_scripting():
+            with torch.amp.autocast('cuda', enabled=False): # attention always kept to high precision, regardless of AMP
+                return self._forward_impl(data)
+        return self._forward_impl(data)
+
+    def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
         attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
