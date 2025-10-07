@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Iterator, List, Tuple, Callable, Any, Sequence, Union, Mapping, Optional
 from collections import OrderedDict
 from torch._jit_internal import _copy_to_script_wrapper
@@ -52,6 +53,7 @@ class GraphModuleMixin:
         # Coerce
         irreps_in = {} if irreps_in is None else irreps_in
         irreps_in = AtomicDataDict._fix_irreps_dict(irreps_in)
+        _dry_run_mode = irreps_in.pop("_dry_run_mode", False)
         # positions are *always* 1o, and always present
         if AtomicDataDict.POSITIONS_KEY in irreps_in:
             if irreps_in[AtomicDataDict.POSITIONS_KEY] != o3.Irreps("1x1o"):
@@ -80,9 +82,15 @@ class GraphModuleMixin:
         # with required_irreps_in
         for k in required_irreps_in:
             if k not in irreps_in:
-                raise ValueError(
-                    f"This {type(self)} requires field '{k}' to be in irreps_in"
-                )
+                if _dry_run_mode:
+                    # In dry run, add a placeholder and continue
+                    irreps_in[k] = o3.Irreps("0e")
+                    logging.warning(f"In dry run, required field '{k}' was not in `irreps_in` for {type(self).__name__}. Using placeholder '0e'.")
+                else:
+                    # In final run, this is a fatal error
+                    raise ValueError(
+                        f"This {type(self).__name__} requires field '{k}' to be in `irreps_in`, but it was not found. Available keys: {list(irreps_in.keys())}"
+                    )
         # Save stuff
         self.irreps_in = irreps_in
 
@@ -201,7 +209,9 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
             for name, submodule in module.named_children():
                 safe_name = name.replace('.', '_')  # Replace dots in names
                 # If the submodule is another Sequential, recurse into it
-                if isinstance(submodule, SequentialGraphNetwork):
+                # unless it is a wrapper model that should not be flattened.
+                is_wrapper = getattr(submodule, "_is_wrapper", False)
+                if isinstance(submodule, SequentialGraphNetwork) and not is_wrapper:
                     recursive_flatten(submodule, prefix)
                 else:
                     # Add non-sequential modules to the flat dictionary
@@ -233,7 +243,6 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
         cls,
         shared_params: Mapping,
         layers: Dict[str, Union[Callable, Tuple[Callable, Dict[str, Any]]]],
-        irreps_in: Optional[dict] = None,
     ):
         r"""Construct a ``SequentialGraphModule`` of modules built from a shared set of parameters.
 
@@ -250,7 +259,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                   1. A callable (such as a class or function) that can be used to ``instantiate`` a module for that layer
                   2. A tuple of such a callable and a dictionary mapping parameter names to values. The given dictionary of parameters will override for this layer values found in ``shared_params``.
                 Options 1. and 2. can be mixed.
-            irreps_in (optional dict): ``irreps_in`` for the first module in the sequence.
+
 
         Returns:
             The constructed SequentialGraphNetwork.
@@ -283,7 +292,7 @@ class SequentialGraphNetwork(GraphModuleMixin, torch.nn.Sequential):
                             irreps_in=(
                                 built_modules[-1].irreps_out
                                 if len(built_modules) > 0
-                                else irreps_in
+                                else shared_params.get("irreps_in", None)
                             )
                         )
                     ),

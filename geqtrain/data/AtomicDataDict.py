@@ -31,11 +31,11 @@ def validate_keys(keys, graph_required=True):
             raise KeyError("At least pos and edge_index must be supplied")
 
 
-_SPECIAL_IRREPS = [None]
+_SPECIAL_IRREPS = ['_dry_run_mode', None]
 
 
 def _fix_irreps_dict(d: Dict[str, Any]):
-    return {k: (i if i in _SPECIAL_IRREPS else o3.Irreps(i)) for k, i in d.items()}
+    return {k: (i if i in _SPECIAL_IRREPS or k in _SPECIAL_IRREPS else o3.Irreps(i)) for k, i in d.items()}
 
 
 def _irreps_compatible(ir1: Dict[str, o3.Irreps], ir2: Dict[str, o3.Irreps]):
