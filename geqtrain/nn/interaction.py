@@ -26,6 +26,7 @@ from geqtrain.utils.tp_utils import SCALAR, PSEUDO_SCALAR, complete_parities, tp
 from geqtrain.nn.cutoffs import tanh_cutoff
 from geqtrain.nn._film import FiLMFunction
 
+from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn.AdaLN import AdaLN
@@ -157,7 +158,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         env_embed       = functools.partial(env_embed,       **env_embed_kwargs)
 
         env_embed_irreps     = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
-        edge_features_irreps = complete_parities(env_embed_irreps) if parity == "o3_full" else env_embed_irreps
+        # edge_features_irreps = complete_parities(env_embed_irreps) if parity == "o3_full" else env_embed_irreps # ! add even+odd parities
+        edge_features_irreps = env_embed_irreps
         assert (edge_features_irreps[0].ir == SCALAR) or (edge_features_irreps[0].ir == PSEUDO_SCALAR), "edge_features_irreps must start with scalars"
         
         out_irreps, output_ls, output_mul = process_out_irreps(
@@ -224,8 +226,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # so the first entry is the ratio for the latent resnet of the first and second layers, etc.
         # e.g. if there are 3 layers, there are 2 ratios: l1:l2, l2:l3
         self._latent_resnet_update_params = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=torch.float32))
-        self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
-        self.register_buffer("_zero", torch.as_tensor(0.0))
+        self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max, dtype=torch.float32))
+        self.register_buffer("_zero", torch.as_tensor(0.0, dtype=torch.float32))
 
         # - Start Interaction Layers - #
         self.interaction_layers = torch.nn.ModuleList([])
@@ -266,30 +268,28 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # - End Interaction Layers - #
 
         # Equivariant out features
-        self.reshape_back_features = inverse_reshape_irreps(out_irreps)
-        self.has_scalar_output = False
-        self.final_latent_mlp, self.final_readout_mlp, self.post_norm = None, None, None
+        self.final_processor = None
         self.out_n_scalars = (out_irreps.count(SCALAR) + out_irreps.count(PSEUDO_SCALAR)) // self.out_multiplicity
-        if self.out_n_scalars > 0:
-            self.has_scalar_output = True
-            # Invariant out features
-            self.final_latent_mlp = latent(
-                # embedded latent invariants from the previous layer(s) + invariants extracted from the last layer's TP
-                mlp_input_dimension=(self.latent_dim + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]),
-                mlp_output_dimension=self.latent_dim,
-            )
+        self.has_scalar_output = self.out_n_scalars > 0
 
-            self.final_readout_mlp = latent(
-                mlp_input_dimension=self.latent_dim,
-                mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
-            )
+        # Build the irreps string for the final processor's input robustly
+        irreps_str_parts = []
+        # Scalar part
+        if self.latent_dim > 0:
+            irreps_str_parts.append(f"{self.latent_dim}x0e")
+        # Equivariant part
+        eq_part_irreps = o3.Irreps([(mul, ir) for mul, ir in linear_out_irreps if ir.l > 0])
+        if eq_part_irreps.dim > 0:
+            irreps_str_parts.append(str(eq_part_irreps))
 
-            self.rbf_embedder = None
-            if self.learn_cutoff_bias:
-                self.rbf_embedder = AdaLN(self.latent_dim, self.edge_radial_emb_dim)
-            self.post_norm = None
-            if self.use_post_norm:
-                self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
+        final_processor_in_irreps = o3.Irreps("+".join(irreps_str_parts))
+
+        self.final_processor = EquivariantScalarMLP(
+            in_irreps=final_processor_in_irreps,
+            out_irreps=out_irreps,
+            latent_module=latent,
+            latent_kwargs={}, # Using default latent kwargs for the final block
+        )
 
         # - End build modules - #
         out_feat_elems = (irr.ir.dim for irr in out_irreps)
@@ -339,38 +339,17 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # --- final layer --- #
 
-        # - Output equivariant values - #
+        # At this point, `latents` are the final scalar features and `eq_features` are the final equivariant features.
+        # We can now use EquivariantScalarMLP to produce the final output.
+        assert self.final_processor is not None
+
+        # Normalize final equivariant features before processing
         if eq_features is not None:
             eq_features = self.last_eq_norm(eq_features)
-            out_features[..., self.out_n_scalars:] = eq_features
-
-        out_features = self.reshape_back_features(out_features)
-
-        # - Output invariant values - #
-        if self.has_scalar_output:
-            # update latents
-            new_latents = self.final_latent_mlp(edge_invariants)
-
-            # apply cutoff bias
-            if self.learn_cutoff_bias:
-                assert self.rbf_embedder is not None
-                new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
-            else:
-                cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
-                half = new_latents.size(1) // 2
-                new_latents = torch.cat([
-                    new_latents[:, :half] * cutoff_coeffs.unsqueeze(-1),
-                    new_latents[:, half:]
-                ], dim=1)
-
-            if self.use_post_norm:
-                assert self.post_norm is not None
-                new_latents = self.post_norm(new_latents)
-            latents = apply_residual_stream(False, latents, new_latents, layer_update_coefficients[layer_index], active_edges)
-
-            # last update on residued features
-            latents = self.final_readout_mlp(latents)
-            out_features[..., :self.out_multiplicity * self.out_n_scalars] = latents
+            final_features_in = torch.cat([latents, eq_features], dim=-1)
+        else:
+            final_features_in = latents
+        out_features = self.final_processor(final_features_in)
 
         data[self.out_field] = out_features
         if self.debug and wandb.run is not None:

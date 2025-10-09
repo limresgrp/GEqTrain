@@ -315,6 +315,10 @@ class GrokFastCallback(Callback):
             self.trainer.grads = gradfilter_ema(self.trainer.model, grads=self.trainer.grads)
 
 class ActivationNormCallback(Callback):
+    PARITY = {
+         1: 'e',
+        -1: 'o'
+    }
     """Tracks the norm of node activations at the end of a training batch."""
     def on_step_end(self, batch_output, summary: EpochSummary, **kwargs):
         # This callback only runs during training and at the specified frequency
@@ -330,14 +334,19 @@ class ActivationNormCallback(Callback):
             # The model might be wrapped in DDP, access the module
             model_to_inspect = model.module if self.trainer.dist.is_distributed else model
 
-            irreps_as_dict = {ir.l:mul for (mul, ir) in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
+            output_irreps = model_to_inspect.irreps_out.get(AtomicDataDict.NODE_FEATURES_KEY)
+            if output_irreps is None:
+                return # Nothing to do if the key is not in the output irreps
+
             node_reprs = batch_output[AtomicDataDict.NODE_FEATURES_KEY]
-            split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
-            reshapers = [reshape_irreps(Irreps(str(ir))) for ir in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
+
+            # Correctly calculate split sizes and reshapers directly from the Irreps object
+            split_sizes = [mul * ir.dim for mul, ir in output_irreps]
+            reshapers = [reshape_irreps(Irreps(f"{mul}x{ir.l}{self.PARITY[ir.p]}")) for mul, ir in output_irreps]
             reprs = torch.split(node_reprs, split_sizes, dim=1)
             
-            for l, repr_ in enumerate(reprs):
-                norm = torch.mean(torch.norm(reshapers[l](repr_).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                batch_node_norms[f'node_repr_l_{l}_mean'] = norm
+            for i, (repr_chunk, (mul, ir)) in enumerate(zip(reprs, output_irreps)):
+                norm = torch.mean(torch.linalg.vector_norm(reshapers[i](repr_chunk), dim=(-1)))
+                batch_node_norms[f'node_repr_l_{ir.l}_p_{ir.p}_part_{i}_norm_mean'] = norm
             
             summary.add_node_feature_norms(batch_node_norms)

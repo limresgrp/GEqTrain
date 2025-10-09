@@ -12,11 +12,8 @@ from geqtrain.data import (
     _GRAPH_FIELDS,
 )
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
-from geqtrain.nn._film import FiLMFunction
-from geqtrain.nn.allegro import Linear
-from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn._heads import L0IndexedAttention
-from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 
 
 @compile_mode("script")
@@ -68,7 +65,6 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         )
         in_irreps: o3.Irreps = self.irreps_in[field]
         out_irreps: o3.Irreps = self.irreps_out[self.out_field]
-        self.out_irreps_dim = out_irreps.dim
 
         # --- Resnet ---
         self._resnet_update_coeff: Optional[nn.Parameter] = None
@@ -77,7 +73,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                  raise ValueError(f"For resnet=True, out_field='{self.out_field}' must be in `irreps_in`")
             if self.irreps_in[self.out_field] != out_irreps:
                  raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
-            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0]))
+            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0], dtype=torch.float32))
         
         # --- Conditioning Fields Validation and Dimension Calculation ---
         self.total_conditioning_dim = 0
@@ -89,73 +85,20 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 raise ValueError(f"Conditioning field '{cond_field}' must have scalar (0e) irreps, but got {cond_irreps}.")
             self.total_conditioning_dim += cond_irreps.dim
 
-        has_conditioning = self.total_conditioning_dim > 0
-
-        # --- Feature Properties ---
-        self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
+        # --- Core Processing Module ---
+        self.processor = EquivariantScalarMLP(
+            in_irreps=in_irreps,
+            out_irreps=out_irreps,
+            conditioning_dim=self.total_conditioning_dim,
+            latent_module=readout_latent,
+            latent_kwargs=readout_latent_kwargs,
+            strict_irreps=strict_irreps,
+        )
         self.n_scalars_out = sum(mul for mul, ir in out_irreps if ir.l == 0)
-        self.has_invariant_output = self.n_scalars_out > 0
-        self.has_equivariant_output = out_irreps.dim > self.n_scalars_out
-        self.split_index = sum(mul for mul, ir in in_irreps if ir in [SCALAR, PSEUDO_SCALAR])
-
-        # --- Conditioning Layers ---
-        self.conditioner = nn.ModuleDict()
-        if has_conditioning and self.n_scalars_in > 0:
-            conditioner_modules = {
-                "film1": FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-                "fc1": readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.n_scalars_in, **readout_latent_kwargs),
-                "film2": FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-            }
-            if self.has_invariant_output:
-                conditioner_modules["film_scalar"] = FiLMFunction(self.total_conditioning_dim, [], self.n_scalars_out, mlp_nonlinearity=None)
-            self.conditioner = nn.ModuleDict(conditioner_modules)
-
-        # --- Invariant (Scalar) Readout ---
-        self.inv_readout = None
-        if self.has_invariant_output:
-            if self.n_scalars_in == 0:
-                raise ValueError("Cannot produce scalar output with no scalar input features.")
-            self.inv_readout = readout_latent(
-                mlp_input_dimension=self.n_scalars_in,
-                mlp_output_dimension=self.n_scalars_out,
-                **readout_latent_kwargs,
-            )
-
-        # --- Equivariant (Vectorial) Readout ---
-        self.reshape_in: Optional[reshape_irreps] = None
-        self.eq_readout_internal = None
-        self.eq_readout = None
-        self.weights_emb = None
-        self.reshape_back_features = None
-        self.use_internal_weights = self.n_scalars_in == 0
-
-        if self.has_equivariant_output:
-            eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
-            assert len(eq_in_irreps) > 0, "No equivariant (l > 0) input irreps found for field '{}'. Cannot perform equivariant readout.".format(self.field)
-            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
-            self.reshape_in = reshape_irreps(eq_in_irreps)
-
-            if self.use_internal_weights:
-                # Path 1: Internal weights. Initialize only this module.
-                self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, pad_to_alignment=1)
-            else:
-                # Path 2: External weights. Initialize the other module.
-                self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
-                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
-                if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.total_conditioning_dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
-
-            self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
-        elif strict_irreps and in_irreps.dim > self.n_scalars_in:
-            raise ValueError(
-                f"Input for field '{self.field}' contains non-scalar irreps ({in_irreps}), "
-                f"but output is all scalars ({out_irreps}). Non-scalar features would be unused. "
-                "To allow this, set 'strict_irreps=False'."
-            )
 
         # --- Bias ---
         self.bias = None
-        if self.has_invariant_output:
+        if self.n_scalars_out > 0:
             if bias is not None:
                 if isinstance(bias, float):
                     bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.float32)
@@ -174,63 +117,12 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
     def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
-        
-        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
-
-        if self.conditioner and self.conditioning_fields:
-            # Concatenate all conditioning tensors
+        conditioning_tensor: Optional[torch.Tensor] = None
+        if self.conditioning_fields:
             conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
             conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
 
-            scalars = self.conditioner["film1"](scalars, conditioning_tensor)
-            scalars = self.conditioner["fc1"](scalars)
-            scalars = self.conditioner["film2"](scalars, conditioning_tensor)
-
-
-        out_scalars_list = []
-        if self.has_invariant_output:
-            assert self.inv_readout is not None
-            current_out_scalars = self.inv_readout(scalars)
-            if self.conditioner is not None and "film_scalar" in self.conditioner:
-                current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, conditioning_tensor)
-            out_scalars_list.append(current_out_scalars)
-
-        out_equiv_list = []
-        if self.has_equivariant_output:
-            # The input `equiv` to reshape_in should not have a zero dimension if there are no equivariant features.
-            # This check ensures we don't call it unnecessarily.
-            if equiv.shape[-1] > 0:
-                assert self.reshape_in is not None
-                eq_features_in = self.reshape_in(equiv)
-                
-                if self.use_internal_weights:
-                    # Call the internal-weights module (one argument)
-                    assert self.eq_readout_internal is not None, "eq_readout_internal was not initialized for this configuration."
-                    eq_features_out = self.eq_readout_internal(eq_features_in)
-                else:
-                    # Call the external-weights module (two arguments)
-                    assert self.eq_readout is not None, "eq_readout was not initialized for this configuration."
-                    assert self.weights_emb is not None
-                    weights = self.weights_emb(scalars)
-                    if self.conditioner and "film_vectorial" in self.conditioner:
-                        weights = self.conditioner["film_vectorial"](weights, conditioning_tensor)
-                    eq_features_out = self.eq_readout(eq_features_in, weights)
-                assert self.reshape_back_features is not None
-                out_equiv_list.append(self.reshape_back_features(eq_features_out))
-
-        output_components = out_scalars_list + out_equiv_list
-        if not output_components:
-            raise ValueError("ReadoutModule produced no output features.")
-        out_features = torch.cat(output_components, dim=-1)
-        
-        if self.bias is not None:
-            out_scalars = out_features[..., :self.n_scalars_out]
-            out_equiv = out_features[..., self.n_scalars_out:]
-            biased_scalars = out_scalars + self.bias
-            if out_equiv.shape[-1] > 0:
-                out_features = torch.cat([biased_scalars, out_equiv], dim=-1)
-            else:
-                out_features = biased_scalars
+        out_features = self.processor(features, conditioning_tensor)
 
         if self.resnet:
             old_features = data[self.out_field]
@@ -239,6 +131,15 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             coefficient_old = torch.rsqrt(coeff.square() + 1)
             coefficient_new = coeff * coefficient_old
             out_features = coefficient_old * old_features + coefficient_new * out_features
+
+        if self.bias is not None:
+            out_scalars = out_features[..., :self.n_scalars_out]
+            out_equiv = out_features[..., self.n_scalars_out:]
+            biased_scalars = out_scalars + self.bias
+            if out_equiv.shape[-1] > 0:
+                out_features = torch.cat([biased_scalars, out_equiv], dim=-1)
+            else:
+                out_features = biased_scalars
 
         data[self.out_field] = out_features
         return data
@@ -267,6 +168,7 @@ class AttentionReadoutModule(ReadoutModule):
         self.scalar_attnt_enabled = True
         idx_key = ""
         
+        self.split_index = self.processor.split_index
         if self.field in _NODE_FIELDS:
             idx_key = AtomicDataDict.BATCH_KEY
         elif self.field in _GRAPH_FIELDS and dataset_mode == 'ensemble':
