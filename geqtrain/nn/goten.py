@@ -229,7 +229,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.layers = torch.nn.ModuleList([])
         for _ in range(num_layers):
             self.layers.append(GotenInteractionLayer(spharms_irreps, eq_multiplicity, use_attention, head_dim, latent_dim, latent))
-        self.update_coeffs = torch.nn.Parameter(torch.zeros(num_layers))
+        self.update_coeffs = torch.nn.Parameter(torch.zeros(num_layers, dtype=torch.float32))
 
         # === Final Projection ===
         self.final_linear, self.eq_w_mlp, self.final_scalar_mlp, self.final_norm = None, None, None, None

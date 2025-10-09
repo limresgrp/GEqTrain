@@ -60,7 +60,7 @@ class SO3_Linear(torch.nn.Module):
             scalar_out_irreps = o3.Irreps([ir for ir in self.out_irreps if ir.ir.l == 0])
             if scalar_out_irreps.dim > 0:
                 self.bias_slice = self.out_irreps.slices()[0]
-                self.bias = torch.nn.Parameter(torch.zeros(scalar_out_irreps.dim))
+                self.bias = torch.nn.Parameter(torch.zeros(scalar_out_irreps.dim, dtype=torch.float32))
 
     def init_path_weights(self, path: torch.nn.Linear):
         # A simple but effective initialization
@@ -179,7 +179,7 @@ class SO3_LayerNorm(torch.nn.Module):
         rearrange_out_list = []
 
         if self.normalization == 'std':
-            self.register_buffer('balance_degree_weight', torch.zeros(sum([(2*l+1) for l in set(irreps.ls)]), 1))
+            self.register_buffer('balance_degree_weight', torch.zeros(sum([(2*l+1) for l in set(irreps.ls)]), 1, dtype=torch.float32))
         else:
             self.balance_degree_weight = None
 
@@ -203,7 +203,7 @@ class SO3_LayerNorm(torch.nn.Module):
             start += _l_dim0
 
             if l == 0 and bias:
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_irr)))
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_irr), dtype=torch.float32))
 
         self.l_dims = l_dims
         self.lengths            = tuple(lengths)

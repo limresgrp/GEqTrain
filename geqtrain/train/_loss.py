@@ -1,5 +1,6 @@
 # geqtrain/train/_loss.py
 
+from typing import Tuple
 import torch
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
@@ -112,7 +113,7 @@ class LossWrapper:
                 ref_key = ref_key.reshape(pred_key.shape)
         return ref_key
 
-    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> (torch.Tensor, torch.Tensor):
+    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Filters tensors to include only center nodes if the key is a node-level property."""
         apply_filter = False
         if self.node_level_filter is True:
