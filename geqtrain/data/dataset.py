@@ -86,7 +86,7 @@ def parse_attrs(
             assert embedding_mode in ['embedding', 'one_hot']
             if attribute_type == 'numerical':
                 if input_val is not None:
-                    input_val = input_val.astype(float)
+                    input_val = input_val.astype(np.float32)
             elif attribute_type == 'categorical':
                 if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
                     continue # if 'embedding_mode' is embedding (default) and 'embedding_dimensionality' is missing, this means the field must not be used as input
