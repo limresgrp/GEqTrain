@@ -31,30 +31,30 @@ class RecycleBlock(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         recycling_steps: int,
-        conditioning_fields: List[str],
+        recycled_fields: List[str],
         time_encoding_d_model: int,
         irreps_in: dict = None,
     ):
         super().__init__()
         self.recycling_steps = recycling_steps
         self.time_encoding = None
-        
+
         # Check if recycle_step is a conditioning field
-        if AtomicDataDict.RECYCLE_STEP_KEY in conditioning_fields:
+        if AtomicDataDict.RECYCLE_STEP_KEY in recycled_fields:
             self.time_encoding = PositionalEmbedding(
                 d_model=time_encoding_d_model, max_len=recycling_steps
             )
             # Remove it from the main list to avoid processing it as a standard field
-            self.conditioning_fields = [f for f in conditioning_fields if f != AtomicDataDict.RECYCLE_STEP_KEY]
+            self.recycled_fields = [f for f in recycled_fields if f != AtomicDataDict.RECYCLE_STEP_KEY]
         else:
-            self.conditioning_fields = conditioning_fields
+            self.recycled_fields = recycled_fields
 
         # Define irreps for outputs
         new_irreps_out = {}
         if self.time_encoding is not None:
             new_irreps_out[AtomicDataDict.RECYCLE_STEP_KEY] = f"{time_encoding_d_model}x0e"
 
-        for field in self.conditioning_fields:
+        for field in self.recycled_fields:
             if field not in irreps_in:
                 raise ValueError(f"Conditioning field '{field}' not found in irreps_in: {list(irreps_in.keys())}")
             new_irreps_out[field] = irreps_in[field]
@@ -68,7 +68,7 @@ class RecycleBlock(GraphModuleMixin, torch.nn.Module):
         """
         Prepares the data for the current recycle step.
         - Adds the time step embedding.
-        - Updates conditioning fields based on the previous step's output.
+        - Updates recycled fields based on the previous step's output.
         """
         recycle_step = data[AtomicDataDict.RECYCLE_STEP_KEY]
 
@@ -76,9 +76,9 @@ class RecycleBlock(GraphModuleMixin, torch.nn.Module):
         if self.time_encoding is not None:
             data[AtomicDataDict.RECYCLE_STEP_KEY] = self.time_encoding(recycle_step, num_nodes=data[AtomicDataDict.POSITIONS_KEY].shape[0])
 
-        # 2. Update conditioning fields
-        for field in self.conditioning_fields:
-            # On the first cycle (k=0), initialize conditioning features to zero.
+        # 2. Update recycled fields
+        for field in self.recycled_fields:
+            # On the first cycle (k=0), initialize recycled features to zero.
             if recycle_step[0] == 0:
                 # Use a field that is guaranteed to exist to get shape and device
                 ref_tensor = data[AtomicDataDict.POSITIONS_KEY]
@@ -94,7 +94,7 @@ class RecycleBlock(GraphModuleMixin, torch.nn.Module):
                 if prev_out_key not in data:
                     raise KeyError(f"Expected previous output '{prev_out_key}' in data dictionary for recycle step > 0.")
 
-                # Use the output of the previous step as the conditioning for the current step.
+                # Use the output of the previous step as the input for the current step.
                 data[field] = data[prev_out_key]
                 
                 # Clean up the previous output key
@@ -111,13 +111,13 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
 
     def __init__(self, config: Config, model: SequentialGraphNetwork):
         super().__init__()
-        self.recycling_steps = config.get("recycling_steps", 1)
+        self.recycling_steps = int(config.get("recycling_steps", 1))
         initial_irreps_in = config.get("irreps_in", {})
         self.output_field = config.get("output_field")
         if self.output_field is None:
             raise ValueError("RecycleModel requires 'output_field' to be specified in the config.")
 
-        conditioning_fields = config.get("conditioning_fields", [])
+        recycled_fields = config.get("recycled_fields", [])
         alpha_init = config.get("alpha_init", 1.0)
 
         # This alpha is for the additive output update
@@ -127,7 +127,7 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
         self.recycle_block = RecycleBlock(
             recycling_steps=self.recycling_steps,
             time_encoding_d_model=config.get("time_encoding_d_model", 64),
-            conditioning_fields=conditioning_fields,
+            recycled_fields=recycled_fields,
             irreps_in=model.irreps_out,
         )
         self.wrapped_model = model
@@ -153,10 +153,10 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
         device = pos.device
 
         for k in range(self.recycling_steps):
-            data[AtomicDataDict.RECYCLE_STEP_KEY] = torch.tensor([k], device=device)
+            data[AtomicDataDict.RECYCLE_STEP_KEY] = torch.tensor([k], dtype=torch.long, device=device)
 
             # 1. Prepare inputs for this cycle
-            # This updates conditioning fields based on the previous step's output
+            # This updates recycled fields based on the previous step's output
             data = self.recycle_block(data)
 
             # 2. Run the core model
@@ -175,8 +175,8 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
 
             # 4. Store outputs for deep supervision and for the next cycle's conditioning
             deep_supervision_predictions.append(current_prediction.clone())
-            for field in self.recycle_block.conditioning_fields:
-                # Pass the output of the conditioning field to the next step, detached
+            for field in self.recycle_block.recycled_fields:
+                # Pass the output of the recycled field to the next step, detached
                 data[f"{field}_prev_out"] = current_data[field].detach()
 
         # Set the final outputs in the data dictionary
