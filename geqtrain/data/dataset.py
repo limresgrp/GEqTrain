@@ -18,6 +18,7 @@ import hashlib
 import torch
 import copy
 from os.path import dirname, basename, abspath
+from e3nn.o3 import Irreps
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
@@ -118,7 +119,7 @@ def parse_attrs(
     return _fields, _fixed_fields
 
 
-def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, num_types: int):
+def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, num_types: int, irreps: Optional[Irreps] = None):
     """
     Computes the mean (bias) and standard deviation for a given field, grouped by node type.
 
@@ -126,33 +127,55 @@ def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, nu
         dataset (ConcatDataset): The dataset to compute statistics from.
         field (str): The key for the data field to be analyzed (e.g., "energy").
         num_types (int): The total number of node types.
+        irreps (e3nn.o3.Irreps, optional): The irreps of the field. If provided, statistics
+            are computed on the norm of each irrep component. Defaults to None.
 
     Returns:
         Tuple[List[float], List[float]]: A tuple containing two lists:
         - The per-type means (biases).
         - The per-type standard deviations.
     """
-    if dataset is None: return None, None
-    all_field_values = torch.cat([data[field] for data in dataset], dim=0)
+    if dataset is None:
+        return None, None
+    
+    field_values_list = [data[field] for data in dataset]
+    
+    if irreps is not None:
+        # Compute norm for each irrep and concatenate
+        norm_values_list = []
+        for values in field_values_list:
+            norms = []
+            for (mul, ir), slice in zip(irreps, irreps.slices()):
+                if ir.l == 0:
+                    norms.append(values[:, slice])
+                else:
+                    norms.append(torch.linalg.norm(values[:, slice], dim=-1, keepdim=True))
+            norm_values_list.append(torch.cat(norms, dim=-1))
+        all_field_values = torch.cat(norm_values_list, dim=0)
+    else:
+        all_field_values = torch.cat(field_values_list, dim=0)
+
     all_node_types = torch.cat([data[AtomicDataDict.NODE_TYPE_KEY] for data in dataset], dim=0).squeeze()
 
-    means = scatter_mean(all_field_values, all_node_types, dim=0, dim_size=num_types).flatten()
-    stds = scatter_std(all_field_values, all_node_types, dim=0, dim_size=num_types).flatten()
+    means = scatter_mean(all_field_values, all_node_types, dim=0, dim_size=num_types)
+    stds = scatter_std(all_field_values, all_node_types, dim=0, dim_size=num_types)
 
     # Fallback for types with no samples to avoid NaN
     for i, std in enumerate(stds):
-        if torch.isnan(std) or std < 1.e-3:
-            stds[i] = 1.0  # Replace NaN and 0 stds with 1.0
+        if torch.any(torch.isnan(std)) or torch.all(std < 1.e-3):
+            stds[i] = torch.where(torch.isnan(std) | (std < 1.e-3), 1.0, std)
 
-    return means.tolist(), stds.tolist()
+    return means, stds
 
-def compute_global_statistics(dataset: Optional[ConcatDataset], field: str):
+def compute_global_statistics(dataset: Optional[ConcatDataset], field: str, irreps: Optional[Irreps] = None):
     """
     Computes the global mean and standard deviation for a given field.
 
     Args:
         dataset (ConcatDataset): The dataset to compute statistics from.
         field (str): The key for the data field to be analyzed.
+        irreps (e3nn.o3.Irreps, optional): The irreps of the field. If provided, statistics
+            are computed on the norm of each irrep component. Defaults to None.
 
     Returns:
         Tuple[float, float]: A tuple containing:
@@ -162,7 +185,22 @@ def compute_global_statistics(dataset: Optional[ConcatDataset], field: str):
     if dataset is None:
         return None, None
 
-    all_field_values = torch.cat([data[field] for data in dataset], dim=0)
+    field_values_list = [data[field] for data in dataset]
+
+    if irreps is not None:
+        # Compute norm for each irrep and concatenate
+        norm_values_list = []
+        for values in field_values_list:
+            norms = []
+            for ir, slice in irreps.slices():
+                if ir.l == 0:
+                    norms.append(values[:, slice])
+                else:
+                    norms.append(torch.linalg.norm(values[:, slice], dim=-1, keepdim=True))
+            norm_values_list.append(torch.cat(norms, dim=-1))
+        all_field_values = torch.cat(norm_values_list, dim=0)
+    else:
+        all_field_values = torch.cat(field_values_list, dim=0)
     
     mean = torch.mean(all_field_values).item()
     std = torch.std(all_field_values).item()
@@ -625,9 +663,15 @@ class AtomicInMemoryDataset(AtomicDataset):
         PER_TYPE_PREFIX = "per_type"
         GLOBAL_PREFIX = "global"
 
-        for field, mode in self.standardize_fields.items():
+        for field, mode_str in self.standardize_fields.items():
             if field not in data:
                 raise ValueError(f"Cannot standardize: field `{field}` not in data.")
+            
+            parts = mode_str.split(':', 1)
+            mode = parts[0]
+            irreps_str = parts[1] if len(parts) > 1 else None
+            irreps = Irreps(irreps_str) if irreps_str else None
+
             if mode not in ['per_type', 'global']:
                 raise ValueError(f"Invalid standardization mode '{mode}' for field '{field}'. Must be 'per_type' or 'global'.")
 
@@ -638,39 +682,59 @@ class AtomicInMemoryDataset(AtomicDataset):
                 if num_types is None:
                     raise ValueError("`num_types` for node types must be provided in `node_attributes` for per-type standardization.")
                 
-                mean_vals, std_vals = compute_per_type_statistics(data_list, field, num_types)
-                self.means[field] = mean_vals
-                self.stds[field] = std_vals
+                mean_vals, std_vals = compute_per_type_statistics(data_list, field, num_types, irreps=irreps)
+                self.means[field] = mean_vals.tolist()
+                self.stds[field] = std_vals.tolist()
                 
-                mean_tensor = torch.tensor(mean_vals, dtype=data[field].dtype)
-                std_tensor = torch.tensor(std_vals, dtype=data[field].dtype)
+                mean_tensor = mean_vals.to(dtype=data[field].dtype)
+                std_tensor = std_vals.to(dtype=data[field].dtype)
 
                 node_types = data[AtomicDataDict.NODE_TYPE_KEY].squeeze()
-                data[field] -= mean_tensor[node_types].view(data[field].shape)
-                data[field] /= std_tensor[node_types].view(data[field].shape)
+
+                if irreps:
+                    means_expanded = mean_tensor[node_types]
+                    stds_expanded = std_tensor[node_types]
+                    i = 0
+                    for (mul, ir), slice in zip(irreps, irreps.slices()):
+                        if ir.l == 0:
+                            data[field][:, slice] -= means_expanded[:, i:i+1]
+                            data[field][:, slice] /= stds_expanded[:, i:i+1]
+                        else: # l > 0, standardize norm
+                            norm = torch.linalg.norm(data[field][:, slice], dim=-1, keepdim=True)
+                            # Avoid division by zero
+                            norm = torch.where(norm > 1e-8, norm, torch.ones_like(norm))
+                            scale = (norm - means_expanded[:, i:i+1]) / (stds_expanded[:, i:i+1] * norm)
+                            data[field][:, slice] *= scale
+                        i += 1
+                else:
+                    data[field] -= mean_tensor[node_types].view(data[field].shape)
+                    data[field] /= std_tensor[node_types].view(data[field].shape)
                 
                 # Store stats in fixed_fields
                 mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
                 std_key = f"{STD_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
-                fixed_fields[mean_key] = torch.tensor(mean_vals)
-                fixed_fields[std_key] = torch.tensor(std_vals)
+                fixed_fields[mean_key] = mean_vals
+                fixed_fields[std_key] = std_vals
                 logging.info(f"Standardized field '{field}' per type.")
 
             elif mode == 'global':
-                mean_val, std_val = compute_global_statistics(data_list, field)
+                mean_val, std_val = compute_global_statistics(data_list, field, irreps=irreps)
                 self.means[field] = mean_val
                 self.stds[field] = std_val
                 
                 if std_val > 1e-8:
-                    data[field] -= mean_val
-                    data[field] /= std_val
+                    if irreps:
+                        raise NotImplementedError("Global standardization for equivariant fields is not yet implemented.")
+                    else:
+                        data[field] -= mean_val
+                        data[field] /= std_val
 
                     # Store stats in fixed_fields
                     mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
                     std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
                     fixed_fields[mean_key] = torch.tensor(mean_val)
                     fixed_fields[std_key] = torch.tensor(std_val)
-                    logging.info(f"Standardized field '{field}' globally with mean={mean_val:.4f} and std={std_val:.4f}.")
+                    logging.info(f"Standardized field '{field}' globally with mean={mean_val:.4f} and std={std_val:.4f}.")                    
                 else:
                     logging.warning(f"Standard deviation of field '{field}' is very small ({std_val:.4f}), skipping standardization.")
 
