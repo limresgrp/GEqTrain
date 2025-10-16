@@ -9,6 +9,8 @@ from geqtrain.nn import GraphModuleMixin, SequentialGraphNetwork
 from geqtrain.nn._embedding_time import PositionalEmbedding
 from geqtrain.utils import Config
 
+from geqtrain.data.AtomicData import register_fields
+
 
 def RecycleModel(
     config: Config, model: Optional[SequentialGraphNetwork]
@@ -124,6 +126,7 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
         self.alphas = torch.nn.ParameterList([
             torch.nn.Parameter(torch.tensor(alpha_init, dtype=torch.float32)) for _ in range(self.recycling_steps)])
 
+        register_fields(node_fields=[AtomicDataDict.RECYCLE_STEP_KEY])
         self.recycle_block = RecycleBlock(
             recycling_steps=self.recycling_steps,
             time_encoding_d_model=config.get("time_encoding_d_model", 64),
