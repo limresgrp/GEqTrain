@@ -1,6 +1,8 @@
 # geqtrain/train/_loss.py
 
 from typing import Tuple
+import logging
+from e3nn.o3 import Irreps
 import torch
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
@@ -159,10 +161,10 @@ class LossWrapper:
                 loss = loss.sum(dim=-1)
             return loss.mean() if mean else loss
 
-    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
+    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, standardize_fields: dict = {}, **kwargs):
         # 1. Determine prediction key and prepare tensors
         pred_key_name = self._get_pred_key_name(key)
-        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean)
+        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean, standardize_fields)
 
         # 2. Initialize supervision weights if needed
         self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
@@ -176,7 +178,7 @@ class LossWrapper:
         # 5. Calculate and return the loss
         return self._calculate_loss(pred_key, ref_key, mean)
 
-    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool):
+    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool, standardize_fields: dict = {}):
         pred_key = pred.get(pred_key_name)
         assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
         ref_key = ref.get(ref_key_name)
@@ -198,23 +200,64 @@ class LossWrapper:
             global_mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
             global_std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
 
+            irreps = None
+            if ref_key_name in standardize_fields:
+                mode_str = standardize_fields[ref_key_name]
+                parts = mode_str.split(':', 1)
+                irreps_str = parts[1] if len(parts) > 1 else None
+                if irreps_str:
+                    irreps = Irreps(irreps_str)
+
             if per_type_mean_key in ref and per_type_std_key in ref:
-                mean = ref[per_type_mean_key].to(pred_key.device)
-                std = ref[per_type_std_key].to(pred_key.device)
+                means = ref[per_type_mean_key].to(pred_key.device)
+                stds = ref[per_type_std_key].to(pred_key.device)
                 node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
 
-                # Prepare for broadcasting by adding necessary dimensions
-                mean_bc = mean[node_types].view(-1, *([1] * (pred_key.dim() - 1)))
-                std_bc = std[node_types].view(-1, *([1] * (pred_key.dim() - 1)))
+                means_expanded = means[node_types]
+                stds_expanded = stds[node_types]
 
-                pred_key = pred_key * std_bc + mean_bc
-                
-                # Also de-standardize ref_key, preparing for broadcasting
-                mean_bc_ref = mean[node_types].view(-1, *([1] * (ref_key.dim() - 1)))
-                std_bc_ref = std[node_types].view(-1, *([1] * (ref_key.dim() - 1)))
-                ref_key = ref_key * std_bc_ref + mean_bc_ref
+                if irreps:
+                    i = 0
+                    for (mul, ir), slice in zip(irreps, irreps.slices()):
+                        mean_bc = means_expanded[:, i:i+1]
+                        std_bc = stds_expanded[:, i:i+1]
+                        if ir.l == 0:
+                            pred_key[:, slice] = pred_key[:, slice] * std_bc + mean_bc
+                            ref_key[:, slice] = ref_key[:, slice] * std_bc + mean_bc
+                        else: # l > 0, de-standardize norm
+                            # De-standardize pred
+                            norm_pred = torch.linalg.norm(pred_key[:, slice], dim=-1, keepdim=True)
+                            # The standardized norm is (norm - mean) / std.
+                            # To get the original norm back: norm = standardized_norm * std + mean
+                            # Here, the standardized value is the norm of the vector in pred_key.
+                            new_norm_pred = norm_pred * std_bc + mean_bc
+                            scale_pred = new_norm_pred / norm_pred.clamp(min=1e-8)
+                            pred_key[:, slice] = pred_key[:, slice] * scale_pred
+
+                            # De-standardize ref
+                            norm_ref = torch.linalg.norm(ref_key[:, slice], dim=-1, keepdim=True)
+                            new_norm_ref = norm_ref * std_bc + mean_bc
+                            scale_ref = new_norm_ref / norm_ref.clamp(min=1e-8)
+                            ref_key[:, slice] = ref_key[:, slice] * scale_ref
+                        i += 1
+                else:
+                    # Fallback for scalar fields without irreps info
+                    mean_bc = means_expanded.view(-1, *([1] * (pred_key.dim() - 1)))
+                    std_bc = stds_expanded.view(-1, *([1] * (pred_key.dim() - 1)))
+                    pred_key = pred_key * std_bc + mean_bc
+
+                    mean_bc_ref = means_expanded.view(-1, *([1] * (ref_key.dim() - 1)))
+                    std_bc_ref = stds_expanded.view(-1, *([1] * (ref_key.dim() - 1)))
+                    ref_key = ref_key * std_bc_ref + mean_bc_ref
                 
             elif global_mean_key in ref and global_std_key in ref:
+                if irreps:
+                    # This case is ambiguous for global stats with multiple irreps.
+                    # The per-type logic is preferred for equivariant fields.
+                    logging.warning(
+                        f"Global de-standardization for equivariant field '{ref_key_name}' is not fully supported and may be incorrect. "
+                        "Consider using per-type standardization."
+                    )
                 mean = ref[global_mean_key].item()
                 std = ref[global_std_key].item()
                 

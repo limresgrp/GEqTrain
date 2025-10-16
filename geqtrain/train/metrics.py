@@ -10,6 +10,7 @@ from geqtrain.train.loss import Loss
 from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
 from ._key import ABBREV
 from ._loss import StatefulMetric
+from .loss import Loss
 
 class _Metric:
     """Internal helper class to manage the state and logic for a single metric."""
@@ -22,14 +23,14 @@ class _Metric:
         if isinstance(self.func, StatefulMetric):
             self.accumulator = self.func
 
-    def accumulate(self, pred: dict, ref: dict, key: str) -> torch.Tensor:
+    def accumulate(self, pred: dict, ref: dict, key: str, standardize_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
         if isinstance(self.accumulator, StatefulMetric):
             self.accumulator.update(pred, ref, key)
             return self.accumulator.compute()  # Return partial result for batch logs
         
         # --- Logic for stateless (RunningStats) metrics ---
-        error = self.func(pred=pred, ref=ref, key=key, mean=False)
+        error = self.func(pred=pred, ref=ref, key=key, mean=False, standardize_fields=standardize_fields)
         
         # If per-target metrics are not requested, average over the feature dimension
         if error.dim() > 1 and not self.params.get("PerTarget"):
@@ -82,8 +83,9 @@ class _Metric:
 
 
 class Metrics(Loss):
-    def __init__(self, components: Union[str, List[str], List[dict]]):
+    def __init__(self, components: Union[str, List[str], List[dict]], standardize_fields: dict = {}):
         super().__init__(components)
+        self.standardize_fields = standardize_fields
         self.metrics: Dict[str, _Metric] = {}
         
         for key in self.keys:
@@ -106,7 +108,7 @@ class Metrics(Loss):
         batch_metrics = {}
         for key, metric_handler in self.metrics.items():
             clean_key = self.remove_suffix(key)
-            batch_metrics[key] = metric_handler.accumulate(pred, ref, clean_key)
+            batch_metrics[key] = metric_handler.accumulate(pred, ref, clean_key, self.standardize_fields)
         return batch_metrics
 
     def reset(self):
