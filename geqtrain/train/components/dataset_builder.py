@@ -90,9 +90,9 @@ class DatasetBuilder:
         if test_idcs is None:
             self.logger.info("Generating new test indices from counts.")
             if n_test is None:
-                raise ValueError("`test_idcs` or `n_test` must be provided for the test set.")
+                n_test = [len(d) for d in test_dset.datasets]
             if not isinstance(n_test, list): n_test = [n_test]
-            test_idcs = self._generate_indices_from_pool(test_dset, n_test)
+            test_idcs = self._generate_indices_from_pool(test_dset, n_test, pool_name="test")
         
         # 3. Create the final indexed datasets
         final_test_dset = self._index_dataset(test_dset, test_idcs)

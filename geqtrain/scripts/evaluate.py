@@ -5,6 +5,7 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
+import numpy as np
 
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.utils import Config
@@ -180,7 +181,7 @@ def main(args=None):
     apply_global_config(config)
 
     # 2. Create the dataset
-    builder = DatasetBuilder(config, torch.Generator())
+    builder = DatasetBuilder(config, np.random.default_rng(config.get('dataset_seed')))
     final_test_dset = builder.build_test()
     dataloader = DataLoader(final_test_dset, batch_size=args.batch_size, shuffle=False)
 
