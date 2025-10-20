@@ -41,6 +41,7 @@ def assert_permutation_equivariant(
         func: the module or model to test
         data_in: the example input data to test with
     """
+    print("TESTING PERMUTATION EQUIVARIANCE")
     # Prevent pytest from showing this function in the traceback
     __tracebackhide__ = True
 
@@ -183,6 +184,10 @@ def assert_AtomicData_equivariant(
     # == Test rotation, parity, and translation using e3nn ==
     irreps_in = {k: None for k in AtomicDataDict.ALLOWED_KEYS}
     irreps_in.update(func.irreps_in)
+    irreps_in.update({
+        'atom_rows': None,
+        'atom_cols': None,
+    })
     irreps_in = {k: v for k, v in irreps_in.items() if k in data_in[0]}
     irreps_out = func.irreps_out.copy()
     # for certain things, we don't care what the given irreps are...
@@ -201,6 +206,7 @@ def assert_AtomicData_equivariant(
         output = func(arg_dict)
         return [output[k] for k in irreps_out]
 
+    print("TESTING ROTATION, PARITY, AND TRANSLATION")
     errs = [
         equivariance_error(
             wrapper,

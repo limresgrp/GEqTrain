@@ -12,10 +12,10 @@ from os.path import isdir
 
 from geqtrain.model import model_from_config
 from geqtrain.utils import Config
-from geqtrain.data import dataset_from_config
+from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.utils import load_file
 from geqtrain.utils.test import assert_AtomicData_equivariant
-from geqtrain.utils._global_options import _set_global_options
+from geqtrain.utils._global_options import apply_global_config
 from geqtrain.scripts._logger import set_up_script_logger
 
 default_config = dict(
@@ -37,7 +37,7 @@ def main(args=None, running_as_script: bool = True):
     config = parse_command_line(args)
 
     if running_as_script:
-        set_up_script_logger(config.get("log", None), config.verbose)
+        set_up_script_logger(config.verbose)
     logger = logging.getLogger("geqtrain-test-equivariance")
     logger.setLevel(logging.INFO)
 
@@ -75,15 +75,17 @@ def parse_command_line(args=None):
 
 
 def test_equivariance(config, logger):
-    _set_global_options(config)
+    apply_global_config(config)
 
     # = Load the dataset =
-    dataset = dataset_from_config(config, prefix="dataset")
+    builder = DatasetBuilder(config, np.random.default_rng(config.get('dataset_seed')))
+    dataset = builder.build_test()
     logger.info(f"Successfully loaded the data set of type {dataset}...")
 
     # = Build model =
+    # The model is initialized with the dataset statistics
     final_model, _ = model_from_config(
-        config=config, initialize=True, dataset=dataset
+        config=config, initialize=True, dataset=dataset,
     )
     logger.info("Successfully built the network...")
 
@@ -100,6 +102,9 @@ def test_equivariance(config, logger):
         final_model,
         [dataset[i] for i in indexes],
         config.get("cartesian_fields", []),
+        # do_parity=False,
+        # do_translation=False,
+        ntrials=1,
     )
 
     logger.info(
