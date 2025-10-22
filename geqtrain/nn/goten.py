@@ -196,16 +196,16 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
             edge_attrs_irreps=node_eq_irreps, # Use node_eq_irreps as reference
         )
         self.out_multiplicity = output_mul
-        self.out_irreps_node = out_irreps_node
-        self.out_feat_elems = sum(irr.ir.dim for irr in self.out_irreps_node)
+        self.out_feat_elems = sum(irr.ir.dim for irr in out_irreps_node)
         
         # Split out_irreps into scalar and equivariant parts
-        self.has_scalar_output = any(ir.l == 0 for _, ir in self.out_irreps_node)
+        self.has_scalar_output = any(ir.l == 0 for _, ir in out_irreps_node)
+        self.has_equivariant_output = any(ir.l > 0 for _, ir in out_irreps_node)
         self.out_n_scalars = 0
         if self.has_scalar_output:
-            self.out_n_scalars = (self.out_irreps_node.count(SCALAR) + self.out_irreps_node.count(PSEUDO_SCALAR)) // self.out_multiplicity
+            self.out_n_scalars = (out_irreps_node.count(SCALAR) + out_irreps_node.count(PSEUDO_SCALAR)) // self.out_multiplicity
 
-        self.eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in self.out_irreps_node if ir.l > 0])
+        eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps_node if ir.l > 0])
         # === End of irreps processing ===
 
         # Define projection layers to map initial h and t_ij to latent_dim.
@@ -235,10 +235,10 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.final_linear, self.eq_w_mlp, self.final_scalar_mlp, self.final_norm = None, None, None, None
         
         # Projection for equivariant part (l>0)
-        if self.eq_out_irreps.dim > 0:
-            self.final_linear = Linear(irreps_in=node_eq_irreps, irreps_out=self.eq_out_irreps, internal_weights=False)
+        if self.has_equivariant_output:
+            self.final_linear = Linear(irreps_in=node_eq_irreps, irreps_out=eq_out_irreps, internal_weights=False)
             self.eq_w_mlp = latent(mlp_input_dimension=self.latent_dim, mlp_output_dimension=self.final_linear.weight_numel)
-            self.final_norm = SO3_LayerNorm(self.eq_out_irreps)
+            self.final_norm = SO3_LayerNorm(eq_out_irreps)
 
         # Projection for scalar part (l=0)
         if self.has_scalar_output:
@@ -247,8 +247,8 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
                 mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
             )
 
-        self.reshape_node = inverse_reshape_irreps(self.out_irreps_node)
-        self.irreps_out.update({self.out_field_node: self.out_irreps_node})
+        self.reshape_node = inverse_reshape_irreps(out_irreps_node)
+        self.irreps_out.update({self.out_field_node: out_irreps_node})
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         edge_center   = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -256,7 +256,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         spharms       = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
         h             = data[AtomicDataDict.NODE_ATTRS_KEY]
         t_ij          = data[AtomicDataDict.EDGE_ATTRS_KEY]
-        num_nodes     = h.shape[0]
+        num_nodes: int = h.shape[0]
 
         # Apply the initial projection to ensure h and t_ij have the correct
         # latent_dim before entering the first interaction layer.
@@ -274,8 +274,9 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # === Interaction Loop ===
         update_coeffs = torch.sigmoid(self.update_coeffs)
-        for layer, update_coeff in zip(self.layers, update_coeffs):
-            h, X, t_ij = layer(h, X, t_ij, edge_center, edge_neighbor, spharms, update_coeff, num_nodes)
+        for i, layer in enumerate(self.layers):
+            # Pass the single update_coeff for this layer
+            h, X, t_ij = layer(h, X, t_ij, edge_center, edge_neighbor, spharms, update_coeffs[i], num_nodes)
 
         # === Final Projection ===
         # Initialize an empty tensor to store the final combined output features
@@ -286,7 +287,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         )
 
         # 1. Compute and place equivariant features (l>0)
-        if self.eq_out_irreps.dim > 0:
+        if self.has_equivariant_output:
             assert self.final_linear is not None and self.eq_w_mlp is not None and self.final_norm is not None
             eq_w = self.eq_w_mlp(h)
             eq_features = self.final_linear(X, eq_w)
@@ -341,6 +342,15 @@ class GotenInteractionLayer(torch.nn.Module):
             self.W_re = torch.nn.Linear(latent_dim, latent_dim, bias=False)
             self.gamma_v = latent(mlp_input_dimension=latent_dim, mlp_output_dimension=latent_dim)
 
+        # MLP to expand the combined message before splitting
+        self.gamma_split = latent(
+            mlp_input_dimension=latent_dim, 
+            mlp_output_dimension=3 * latent_dim
+        )
+        # MLPs to map scalar gates to the multiplicity dimension of equivariant features
+        self.mlp_d = latent(mlp_input_dimension=latent_dim, mlp_output_dimension=eq_multiplicity)
+        self.mlp_t = latent(mlp_input_dimension=latent_dim, mlp_output_dimension=eq_multiplicity)
+
         # === Weights for Combined Message Processing ===
         self.env_weighter = MakeWeightedChannels(irreps_in=spharms_irreps, multiplicity_out=eq_multiplicity)
         self.linear_X = Linear(irreps_in=eq_irreps, irreps_out=eq_irreps, internal_weights=False)
@@ -364,12 +374,35 @@ class GotenInteractionLayer(torch.nn.Module):
 
         # === EQFF Layer ===
         self.eqff = EQFF(latent_dim=latent_dim, eq_multiplicity=eq_multiplicity, lmax=max(eq_irreps.ls), latent=latent)
-
-    def forward(self, h, X, t_ij, edge_center, edge_neighbor, spharms, update_coeff, num_nodes):
+    
+    @staticmethod
+    def vector_rejection(features: torch.Tensor, directions: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the component of `features` orthogonal to `directions`.
+        It operates on tensors with shape [Edges, Multiplicity, Irrep_Dim].
+        """
+        # directions shape: [E, D_geom], features shape: [E, M, D_geom]
+        # Unsqueeze directions to allow broadcasting over the multiplicity dimension
+        directions_unsqueezed = directions.unsqueeze(1)  # -> [E, 1, D_geom]
         
-        # === 1. HTR: Update edge scalars t_ij first ===
-        X_q = self.W_to_query(X[edge_center])
-        X_k = self.W_to_key(X[edge_neighbor])
+        # Scalar projection (dot product)
+        # (features * directions) -> [E, M, D_geom]
+        # .sum() -> [E, M, 1]
+        proj_scalar = (features * directions_unsqueezed).sum(dim=-1, keepdim=True)
+        
+        # Subtract the vector projection to get the rejection
+        return features - proj_scalar * directions_unsqueezed
+
+    def forward(self, h, X, t_ij, edge_center, edge_neighbor, spharms, update_coeff, num_nodes: int):
+        
+        # === 1. HTR: Update edge scalars t_ij first, now with vector rejection ===
+        X_q_full = self.W_to_query(X[edge_center])
+        X_k_full = self.W_to_key(X[edge_neighbor])
+
+        # Apply vector rejection before the tensor product
+        X_q = self.vector_rejection(X_q_full, spharms)
+        X_k = self.vector_rejection(X_k_full, -spharms) # Use negative direction for neighbor
+
         w_ij = self.tp(X_q, X_k).reshape(len(X_q), -1)
         delta_t_ij = self.gamma_w(w_ij) * self.gamma_t(t_ij)
         t_ij = apply_residual_stream(t_ij, delta_t_ij, update_coeff)
@@ -378,10 +411,8 @@ class GotenInteractionLayer(torch.nn.Module):
         h_i = h[edge_center]
         h_j = h[edge_neighbor]
         
-        # Spatial filter message
         spatial_message = self.W_rs(t_ij) * self.gamma_s(h_j)
         
-        # Attention message (if enabled)
         if self.use_attention:
             q_i = self.W_q(h_i).view(-1, self.num_heads, self.head_dim)
             k_j = self.W_k(h_j).view(-1, self.num_heads, self.head_dim)
@@ -399,25 +430,27 @@ class GotenInteractionLayer(torch.nn.Module):
         else:
             combined_message = spatial_message
             
-        # === 3. Update h and X based on combined message ===
-        all_weights = self.message_to_weights(combined_message)
-        w_idx = 0
+        # === 3. Update h and X using original "split-and-gate" GATA logic ===
         
-        # Update h
-        delta_h_j = all_weights.narrow(-1, w_idx, self.latent_dim)
-        w_idx += self.latent_dim
-        delta_h = self.node_norm(scatter_sum(delta_h_j, edge_center, dim=0, dim_size=num_nodes))
-        h = h + delta_h
+        # Expand the message, then split into direct gates for h, spharms, and X
+        gates = self.gamma_split(combined_message)
+        o_s, o_d, o_t = torch.split(gates, self.latent_dim, dim=-1)
 
-        # Update X
-        delta_spharm_w = all_weights.narrow(-1, w_idx, self.env_weighter.weight_numel)
-        w_idx += self.env_weighter.weight_numel
-        delta_spharm_ij = self.env_weighter(spharms, delta_spharm_w)
+        # Update h using the scalar gate o_s
+        delta_h = self.node_norm(scatter_sum(o_s, edge_center, dim=0, dim_size=num_nodes))
+        h = apply_residual_stream(h, delta_h, update_coeff)
 
-        delta_X_w = all_weights.narrow(-1, w_idx, self.linear_X.weight_numel)
-        delta_eq_ij = self.linear_X(X[edge_neighbor], delta_X_w)
+        # Map scalar gates o_d and o_t to the multiplicity dimension
+        gate_d = self.mlp_d(o_d) # -> [E, M]
+        gate_t = self.mlp_t(o_t) # -> [E, M]
         
-        delta_X_ij = delta_spharm_ij + delta_eq_ij
+        # Apply gates to update X
+        # gate.unsqueeze(-1) gives shape [E, M, 1] for broadcasting
+        # spharms.unsqueeze(1) gives shape [E, 1, D_geom] for broadcasting
+        delta_X_d_ij = gate_d.unsqueeze(-1) * spharms.unsqueeze(1)
+        delta_X_t_ij = gate_t.unsqueeze(-1) * X[edge_neighbor]
+        
+        delta_X_ij = delta_X_d_ij + delta_X_t_ij
         delta_X = self.node_eq_norm(scatter_sum(delta_X_ij, edge_center, dim=0, dim_size=num_nodes))
         X = apply_residual_stream(X, delta_X, update_coeff)
 

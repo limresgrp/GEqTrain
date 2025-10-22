@@ -1,7 +1,8 @@
+import math
 from typing import List, Optional, Union
 
 import torch
-import torch.nn as nn
+from torch import nn
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
@@ -41,6 +42,14 @@ class EquivariantScalarMLP(nn.Module):
         self.out_irreps = out_irreps
         self.conditioning_dim = conditioning_dim
 
+        # Store multiplicities as attributes for TorchScript compatibility
+        self.in_multiplicity: int = 1
+        if len(self.in_irreps) > 0:
+            self.in_multiplicity = self.in_irreps[0].mul
+        self.out_multiplicity: int = 1
+        if len(self.out_irreps) > 0:
+            self.out_multiplicity = self.out_irreps[0].mul
+
         # --- Feature Properties ---
         self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
         self.n_scalars_out = sum(mul for mul, ir in out_irreps if ir.l == 0)
@@ -51,20 +60,20 @@ class EquivariantScalarMLP(nn.Module):
         has_conditioning = self.conditioning_dim > 0
 
         # --- Conditioning Layers ---
-        self.conditioner = nn.ModuleDict()
-        if has_conditioning and self.n_scalars_in > 0:
+        self.conditioner = None
+        if has_conditioning:
             self.conditioner = nn.ModuleDict({
-                "film1": FiLMFunction(self.conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-                "fc1": latent_module(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.n_scalars_in, **latent_kwargs),
-                "film2": FiLMFunction(self.conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
+                "film": FiLMFunction(self.conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None)
             })
 
         # --- Invariant (Scalar) Readout ---
-        self.inv_readout = None
+        self.scalar_processor = None
         if self.has_invariant_output:
             if self.n_scalars_in == 0:
                 raise ValueError("Cannot produce scalar output with no scalar input features.")
-            self.inv_readout = latent_module(
+            
+            # The main MLP for processing scalar features
+            self.scalar_processor = latent_module(
                 mlp_input_dimension=self.n_scalars_in,
                 mlp_output_dimension=self.n_scalars_out,
                 **latent_kwargs,
@@ -76,7 +85,6 @@ class EquivariantScalarMLP(nn.Module):
         self.eq_readout = None
         self.weights_emb = None
         self.reshape_back_features = None
-        self.use_internal_weights = self.n_scalars_in == 0
 
         if self.has_equivariant_output:
             eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
@@ -85,11 +93,26 @@ class EquivariantScalarMLP(nn.Module):
             if reshape_in:
                 self.reshape_in = reshape_irreps(eq_in_irreps)
 
-            if self.use_internal_weights:
+            # Case 1: No input scalars AND no conditioning -> Use internal, learnable weights
+            if self.n_scalars_in == 0 and not has_conditioning:
                 self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, shared_weights=True, pad_to_alignment=1)
             else:
+                # Case 2 & 3: Weights are generated externally from either scalars or conditioning tensor
                 self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
-                self.weights_emb = latent_module(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **latent_kwargs)
+                
+                # Case 2: Input scalars are present. Use them to generate weights.
+                if self.n_scalars_in > 0:
+                    self.weights_emb = latent_module(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **latent_kwargs)
+                # Case 3: No input scalars, but conditioning is present. Use conditioning tensor to generate weights.
+                elif has_conditioning:
+                    # The MLP generates weight modulations from the conditioning tensor.
+                    # We add a learnable bias which acts as the default weights when conditioning is zero.
+                    self.weights_emb = latent_module(mlp_input_dimension=self.conditioning_dim, mlp_output_dimension=self.eq_readout.weight_numel, has_bias=True, **latent_kwargs)
+                    # Initialize the MLP's final layer weights to zero, so the output is initially just the bias.
+                    with torch.no_grad():
+                        self.weights_emb.sequential[-1].weight.zero_()
+                        b = self.weights_emb.sequential[-1].bias
+                        b.fill_(1./math.sqrt(len(b)))
 
             if reshape_back:
                 self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
@@ -105,7 +128,7 @@ class EquivariantScalarMLP(nn.Module):
             # Input is channel-wise: [N, C, D_channel]
             # We need to extract scalars and reshape them to be flat for the MLP.
             # The number of scalar features per channel is self.n_scalars_in // multiplicity
-            n_scalar_channels = self.n_scalars_in // self.in_irreps[0].mul
+            n_scalar_channels = self.n_scalars_in // self.in_multiplicity
             scalars_channel, equiv_channel = torch.split(features, [n_scalar_channels, features.shape[-1] - n_scalar_channels], dim=-1)
             scalars = scalars_channel.reshape(features.shape[0], -1) # [N, C, D_scalar_channel] -> [N, C * D_scalar_channel]
             equiv = equiv_channel # This part remains channel-wise for the equivariant readout
@@ -113,28 +136,28 @@ class EquivariantScalarMLP(nn.Module):
             # Input is flat: [N, D_flat]
             scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
 
-        if self.conditioner and conditioning_tensor is not None:
-            scalars = self.conditioner["film1"](scalars, conditioning_tensor)
-            scalars = self.conditioner["fc1"](scalars)
-            scalars = self.conditioner["film2"](scalars, conditioning_tensor)
+        # Apply conditioning to the initial scalar features
+        if self.conditioning_dim > 0 and self.n_scalars_in > 0 and conditioning_tensor is not None:
+            assert self.conditioner is not None
+            scalars = self.conditioner["film"](scalars, conditioning_tensor)
 
         out_scalars_list = []
         if self.has_invariant_output:
-            assert self.inv_readout is not None
-            current_out_scalars = self.inv_readout(scalars) # [N, D_scalar]
-            
+            # Process the (now possibly conditioned) scalars through the main MLP
+            assert self.scalar_processor is not None
+            processed_scalars = self.scalar_processor(scalars)
+
             # If we have an un-flattened equivariant output, we need to reshape the scalars to match.
             # The equivariant output will be [N, C, D_equiv], so scalars should become [N, C, D_scalar].
             if self.has_equivariant_output and self.reshape_back_features is None:
                 # Get multiplicity `C` from the output irreps
-                multiplicity = self.out_irreps[0].mul 
                 # Reshape scalars from [N, D_scalar_total] to [N, C, D_scalar_per_channel]
-                num_scalar_channels = self.n_scalars_out // multiplicity
-                if self.n_scalars_out % multiplicity != 0:
+                num_scalar_channels = self.n_scalars_out // self.out_multiplicity
+                if self.n_scalars_out % self.out_multiplicity != 0:
                     raise ValueError("When reshape_back=False, the number of scalar outputs must be divisible by the output multiplicity.")
-                current_out_scalars = current_out_scalars.view(current_out_scalars.shape[0], multiplicity, num_scalar_channels)
+                processed_scalars = processed_scalars.view(processed_scalars.shape[0], self.out_multiplicity, num_scalar_channels)
 
-            out_scalars_list.append(current_out_scalars)
+            out_scalars_list.append(processed_scalars)
 
         out_equiv_list = []
         if self.has_equivariant_output:
@@ -143,12 +166,18 @@ class EquivariantScalarMLP(nn.Module):
             else:
                 eq_features_in = equiv # Already in [N, C, D_equiv_channel]
             
-            if self.use_internal_weights:
+            if self.eq_readout_internal is not None:
                 assert self.eq_readout_internal is not None
                 eq_features_out = self.eq_readout_internal(eq_features_in)
             else:
                 assert self.eq_readout is not None and self.weights_emb is not None
-                weights = self.weights_emb(scalars)
+                # If scalars are present, use them (already conditioned) to generate weights
+                if self.n_scalars_in > 0:
+                    weights = self.weights_emb(scalars)
+                # Otherwise, use the conditioning tensor directly
+                else:
+                    assert conditioning_tensor is not None, "Conditioning tensor must be provided when n_scalars_in is 0 and conditioning is enabled."
+                    weights = self.weights_emb(conditioning_tensor)
                 eq_features_out = self.eq_readout(eq_features_in, weights)
             
             if self.reshape_back_features is not None:

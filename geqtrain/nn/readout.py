@@ -18,6 +18,7 @@ from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 
 @compile_mode("script")
 class ReadoutModule(GraphModuleMixin, nn.Module):
+    conditioning_fields: List[str]
     """
     This module takes a feature tensor (`field`) and computes an output tensor
     (`out_field`). It can optionally condition its internal transformations on a
@@ -118,7 +119,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
     def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         features = data[self.field]
         conditioning_tensor: Optional[torch.Tensor] = None
-        if self.conditioning_fields:
+        if len(self.conditioning_fields) > 0:
             conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
             conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
 
@@ -168,7 +169,9 @@ class AttentionReadoutModule(ReadoutModule):
         self.scalar_attnt_enabled = True
         idx_key = ""
         
-        self.split_index = self.processor.split_index
+        # self.split_index is initialized in the parent `processor`
+        # but JIT needs a type hint.
+        self.split_index: int = self.processor.split_index
         if self.field in _NODE_FIELDS:
             idx_key = AtomicDataDict.BATCH_KEY
         elif self.field in _GRAPH_FIELDS and dataset_mode == 'ensemble':

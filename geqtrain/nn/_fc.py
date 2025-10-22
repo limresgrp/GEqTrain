@@ -6,10 +6,9 @@ from typing import List, Optional
 from collections import OrderedDict
 from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus, ShiftedSoftPlusModule, SwiGLUModule
+from geqtrain.nn.nonlinearities import ShiftedSoftPlus, SwiGLU, Swish, ShiftedSoftPlusModule, SwiGLUModule, SwishModule
 from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
-
 
 def select_nonlinearity(nonlinearity):
     if nonlinearity == 'ssp': non_lin_instance = ShiftedSoftPlusModule()
@@ -18,6 +17,7 @@ def select_nonlinearity(nonlinearity):
     elif nonlinearity == "relu": non_lin_instance = torch.nn.ReLU()
     elif nonlinearity == "swiglu": non_lin_instance = SwiGLUModule()
     elif nonlinearity == "sigmoid": non_lin_instance = torch.nn.Sigmoid()
+    elif nonlinearity == "swish": non_lin_instance = SwishModule()
     elif nonlinearity: raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
     return non_lin_instance
 
@@ -111,11 +111,12 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         nonlinearity = {
             None: None,
             "silu": torch.nn.functional.silu,
-            "ssp": ShiftedSoftPlusModule,
+            "ssp": ShiftedSoftPlus,
             "selu": torch.nn.functional.selu,
             "relu": torch.nn.functional.relu,
-            "swiglu": SwiGLUModule,
+            "swiglu": SwiGLU,
             "sigmoid": torch.nn.functional.sigmoid,
+            "swish": Swish
         }[mlp_nonlinearity]
 
         if nonlinearity is None:
@@ -129,6 +130,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             if nonlinearity is not None:
                 if mlp_nonlinearity == "ssp":
                     nonlin_const = normalize2mom(ShiftedSoftPlus).cst
+                elif mlp_nonlinearity == "swish":
+                    nonlin_const = normalize2mom(Swish).cst
                 elif mlp_nonlinearity in ["selu", "relu", "sigmoid"]:
                     nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
                 elif mlp_nonlinearity == "silu":

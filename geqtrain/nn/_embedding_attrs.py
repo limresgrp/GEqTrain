@@ -95,6 +95,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         self.n_types = 0
         
         output_embedding_dim = 0
+        my_irreps_in = {}
         for field, values in attributes.items():
             embedding_mode = values.get('embedding_mode', 'embedding')
             if embedding_mode == 'embedding' and 'embedding_dimensionality' not in values: # if attr is not used as embedding
@@ -104,6 +105,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
             if values.get('attribute_type', 'categorical') == 'numerical':
                 output_embedding_dim += embedding_dim
                 self._numerical_attrs.append(field)
+                my_irreps_in[field] = Irreps(f'{embedding_dim}x0e')
             else:
                 self.n_types: int = values['actual_num_types']
                 if embedding_mode == 'one_hot':
@@ -119,6 +121,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                     output_embedding_dim_incr = embedding_dim
                 output_embedding_dim += output_embedding_dim_incr
                 self._categorical_attrs_modules[field] = emb_module
+                my_irreps_in[field] = None # Categorical are integers
         
         eq_output_embedding_dim = 0
         eq_irreps = None
@@ -135,6 +138,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
             else:
                 eq_irreps += field_irreps
             self._eq_numerical_attrs.append(field)
+            my_irreps_in[field] = field_irreps
 
         self._has_categoricals = len(self._categorical_attrs_modules) > 0
         self._has_numericals   = len(self._numerical_attrs) > 0
@@ -146,7 +150,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         if self._has_equivariants:
             assert self.eq_out_field is not None
             irreps_out[self.eq_out_field] = eq_irreps
-        self._init_irreps(irreps_in=irreps_in, irreps_out=irreps_out)
+        self._init_irreps(irreps_in=irreps_in, my_irreps_in=my_irreps_in, irreps_out=irreps_out)
 
     # --------------------------------------------------- #
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
