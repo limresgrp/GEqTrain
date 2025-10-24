@@ -89,36 +89,26 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
 @compile_mode("script")
 class BaseEdgeEmbedding(BaseEmbedding):
 
-    def __init__(self, latent_dim=None, proj_to_latent=True, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.has_edge_attr  = False
-        self.proj_to_latent = proj_to_latent
-
-        edge_radial_irreps = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        edge_dim = edge_radial_irreps.dim
-        out_dim = edge_dim
         
+        edge_dim = 0
         if self.edge_field in self.irreps_in:
             self.has_edge_attr = True
             edge_dim += self.irreps_in[self.edge_field].dim
 
-        if self.proj_to_latent and latent_dim is not None:
-            self.linear_proj = torch.nn.Linear(edge_dim, latent_dim)
-            self.linear_proj.reset_parameters()
-            out_dim = latent_dim
-
-        self.out_irreps = o3.Irreps(f"{out_dim}x0e")
+        self.out_irreps = o3.Irreps(f"{edge_dim}x0e")
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_attrs_to_cat = [data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]]
+        edge_attrs_to_cat = []
         if self.has_edge_attr:
             edge_field = self.edge_field
             assert isinstance(edge_field, str)
             edge_attrs_to_cat.append(data.pop(edge_field))
-        edge_attrs_emb = torch.cat(edge_attrs_to_cat, dim=-1)
-        if self.proj_to_latent:
-            edge_attrs_emb = self.linear_proj(edge_attrs_emb)
-        return edge_attrs_emb
+        if len(edge_attrs_to_cat) == 0:
+            return None
+        return torch.cat(edge_attrs_to_cat, dim=-1)
 
 
 @compile_mode("script")
@@ -126,22 +116,15 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.has_node_eq_attr = False
         self.has_edge_eq_attr = False
 
         # 1. Create the Irreps object for the naively concatenated features
-        unsorted_irreps_list = list(self.irreps_in[AtomicDataDict.EDGE_SPHARMS_EMB_KEY])
+        unsorted_irreps_list = []
         if self.edge_eq_field in self.irreps_in:
             self.has_edge_eq_attr = True
-            # 1.1 Add edge_eq_input_attr to the Irreps object
             unsorted_irreps_list += list(self.irreps_in[self.edge_eq_field])
-
-        if self.node_eq_field in self.irreps_in: # concat node_eq_attr of each atom pair to spharms
-            self.has_node_eq_attr = True
-            # 1.2 Add pairs of node_eq_input_attr to the Irreps object
-            unsorted_irreps_list += list(self.node_eq_irreps_out) + list(self.node_eq_irreps_out)
             
-        if self.has_edge_eq_attr or self.has_node_eq_attr:
+        if self.has_edge_eq_attr:
             unsorted_irreps = o3.Irreps(unsorted_irreps_list)
             # 2. Get the sorted irreps and the BLOCK permutation
             sorted_irreps, p_blocks, _ = unsorted_irreps.sort()
@@ -166,25 +149,13 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
         self.out_irreps = edge_eq_irreps
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_eq_attr = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
+        edge_eq_attr = None
         if self.has_edge_eq_attr:
-            # 1.1 Perform the naive concatenation.
+            # 1 Perform the naive concatenation.
             edge_eq_field = self.edge_eq_field
             assert isinstance(edge_eq_field, str)
-            edge_eq_attr = torch.cat([edge_eq_attr, data.pop(edge_eq_field)])
-        if self.has_node_eq_attr:
-            # 1.2 Perform the naive concatenation.
-            edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-            edge_neigh  = data[AtomicDataDict.EDGE_INDEX_KEY][1]
-            node_eq_field = self.node_eq_field
-            assert isinstance(node_eq_field, str)
-            node_eq_attr            = data[node_eq_field]
-            edge_eq_attr = torch.cat([
-                edge_eq_attr, 
-                node_eq_attr[edge_center], 
-                node_eq_attr[edge_neigh]
-            ], dim=-1)
-        if self.has_edge_eq_attr or self.has_node_eq_attr:
+            edge_eq_attr = data.pop(edge_eq_field)
+        if self.has_edge_eq_attr:
             # 2. Apply the pre-computed element-wise permutation.
             #    This `edge_attr` tensor now correctly corresponds to `input_edge_eq_irreps`.
             edge_eq_attr = edge_eq_attr[:, self.concatenation_permutation]

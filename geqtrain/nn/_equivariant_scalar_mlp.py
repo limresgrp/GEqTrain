@@ -1,6 +1,6 @@
 import math
-from typing import List, Optional, Union
-
+from typing import List, Optional, Union, Tuple
+ 
 import torch
 from torch import nn
 from e3nn import o3
@@ -19,28 +19,61 @@ class EquivariantScalarMLP(nn.Module):
     A module that processes a feature tensor containing both scalar and equivariant parts.
     It applies an MLP to the scalar part and a weighted linear transformation to the
     equivariant part, with optional conditioning.
+
+    It can take a single feature tensor and split it internally, or it can take
+    pre-split scalar and equivariant tensors. It can also return a single concatenated
+    tensor or a tuple of (scalars, equivariants).
     """
     def __init__(
         self,
-        in_irreps: o3.Irreps = None,
-        out_irreps: o3.Irreps = None,
-        in_dim: int = None,
-        out_dim: int = None,
+        in_irreps: Union[int, o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
+        out_irreps: Union[o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
         conditioning_dim: int = 0,
         latent_module=ScalarMLPFunction,
         latent_kwargs={},
+        equiv_linear_module=Linear, # Linear is much faster but SO3_Linear can handle irreps with different multiplicities (e.g. 10x0e+5x1o)
         strict_irreps: bool = True,
         reshape_in: bool = True,
         reshape_back: bool = True,
     ):
         super().__init__()
-        if in_irreps is None and in_dim is not None:
-            in_irreps = o3.Irreps(f'{in_dim}x0e')
-        if out_irreps is None and out_dim is not None:
-            out_irreps = o3.Irreps(f'{out_dim}x0e')
-        self.in_irreps = in_irreps
-        self.out_irreps = out_irreps
+        self.input_mode = "single" if isinstance(in_irreps, (o3.Irreps, int))  else "split"
+        self.output_mode = "single" if isinstance(out_irreps, (o3.Irreps, int)) else "split"
         self.conditioning_dim = conditioning_dim
+
+        # --- Determine Processor Input Irreps ---
+        if self.input_mode == "single":
+            if not isinstance(in_irreps, o3.Irreps):
+                in_irreps = o3.Irreps(f"{in_irreps}x0e")
+            self.in_irreps_scalar = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l == 0])
+            self.in_irreps_equiv = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
+            self.in_irreps = in_irreps
+        elif self.input_mode == "split":
+            if not isinstance(in_irreps, tuple) or len(in_irreps) != 2:
+                raise ValueError("For input_mode='split', in_irreps must be a tuple of (scalar_irreps, equivariant_irreps).")
+            self.in_irreps_scalar, self.in_irreps_equiv = in_irreps
+            if not all(ir.l == 0 for _, ir in self.in_irreps_scalar):
+                raise ValueError(f"Scalar part of split input contains non-scalar irreps: {self.in_irreps_scalar}")
+            self.in_irreps = self.in_irreps_scalar + self.in_irreps_equiv
+        else:
+            raise ValueError(f"Invalid input_mode: {self.input_mode}")
+
+        # --- Determine Processor Output Irreps ---
+        if self.output_mode == "single":
+            if not isinstance(out_irreps, o3.Irreps):
+                out_irreps = o3.Irreps(f"{out_irreps}x0e")
+            self.out_irreps_scalar = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l == 0])
+            self.out_irreps_equiv = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
+            self.out_irreps = out_irreps
+        elif self.output_mode == "split":
+            if not isinstance(out_irreps, tuple) or len(out_irreps) != 2:
+                raise ValueError("For output_mode='split', out_irreps must be a tuple of (scalar_irreps, equivariant_irreps).")
+            self.out_irreps_scalar, self.out_irreps_equiv = out_irreps
+            if not all(ir.l == 0 for _, ir in self.out_irreps_scalar):
+                raise ValueError(f"Scalar part of split output contains non-scalar irreps: {self.out_irreps_scalar}")
+            self.out_irreps = self.out_irreps_scalar + self.out_irreps_equiv
+        else:
+            raise ValueError(f"Invalid output_mode: {self.output_mode}")
 
         # Store multiplicities as attributes for TorchScript compatibility
         self.in_multiplicity: int = 1
@@ -51,12 +84,11 @@ class EquivariantScalarMLP(nn.Module):
             self.out_multiplicity = self.out_irreps[0].mul
 
         # --- Feature Properties ---
-        self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
-        self.n_scalars_out = sum(mul for mul, ir in out_irreps if ir.l == 0)
+        self.n_scalars_in = self.in_irreps_scalar.dim
+        self.n_scalars_out = sum(mul * ir.dim for mul, ir in self.out_irreps if ir.l == 0)
         self.has_invariant_output = self.n_scalars_out > 0
-        self.has_equivariant_output = out_irreps.dim > self.n_scalars_out
-        self.split_index = sum(mul for mul, ir in in_irreps if ir in [SCALAR, PSEUDO_SCALAR])
-
+        self.has_equivariant_output = self.out_irreps.dim > self.n_scalars_out
+        
         has_conditioning = self.conditioning_dim > 0
 
         # --- Conditioning Layers ---
@@ -87,18 +119,16 @@ class EquivariantScalarMLP(nn.Module):
         self.reshape_back_features = None
 
         if self.has_equivariant_output:
-            eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
-            assert len(eq_in_irreps) > 0, "No equivariant (l > 0) input irreps found. Cannot perform equivariant readout."
-            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
+            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in self.out_irreps if ir.l > 0])
             if reshape_in:
-                self.reshape_in = reshape_irreps(eq_in_irreps)
+                self.reshape_in = reshape_irreps(self.in_irreps_equiv)
 
             # Case 1: No input scalars AND no conditioning -> Use internal, learnable weights
             if self.n_scalars_in == 0 and not has_conditioning:
-                self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, shared_weights=True, pad_to_alignment=1)
+                self.eq_readout_internal = equiv_linear_module(self.in_irreps_equiv, eq_out_irreps, internal_weights=True, shared_weights=True, pad_to_alignment=1)
             else:
                 # Case 2 & 3: Weights are generated externally from either scalars or conditioning tensor
-                self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
+                self.eq_readout = equiv_linear_module(self.in_irreps_equiv, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
                 
                 # Case 2: Input scalars are present. Use them to generate weights.
                 if self.n_scalars_in > 0:
@@ -116,40 +146,54 @@ class EquivariantScalarMLP(nn.Module):
 
             if reshape_back:
                 self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
-        elif strict_irreps and in_irreps.dim > self.n_scalars_in:
-            raise ValueError(
-                f"Input contains non-scalar irreps ({in_irreps}), "
-                f"but output is all scalars ({out_irreps}). Non-scalar features would be unused. "
-                "To allow this, set 'strict_irreps=False'."
-            )
+        elif strict_irreps and self.in_irreps.dim > self.n_scalars_in:
+             raise ValueError(
+                 f"Input contains non-scalar irreps ({self.in_irreps}), "
+                 f"but output is all scalars ({self.out_irreps}). Non-scalar features would be unused. "
+                 "To allow this, set 'strict_irreps=False'."
+             )
 
-    def forward(self, features: torch.Tensor, conditioning_tensor: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if self.reshape_in is None and self.has_equivariant_output:
-            # Input is channel-wise: [N, C, D_channel]
-            # We need to extract scalars and reshape them to be flat for the MLP.
-            # The number of scalar features per channel is self.n_scalars_in // multiplicity
-            n_scalar_channels = self.n_scalars_in // self.in_multiplicity
-            scalars_channel, equiv_channel = torch.split(features, [n_scalar_channels, features.shape[-1] - n_scalar_channels], dim=-1)
-            scalars = scalars_channel.reshape(features.shape[0], -1) # [N, C, D_scalar_channel] -> [N, C * D_scalar_channel]
-            equiv = equiv_channel # This part remains channel-wise for the equivariant readout
+    def forward(
+        self,
+        features: Union[torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
+        conditioning_tensor: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
+
+        # -- 1. Unpack inputs --
+        if self.input_mode == "split":
+            if not isinstance(features, tuple):
+                raise ValueError("input_mode is 'split', but 'features' was not a tuple.")
+            scalars, equiv = features
         else:
-            # Input is flat: [N, D_flat]
-            scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+            if self.in_irreps is None:
+                raise ValueError("Received single tensor input, but `in_irreps` was not provided at init.")
+            # Input is a single tensor, split it
+            if self.reshape_in is None and self.has_equivariant_output:
+                # Input is channel-wise: [N, C, D_channel]
+                # We need to extract scalars and reshape them to be flat for the MLP.
+                # The number of scalar features per channel is self.n_scalars_in // multiplicity
+                n_scalar_channels = self.n_scalars_in // self.in_multiplicity
+                scalars_channel, equiv_channel = torch.split(features, [n_scalar_channels, features.shape[-1] - n_scalar_channels], dim=-1)
+                scalars = scalars_channel.reshape(features.shape[0], -1) # [N, C, D_scalar_channel] -> [N, C * D_scalar_channel]
+                equiv = equiv_channel # This part remains channel-wise for the equivariant readout
+            else:
+                # Input is flat: [N, D_flat]
+                scalars, equiv = torch.split(features, [self.n_scalars_in, features.shape[-1] - self.n_scalars_in], dim=-1)
 
-        # Apply conditioning to the initial scalar features
+        # -- 2. Apply conditioning to scalar features --
         if self.conditioning_dim > 0 and self.n_scalars_in > 0 and conditioning_tensor is not None:
             assert self.conditioner is not None
             scalars = self.conditioner["film"](scalars, conditioning_tensor)
 
-        out_scalars_list = []
+        # -- 3. Process scalar features --
+        out_scalars: Optional[torch.Tensor] = None
         if self.has_invariant_output:
-            # Process the (now possibly conditioned) scalars through the main MLP
             assert self.scalar_processor is not None
             processed_scalars = self.scalar_processor(scalars)
 
             # If we have an un-flattened equivariant output, we need to reshape the scalars to match.
             # The equivariant output will be [N, C, D_equiv], so scalars should become [N, C, D_scalar].
-            if self.has_equivariant_output and self.reshape_back_features is None:
+            if self.has_equivariant_output and self.reshape_back_features is None and self.output_mode == "single":
                 # Get multiplicity `C` from the output irreps
                 # Reshape scalars from [N, D_scalar_total] to [N, C, D_scalar_per_channel]
                 num_scalar_channels = self.n_scalars_out // self.out_multiplicity
@@ -157,9 +201,10 @@ class EquivariantScalarMLP(nn.Module):
                     raise ValueError("When reshape_back=False, the number of scalar outputs must be divisible by the output multiplicity.")
                 processed_scalars = processed_scalars.view(processed_scalars.shape[0], self.out_multiplicity, num_scalar_channels)
 
-            out_scalars_list.append(processed_scalars)
+            out_scalars = processed_scalars
 
-        out_equiv_list = []
+        # -- 4. Process equivariant features --
+        out_equiv: Optional[torch.Tensor] = None
         if self.has_equivariant_output:
             if self.reshape_in is not None:
                 eq_features_in = self.reshape_in(equiv) # [N, D_equiv_flat] -> [N, C, D_equiv_channel]
@@ -170,23 +215,32 @@ class EquivariantScalarMLP(nn.Module):
                 assert self.eq_readout_internal is not None
                 eq_features_out = self.eq_readout_internal(eq_features_in)
             else:
-                assert self.eq_readout is not None and self.weights_emb is not None
-                # If scalars are present, use them (already conditioned) to generate weights
+                assert self.eq_readout is not None
+                assert self.weights_emb is not None
                 if self.n_scalars_in > 0:
                     weights = self.weights_emb(scalars)
-                # Otherwise, use the conditioning tensor directly
                 else:
                     assert conditioning_tensor is not None, "Conditioning tensor must be provided when n_scalars_in is 0 and conditioning is enabled."
                     weights = self.weights_emb(conditioning_tensor)
                 eq_features_out = self.eq_readout(eq_features_in, weights)
             
             if self.reshape_back_features is not None:
-                out_equiv_list.append(self.reshape_back_features(eq_features_out))
+                out_equiv = self.reshape_back_features(eq_features_out)
             else:
-                out_equiv_list.append(eq_features_out)
+                out_equiv = eq_features_out
 
-        output_components = out_scalars_list + out_equiv_list
-        if not output_components:
+        # -- 5. Combine and return outputs --
+        if out_scalars is None and out_equiv is None:
             raise ValueError("EquivariantScalarMLP produced no output features.")
+
+        if self.output_mode == "split":
+            return out_scalars, out_equiv
+
+        # output_mode is "single"
+        if out_scalars is None:
+            return out_equiv
+        if out_equiv is None:
+            return out_scalars
         
-        return torch.cat(output_components, dim=-1)
+        # The first n_scalars_out dimensions of the concatenated tensor are the scalars
+        return torch.cat([out_scalars, out_equiv], dim=-1)

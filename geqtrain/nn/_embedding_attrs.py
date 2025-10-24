@@ -292,12 +292,8 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             irreps_in     = irreps_out,
             **edge_eq_emb_kwargs
         ) if edge_eq_emb is not None else None
-        if self.edge_eq_emb is None:
-            edge_eq_irreps_out = self.irreps_in[AtomicDataDict.EDGE_SPHARMS_EMB_KEY]
-        else:
-            edge_eq_irreps_out = self.edge_eq_emb.out_irreps
-        irreps_out[self.edge_eq_out_field] = edge_eq_irreps_out
-
+        if self.edge_eq_emb is not None:
+            irreps_out[self.edge_eq_out_field] = self.edge_eq_emb.out_irreps
         self.irreps_out.update(irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
@@ -308,28 +304,23 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             node_attr: torch.Tensor = self.node_emb(data)
         data[self.node_out_field] = node_attr
         
-        # node equivariant (optional)
+        # node equivariant
         node_eq_attr: Optional[torch.Tensor] = None
-        if self.node_eq_emb is None:
-            if self.node_eq_field in data:
-                node_eq_attr = data.get(self.node_eq_field) # default embedding
-        else:
+        if self.node_eq_emb is not None:
             node_eq_attr = self.node_emb(data)
-        if node_eq_attr is not None:
-            data[self.node_eq_out_field] = node_eq_attr
+            if node_eq_attr is not None:
+                data[self.node_eq_out_field] = node_eq_attr
         
         # edge scalar
-        if self.edge_emb is None:
-            edge_attr = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY] # default embedding
-        else:
+        if self.edge_emb is not None:
             edge_attr = self.edge_emb(data)
-        data[self.edge_out_field] = edge_attr
+            if edge_attr is not None:
+                data[self.edge_out_field] = edge_attr
         
         # edge equivariant
-        if self.edge_eq_emb is None:
-            edge_eq_attr = data[AtomicDataDict.EDGE_SPHARMS_EMB_KEY] # default embedding
-        else:
+        if self.edge_eq_emb is not None:
             edge_eq_attr = self.edge_eq_emb(data)
-        data[self.edge_eq_out_field] = edge_eq_attr
+            if edge_eq_attr is not None:
+                data[self.edge_eq_out_field] = edge_eq_attr
         
         return data

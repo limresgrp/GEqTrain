@@ -11,6 +11,8 @@ from ._goten_model import GotenModel
 from ._build import model_from_config
 from ._mace_model import MACEModel
 from ._recycle import RecycleModel
+from ._sph2cart import Spherical2CartesianModel
+
 
 __all__ = [
     NodeModel,
@@ -28,4 +30,5 @@ __all__ = [
     GotenModel,
     MACEModel,
     RecycleModel,
+    Spherical2CartesianModel,
 ]

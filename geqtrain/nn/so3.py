@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 import torch
 
 from e3nn import o3
@@ -13,6 +14,9 @@ class SO3_Linear(torch.nn.Module):
         in_irreps: o3.Irreps,
         out_irreps: o3.Irreps,
         bias: bool = True,
+        internal_weights: bool = True,
+        shared_weights: Optional[bool] = None, # unused
+        pad_to_alignment: int = 1, # unused
     ):
         '''
         Initializes a fully-connected SO(3)-equivariant linear layer that
@@ -22,36 +26,50 @@ class SO3_Linear(torch.nn.Module):
             in_irreps (o3.Irreps): Input irreducible representations.
             out_irreps (o3.Irreps): Output irreducible representations.
             bias (bool): Whether to include a bias term for the scalar (l=0) outputs.
+            internal_weights (bool): If True, the module will have its own learnable weights.
+                                     If False, it will expect weights to be passed in the forward call.
         '''
         super().__init__()
-        self.in_irreps = in_irreps #o3.Irreps(in_irreps).simplify()
-        self.out_irreps = out_irreps # o3.Irreps(out_irreps).simplify()
+        self.in_irreps = in_irreps
+        self.out_irreps = out_irreps
+        self.internal_weights = internal_weights
 
         self.paths = torch.nn.ModuleList()
         self.instructions = []
+        self.weight_numel = 0
 
         # Get convenient slicing information for our input and output tensors
         in_slices = {ir: s for ir, s in zip(self.in_irreps, self.in_irreps.slices())}
         out_slices = {ir: s for ir, s in zip(self.out_irreps, self.out_irreps.slices())}
 
+        weight_start_idx = 0
         for ir_out, s_out in out_slices.items():
             for ir_in, s_in in in_slices.items():
                 # A path is valid only if the irrep type is the same
                 if ir_in.ir == ir_out.ir:
-                    # Create a standard linear layer that will mix the multiplicities
-                    path = torch.nn.Linear(ir_in.mul, ir_out.mul, bias=False)
-                    self.init_path_weights(path) # Optional: Kaiming init
+                    path_weight_numel = ir_in.mul * ir_out.mul
+                    self.weight_numel += path_weight_numel
 
-                    path_idx = len(self.paths)
-                    self.paths.append(path)
+                    if self.internal_weights:
+                        # Create a standard linear layer that will mix the multiplicities
+                        path = torch.nn.Linear(ir_in.mul, ir_out.mul, bias=False)
+                        self.init_path_weights(path) # Optional: Kaiming init
+                        path_idx = len(self.paths)
+                        self.paths.append(path)
+                    else:
+                        path_idx = -1 # Not used
 
                     # Store instructions for the forward pass
                     self.instructions.append({
                         "in_slice": s_in,
                         "out_slice": s_out,
                         "path_idx": path_idx,
+                        "mul_in": ir_in.mul,
+                        "mul_out": ir_out.mul,
                         "dim": ir_in.ir.dim,
+                        "weight_slice": slice(weight_start_idx, weight_start_idx + path_weight_numel),
                     })
+                    weight_start_idx += path_weight_numel
         
         self.bias = None
         self.bias_slice = None
@@ -66,7 +84,11 @@ class SO3_Linear(torch.nn.Module):
         # A simple but effective initialization
         torch.nn.init.kaiming_uniform_(path.weight, a=math.sqrt(5))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        weights: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         '''
         Forward pass for the SO3_Linear layer.
 
@@ -76,36 +98,63 @@ class SO3_Linear(torch.nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, out_irreps.dim).
         '''
+        if not self.internal_weights and weights is None:
+            raise ValueError("`internal_weights` is False, but no `weights` tensor was provided to forward().")
+        if not self.internal_weights and weights is not None:
+            if weights.shape[-1] != self.weight_numel:
+                raise ValueError(f"Provided weights tensor has wrong size. Expected {self.weight_numel}, got {weights.shape[-1]}")
+
         # Create an output tensor of the correct shape, filled with zeros.
         # We will add the results of each path to this tensor.
         output = torch.zeros(x.shape[0], self.out_irreps.dim, device=x.device, dtype=x.dtype)
 
-        for ins in self.instructions:
-            # 1. Slice the input to get the features for one irrep type
-            input_chunk = x[:, ins["in_slice"]]
+        if self.internal_weights:
+            for ins in self.instructions:
+                # 1. Slice the input to get the features for one irrep type
+                input_chunk = x[:, ins["in_slice"]]
 
-            # 2. Reshape to separate multiplicity and irrep dimensions
-            # from (batch, mul_in * dim) -> (batch, mul_in, dim)
-            input_chunk = input_chunk.reshape(x.shape[0], -1, ins["dim"])
-            
-            # 3. Transpose for torch.nn.Linear, which expects features in the last dim
-            # from (batch, mul_in, dim) -> (batch, dim, mul_in)
-            input_chunk = input_chunk.transpose(1, 2)
+                # 2. Reshape to separate multiplicity and irrep dimensions
+                # from (batch, mul_in * dim) -> (batch, mul_in, dim)
+                input_chunk = input_chunk.reshape(x.shape[0], -1, ins["dim"])
+                
+                # 3. Transpose for torch.nn.Linear, which expects features in the last dim
+                # from (batch, mul_in, dim) -> (batch, dim, mul_in)
+                input_chunk = input_chunk.transpose(1, 2)
 
-            # 4. Apply the linear layer to the multiplicity channel
-            path = self.paths[ins["path_idx"]]
-            processed_chunk = path(input_chunk) # output: (batch, dim, mul_out)
+                # 4. Apply the linear layer to the multiplicity channel
+                path = self.paths[ins["path_idx"]]
+                processed_chunk = path(input_chunk) # output: (batch, dim, mul_out)
 
-            # 5. Transpose back
-            # from (batch, dim, mul_out) -> (batch, mul_out, dim)
-            processed_chunk = processed_chunk.transpose(1, 2)
+                # 5. Transpose back
+                # from (batch, dim, mul_out) -> (batch, mul_out, dim)
+                processed_chunk = processed_chunk.transpose(1, 2)
 
-            # 6. Reshape back to a flat feature vector
-            # from (batch, mul_out, dim) -> (batch, mul_out * dim)
-            processed_chunk = processed_chunk.reshape(x.shape[0], -1)
+                # 6. Reshape back to a flat feature vector
+                # from (batch, mul_out, dim) -> (batch, mul_out * dim)
+                processed_chunk = processed_chunk.reshape(x.shape[0], -1)
 
-            # 7. Add the result to the correct slice of the output tensor
-            output[:, ins["out_slice"]] += processed_chunk
+                # 7. Add the result to the correct slice of the output tensor
+                output[:, ins["out_slice"]] += processed_chunk
+        else: # use external weights
+            assert weights is not None
+            for ins in self.instructions:
+                # 1. Slice input and weights
+                input_chunk = x[:, ins["in_slice"]]
+                weight_chunk = weights[..., ins["weight_slice"]]
+
+                # 2. Reshape for einsum
+                # input: (batch, mul_in * dim) -> (batch, mul_in, dim)
+                input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
+                # weights: (..., mul_in * mul_out) -> (..., mul_out, mul_in)
+                weight_chunk = weight_chunk.reshape(weights.shape[:-1] + (ins["mul_out"], ins["mul_in"]))
+
+                # 3. Apply weights with einsum
+                # '...oi,...id->...od'
+                processed_chunk = torch.einsum('...oi,...id->...od', weight_chunk, input_chunk)
+
+                # 4. Reshape and add to output
+                processed_chunk = processed_chunk.reshape(x.shape[0], -1)
+                output[:, ins["out_slice"]] += processed_chunk
         
         if self.bias is not None:
             output[:, self.bias_slice] += self.bias
@@ -118,6 +167,7 @@ class SO3_Linear(torch.nn.Module):
             f"  in_irreps='{self.in_irreps}',\n"
             f"  out_irreps='{self.out_irreps}',\n"
             f"  bias={self.bias is not None},\n"
+            f"  internal_weights={self.internal_weights},\n"
             f"  num_paths={len(self.paths)}\n)"
         )
 

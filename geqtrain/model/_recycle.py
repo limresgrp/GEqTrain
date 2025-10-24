@@ -4,7 +4,7 @@ from typing import Optional, List
 import torch
 from e3nn import o3
 
-from geqtrain.data import AtomicDataDict
+from geqtrain.data import AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS
 from geqtrain.nn import GraphModuleMixin, SequentialGraphNetwork
 from geqtrain.nn._embedding_time import PositionalEmbedding
 from geqtrain.utils import Config
@@ -75,32 +75,30 @@ class RecycleBlock(GraphModuleMixin, torch.nn.Module):
         recycle_step = data[AtomicDataDict.RECYCLE_STEP_KEY]
 
         # 1. Add time embedding if it's configured
-        if self.time_encoding is not None:
-            data[AtomicDataDict.RECYCLE_STEP_KEY] = self.time_encoding(recycle_step, num_nodes=data[AtomicDataDict.POSITIONS_KEY].shape[0])
+        if self.time_encoding is not None: # Assuming time embedding is node-level
+            data[AtomicDataDict.RECYCLE_STEP_KEY] = self.time_encoding(recycle_step, num_nodes=data[AtomicDataDict.POSITIONS_KEY].shape[0]) 
 
         # 2. Update recycled fields
         for field in self.recycled_fields:
             # On the first cycle (k=0), initialize recycled features to zero.
+            # For subsequent cycles (k>0), the RecycleModelWrapper is responsible
+            # for setting these fields based on the previous prediction_state.
             if recycle_step[0] == 0:
-                # Use a field that is guaranteed to exist to get shape and device
-                ref_tensor = data[AtomicDataDict.POSITIONS_KEY]
-                data[field] = torch.zeros(
-                    (ref_tensor.shape[0], self.irreps_in[field].dim),
-                    device=ref_tensor.device,
-                    dtype=ref_tensor.dtype,
-                )
-            else:
-                # On subsequent cycles, perform a ResNet-style update.
-                # The previous output is expected to be in `data[f"{field}_prev_out"]`
-                prev_out_key = f"{field}_prev_out"
-                if prev_out_key not in data:
-                    raise KeyError(f"Expected previous output '{prev_out_key}' in data dictionary for recycle step > 0.")
-
-                # Use the output of the previous step as the input for the current step.
-                data[field] = data[prev_out_key]
+                field_dim = self.irreps_in[field].dim
                 
-                # Clean up the previous output key
-                del data[prev_out_key]
+                # Determine batch size based on field level (node or edge)
+                if field in _NODE_FIELDS:
+                    field_batch_size = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+                elif field in _EDGE_FIELDS:
+                    field_batch_size = data[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
+                else:
+                    raise ValueError(f"Recycled field '{field}' is not a recognized node or edge field. Cannot infer zero-initialization shape.")
+
+                data[field] = torch.zeros(
+                    (field_batch_size, field_dim),
+                    device=data[AtomicDataDict.POSITIONS_KEY].device,
+                    dtype=data[AtomicDataDict.POSITIONS_KEY].dtype,
+                )
 
         return data
 
@@ -120,11 +118,8 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
             raise ValueError("RecycleModel requires 'output_field' to be specified in the config.")
 
         recycled_fields = config.get("recycled_fields", [])
-        alpha_init = config.get("alpha_init", 1.0)
-
-        # This alpha is for the additive output update
-        self.alphas = torch.nn.ParameterList([
-            torch.nn.Parameter(torch.tensor(alpha_init, dtype=torch.float32)) for _ in range(self.recycling_steps)])
+        # Single alpha parameter for the additive output update, initialized to 0.0 so sigmoid(0.0) = 0.5
+        self.alpha_param = torch.nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
 
         register_fields(node_fields=[AtomicDataDict.RECYCLE_STEP_KEY])
         self.recycle_block = RecycleBlock(
@@ -151,39 +146,54 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         deep_supervision_predictions = []
-        final_prediction = None
-        pos = data[AtomicDataDict.POSITIONS_KEY]
-        device = pos.device
+        
+        # Determine the shape of the output field for initialization
+        output_irreps = self.wrapped_model.irreps_out[self.output_field]
+        output_dim = output_irreps.dim
+        
+        # Infer if it's node-level or edge-level to get the batch dimension
+        if self.output_field in _NODE_FIELDS:
+            batch_size = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+        elif self.output_field in _EDGE_FIELDS:
+            batch_size = data[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
+        else:
+            raise ValueError(f"Output field '{self.output_field}' is not a recognized node or edge field. Cannot infer initial prediction_state shape.")
+
+        device = data[AtomicDataDict.POSITIONS_KEY].device
+        dtype = data[AtomicDataDict.POSITIONS_KEY].dtype
+        
+        # Initialize prediction_state to zeros. This is the initial guess.
+        prediction_state = torch.zeros(batch_size, output_dim, device=device, dtype=dtype)
+
+        # Apply sigmoid to the single alpha parameter to get a step size between 0 and 1
+        alpha_sigmoid = torch.sigmoid(self.alpha_param)
 
         for k in range(self.recycling_steps):
             data[AtomicDataDict.RECYCLE_STEP_KEY] = torch.tensor([k], dtype=torch.long, device=device)
 
-            # 1. Prepare inputs for this cycle
-            # This updates recycled fields based on the previous step's output
+            # For k > 0, the recycled field (which is `self.output_field`)
+            # is set to the `prediction_state` from the previous iteration.
+            # For k = 0, `RecycleBlock` will initialize `data[self.output_field]` to zeros.
+            if k > 0:
+                if self.output_field not in self.recycle_block.recycled_fields:
+                    raise ValueError(f"Output field '{self.output_field}' must be in 'recycled_fields' for iterative refinement.")
+                data[self.output_field] = prediction_state.detach() # Detach to prevent gradients flowing through previous steps
+
+            # 1. Prepare inputs for this cycle (adds time embedding, initializes recycled fields to zero for k=0)
             data = self.recycle_block(data)
 
-            # 2. Run the core model
+            # 2. Run the core model to predict a correction/delta
             current_data = self.wrapped_model(data)
-            current_prediction = current_data[self.output_field]
+            delta_prediction = current_data[self.output_field] # The model now always predicts a delta
 
-            # 3. Update the final output prediction with a weighted additive correction
-            weighted_correction = self.alphas[k] * current_prediction
+            # 3. Update the prediction state (ResNet-style: current_prediction = previous_prediction + alpha * delta)
+            prediction_state = (1 - alpha_sigmoid) * prediction_state + alpha_sigmoid * delta_prediction
 
-            if k == 0:
-                # Initialize the prediction. This is not in-place and starts the graph.
-                final_prediction = weighted_correction
-            else:
-                # Use out-of-place addition for subsequent updates.
-                final_prediction = final_prediction + weighted_correction
-
-            # 4. Store outputs for deep supervision and for the next cycle's conditioning
-            deep_supervision_predictions.append(current_prediction.clone())
-            for field in self.recycle_block.recycled_fields:
-                # Pass the output of the recycled field to the next step, detached
-                data[f"{field}_prev_out"] = current_data[field].detach()
+            # 4. Store intermediate prediction for deep supervision
+            deep_supervision_predictions.append(prediction_state.clone())
 
         # Set the final outputs in the data dictionary
-        data[self.output_field] = final_prediction
+        data[self.output_field] = prediction_state
         data[self.output_field + AtomicDataDict.DEEP_SUPERVISION_SUFFIX] = torch.stack(deep_supervision_predictions, dim=-1)
         # Update data with key-values in current_data which data is missing
         for key, value in current_data.items():

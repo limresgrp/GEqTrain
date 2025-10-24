@@ -173,7 +173,13 @@ def assert_AtomicData_equivariant(
     device = next(func.parameters()).device
     if not isinstance(data_in, list):
         data_in = [data_in]
-    data_in = [AtomicData.to_AtomicDataDict(d.to(device)) for d in data_in]
+    
+    processed_data_in = []
+    for d in data_in:
+        if isinstance(d, dict):
+            d = AtomicData.from_dict(d)
+        processed_data_in.append(AtomicData.to_AtomicDataDict(d.to(device)))
+    data_in = processed_data_in
 
     # == Test permutation of graph nodes ==
     # since permutation is discrete and should not be data dependent, run only on one frame.
@@ -192,9 +198,12 @@ def assert_AtomicData_equivariant(
     irreps_out = func.irreps_out.copy()
     # for certain things, we don't care what the given irreps are...
     # make sure that we test correctly for equivariance:
-    cartesian_points_fields.extend([AtomicDataDict.POSITIONS_KEY])
+    # Make a copy to avoid modifying the default mutable argument, and ensure POSITIONS_KEY is only added once.
+    _cartesian_points_fields = list(cartesian_points_fields)
+    if AtomicDataDict.POSITIONS_KEY not in _cartesian_points_fields:
+        _cartesian_points_fields.append(AtomicDataDict.POSITIONS_KEY)
     for irps in (irreps_in, irreps_out):
-        for cartesian_points_field in cartesian_points_fields:
+        for cartesian_points_field in _cartesian_points_fields:
             if cartesian_points_field in irps:
                 # it should always have been 1o vectors
                 # since that's actually a valid Irreps
