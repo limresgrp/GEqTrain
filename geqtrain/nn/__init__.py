@@ -20,6 +20,7 @@ from ._combine import CombineModule
 from ._ddp import DDP
 from ._gradient import EnableGradients, ComputeGradient
 from .mace import MACEModule
+from ._equivariant_scalar_mlp import EquivariantScalarMLP
 
 __all__ = [
     GraphModuleMixin,
@@ -57,5 +58,6 @@ __all__ = [
     ComputeGradient,
     GotenInteractionModule,
     MACEModule,
+    EquivariantScalarMLP,
     select_nonlinearity,
 ]

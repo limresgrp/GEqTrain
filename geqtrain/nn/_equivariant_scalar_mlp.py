@@ -6,7 +6,7 @@ from torch import nn
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from geqtrain.nn import ScalarMLPFunction
+from geqtrain.nn import ScalarMLPFunction, SO3_Linear
 from geqtrain.nn._film import FiLMFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
@@ -26,69 +26,76 @@ class EquivariantScalarMLP(nn.Module):
     """
     def __init__(
         self,
-        in_irreps: Union[int, o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
-        out_irreps: Union[o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
+        in_irreps: Union[str, int, o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
+        out_irreps: Union[str, int, o3.Irreps, Tuple[o3.Irreps, o3.Irreps]] = None,
         conditioning_dim: int = 0,
         latent_module=ScalarMLPFunction,
         latent_kwargs={},
         equiv_linear_module=Linear, # Linear is much faster but SO3_Linear can handle irreps with different multiplicities (e.g. 10x0e+5x1o)
         strict_irreps: bool = True,
-        reshape_in: bool = True,
-        reshape_back: bool = True,
+        output_shape_spec: str = "input", # "flat", "channel_wise", or "input"
     ):
         super().__init__()
-        self.input_mode = "single" if isinstance(in_irreps, (o3.Irreps, int))  else "split"
-        self.output_mode = "single" if isinstance(out_irreps, (o3.Irreps, int)) else "split"
+        self.input_mode = "split" if isinstance(in_irreps, (Tuple)) else "single"
+        self.output_mode = "split" if isinstance(out_irreps, (Tuple)) else "single"
         self.conditioning_dim = conditioning_dim
 
+        self.equiv_linear_module = equiv_linear_module
         # --- Determine Processor Input Irreps ---
+        if output_shape_spec not in ["flat", "channel_wise", "input"]:
+            raise ValueError(f"output_shape_spec must be 'flat', 'channel_wise', or 'input', but got {output_shape_spec}")
+
+        self.output_shape_spec = output_shape_spec
         if self.input_mode == "single":
-            if not isinstance(in_irreps, o3.Irreps):
-                in_irreps = o3.Irreps(f"{in_irreps}x0e")
+            in_irreps = self._convert_to_o3_irreps(in_irreps)
             self.in_irreps_scalar = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l == 0])
             self.in_irreps_equiv = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
-            self.in_irreps = in_irreps
         elif self.input_mode == "split":
             if not isinstance(in_irreps, tuple) or len(in_irreps) != 2:
                 raise ValueError("For input_mode='split', in_irreps must be a tuple of (scalar_irreps, equivariant_irreps).")
-            self.in_irreps_scalar, self.in_irreps_equiv = in_irreps
+            in_irreps_scalar, in_irreps_equiv = in_irreps
+            self.in_irreps_scalar = self._convert_to_o3_irreps(in_irreps_scalar)
+            self.in_irreps_equiv = self._convert_to_o3_irreps(in_irreps_equiv)
             if not all(ir.l == 0 for _, ir in self.in_irreps_scalar):
                 raise ValueError(f"Scalar part of split input contains non-scalar irreps: {self.in_irreps_scalar}")
-            self.in_irreps = self.in_irreps_scalar + self.in_irreps_equiv
         else:
             raise ValueError(f"Invalid input_mode: {self.input_mode}")
 
         # --- Determine Processor Output Irreps ---
         if self.output_mode == "single":
-            if not isinstance(out_irreps, o3.Irreps):
-                out_irreps = o3.Irreps(f"{out_irreps}x0e")
+            out_irreps = self._convert_to_o3_irreps(out_irreps)
             self.out_irreps_scalar = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l == 0])
             self.out_irreps_equiv = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
-            self.out_irreps = out_irreps
         elif self.output_mode == "split":
             if not isinstance(out_irreps, tuple) or len(out_irreps) != 2:
                 raise ValueError("For output_mode='split', out_irreps must be a tuple of (scalar_irreps, equivariant_irreps).")
-            self.out_irreps_scalar, self.out_irreps_equiv = out_irreps
+            out_irreps_scalar, out_irreps_equiv = out_irreps
+            self.out_irreps_scalar = self._convert_to_o3_irreps(out_irreps_scalar)
+            self.out_irreps_equiv = self._convert_to_o3_irreps(out_irreps_equiv)
             if not all(ir.l == 0 for _, ir in self.out_irreps_scalar):
                 raise ValueError(f"Scalar part of split output contains non-scalar irreps: {self.out_irreps_scalar}")
-            self.out_irreps = self.out_irreps_scalar + self.out_irreps_equiv
         else:
             raise ValueError(f"Invalid output_mode: {self.output_mode}")
 
         # Store multiplicities as attributes for TorchScript compatibility
         self.in_multiplicity: int = 1
-        if len(self.in_irreps) > 0:
-            self.in_multiplicity = self.in_irreps[0].mul
+        if len(self.in_irreps_scalar) > 0:
+            self.in_multiplicity = self.in_irreps_scalar[0].mul
         self.out_multiplicity: int = 1
-        if len(self.out_irreps) > 0:
-            self.out_multiplicity = self.out_irreps[0].mul
+        if len(self.out_irreps_scalar) > 0:
+            self.out_multiplicity = self.out_irreps_scalar[0].mul
+
+        # If output is channel-wise, the number of scalar outputs must be divisible by the output multiplicity.
+        # This check is done at init time for clarity.
+        if self.output_shape_spec == "channel_wise" and self.output_mode == "single" and len(self.out_irreps_equiv) > 0:
+            if self.out_irreps_scalar.dim % self.out_multiplicity != 0:
+                raise ValueError(f"When output_shape_spec is 'channel_wise' and output is single, the total dimension of scalar outputs ({self.out_irreps_scalar.dim}) must be divisible by the output multiplicity ({self.out_multiplicity}). Check your `out_irreps`.")
 
         # --- Feature Properties ---
         self.n_scalars_in = self.in_irreps_scalar.dim
-        self.n_scalars_out = sum(mul * ir.dim for mul, ir in self.out_irreps if ir.l == 0)
+        self.n_scalars_out = sum(mul * ir.dim for mul, ir in self.out_irreps_scalar)
         self.has_invariant_output = self.n_scalars_out > 0
-        self.has_equivariant_output = self.out_irreps.dim > self.n_scalars_out
-        
+        self.has_equivariant_output = self.out_irreps_equiv.dim > 0
         has_conditioning = self.conditioning_dim > 0
 
         # --- Conditioning Layers ---
@@ -112,23 +119,19 @@ class EquivariantScalarMLP(nn.Module):
             )
 
         # --- Equivariant (Vectorial) Readout ---
-        self.reshape_in: Optional[reshape_irreps] = None
         self.eq_readout_internal = None
-        self.eq_readout = None
+        self.eq_readout = None # This will be an e3nn.nn.Linear or SO3_Linear
         self.weights_emb = None
-        self.reshape_back_features = None
+        self.output_reshaper = None # Converts flat output of SO3_Linear to channel_wise
+        self.output_flattener = None # Converts channel_wise output of Linear to flat
 
         if self.has_equivariant_output:
-            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in self.out_irreps if ir.l > 0])
-            if reshape_in:
-                self.reshape_in = reshape_irreps(self.in_irreps_equiv)
-
             # Case 1: No input scalars AND no conditioning -> Use internal, learnable weights
             if self.n_scalars_in == 0 and not has_conditioning:
-                self.eq_readout_internal = equiv_linear_module(self.in_irreps_equiv, eq_out_irreps, internal_weights=True, shared_weights=True, pad_to_alignment=1)
+                self.eq_readout_internal = equiv_linear_module(self.in_irreps_equiv, self.out_irreps_equiv, internal_weights=True, shared_weights=True, pad_to_alignment=1)
             else:
                 # Case 2 & 3: Weights are generated externally from either scalars or conditioning tensor
-                self.eq_readout = equiv_linear_module(self.in_irreps_equiv, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
+                self.eq_readout = equiv_linear_module(self.in_irreps_equiv, self.out_irreps_equiv, internal_weights=False, pad_to_alignment=1)
                 
                 # Case 2: Input scalars are present. Use them to generate weights.
                 if self.n_scalars_in > 0:
@@ -143,13 +146,21 @@ class EquivariantScalarMLP(nn.Module):
                         self.weights_emb.sequential[-1].weight.zero_()
                         b = self.weights_emb.sequential[-1].bias
                         b.fill_(1./math.sqrt(len(b)))
-
-            if reshape_back:
-                self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
-        elif strict_irreps and self.in_irreps.dim > self.n_scalars_in:
+            
+            # SO3_Linear always outputs flat tensors. If a channel-wise output is desired,
+            # we need to reshape its output.
+            if self.equiv_linear_module is SO3_Linear:
+                if self.output_shape_spec == "channel_wise" or self.output_shape_spec == "input":
+                    self.output_reshaper = reshape_irreps(self.out_irreps_equiv)
+            # e3nn.nn.Linear (the default) always outputs channel-wise tensors. If a flat
+            # output is desired, we need to flatten its output.
+            else: # it is Linear
+                if self.output_shape_spec == "flat" or self.output_shape_spec == "input":
+                    self.output_flattener = inverse_reshape_irreps(self.out_irreps_equiv)
+        elif strict_irreps and self.in_irreps_equiv.dim > 0:
              raise ValueError(
-                 f"Input contains non-scalar irreps ({self.in_irreps}), "
-                 f"but output is all scalars ({self.out_irreps}). Non-scalar features would be unused. "
+                 f"Input contains non-scalar irreps ({self.in_irreps_equiv}), "
+                 f"but output is all scalars ({self.out_irreps_scalar}). Non-scalar features would be unused. "
                  "To allow this, set 'strict_irreps=False'."
              )
 
@@ -164,19 +175,24 @@ class EquivariantScalarMLP(nn.Module):
             if not isinstance(features, tuple):
                 raise ValueError("input_mode is 'split', but 'features' was not a tuple.")
             scalars, equiv = features
+            input_is_channel_wise = (equiv is not None and len(equiv.shape) == 3)
         else:
-            if self.in_irreps is None:
-                raise ValueError("Received single tensor input, but `in_irreps` was not provided at init.")
             # Input is a single tensor, split it
-            if self.reshape_in is None and self.has_equivariant_output:
+            input_is_channel_wise = len(features.shape) == 3
+            if input_is_channel_wise:
                 # Input is channel-wise: [N, C, D_channel]
                 # We need to extract scalars and reshape them to be flat for the MLP.
                 # The number of scalar features per channel is self.n_scalars_in // multiplicity
+                if not self.has_equivariant_output:
+                    raise ValueError("Channel-wise input (3D tensor) is only supported when there are equivariant features.")
                 n_scalar_channels = self.n_scalars_in // self.in_multiplicity
                 scalars_channel, equiv_channel = torch.split(features, [n_scalar_channels, features.shape[-1] - n_scalar_channels], dim=-1)
                 scalars = scalars_channel.reshape(features.shape[0], -1) # [N, C, D_scalar_channel] -> [N, C * D_scalar_channel]
                 equiv = equiv_channel # This part remains channel-wise for the equivariant readout
             else:
+                # Input is flat (2D tensor)
+                if len(features.shape) != 2:
+                    raise ValueError(f"Expected a 2D tensor for flat input, but got shape {features.shape}")
                 # Input is flat: [N, D_flat]
                 scalars, equiv = torch.split(features, [self.n_scalars_in, features.shape[-1] - self.n_scalars_in], dim=-1)
 
@@ -191,14 +207,16 @@ class EquivariantScalarMLP(nn.Module):
             assert self.scalar_processor is not None
             processed_scalars = self.scalar_processor(scalars)
 
+            output_is_channel_wise = self.output_shape_spec == "channel_wise" or \
+                                     (self.output_shape_spec == "input" and input_is_channel_wise)
+
             # If we have an un-flattened equivariant output, we need to reshape the scalars to match.
             # The equivariant output will be [N, C, D_equiv], so scalars should become [N, C, D_scalar].
-            if self.has_equivariant_output and self.reshape_back_features is None and self.output_mode == "single":
-                # Get multiplicity `C` from the output irreps
+            if self.has_equivariant_output and output_is_channel_wise and self.output_mode == "single":
                 # Reshape scalars from [N, D_scalar_total] to [N, C, D_scalar_per_channel]
+                if self.out_multiplicity == 0:
+                    raise ValueError("Cannot have channel-wise output with zero output multiplicity.")
                 num_scalar_channels = self.n_scalars_out // self.out_multiplicity
-                if self.n_scalars_out % self.out_multiplicity != 0:
-                    raise ValueError("When reshape_back=False, the number of scalar outputs must be divisible by the output multiplicity.")
                 processed_scalars = processed_scalars.view(processed_scalars.shape[0], self.out_multiplicity, num_scalar_channels)
 
             out_scalars = processed_scalars
@@ -206,14 +224,9 @@ class EquivariantScalarMLP(nn.Module):
         # -- 4. Process equivariant features --
         out_equiv: Optional[torch.Tensor] = None
         if self.has_equivariant_output:
-            if self.reshape_in is not None:
-                eq_features_in = self.reshape_in(equiv) # [N, D_equiv_flat] -> [N, C, D_equiv_channel]
-            else:
-                eq_features_in = equiv # Already in [N, C, D_equiv_channel]
-            
             if self.eq_readout_internal is not None:
                 assert self.eq_readout_internal is not None
-                eq_features_out = self.eq_readout_internal(eq_features_in)
+                eq_features_out = self.eq_readout_internal(equiv)
             else:
                 assert self.eq_readout is not None
                 assert self.weights_emb is not None
@@ -222,12 +235,27 @@ class EquivariantScalarMLP(nn.Module):
                 else:
                     assert conditioning_tensor is not None, "Conditioning tensor must be provided when n_scalars_in is 0 and conditioning is enabled."
                     weights = self.weights_emb(conditioning_tensor)
-                eq_features_out = self.eq_readout(eq_features_in, weights)
+                eq_features_out = self.eq_readout(equiv, weights)
             
-            if self.reshape_back_features is not None:
-                out_equiv = self.reshape_back_features(eq_features_out)
-            else:
-                out_equiv = eq_features_out
+            # Determine the desired output shape based on output_shape_spec and input shape
+            is_channel_wise_output_desired = (
+                self.output_shape_spec == "channel_wise" or
+                (self.output_shape_spec == "input" and input_is_channel_wise)
+            )
+            is_flat_output_desired = not is_channel_wise_output_desired
+
+            # SO3_Linear outputs flat. Reshape to channel-wise if needed.
+            if self.equiv_linear_module is SO3_Linear:
+                if self.output_reshaper is not None and is_channel_wise_output_desired:
+                    out_equiv = self.output_reshaper(eq_features_out)
+                else:
+                    out_equiv = eq_features_out
+            # Linear outputs channel-wise. Flatten if needed.
+            else: # it is Linear
+                if self.output_flattener is not None and is_flat_output_desired:
+                    out_equiv = self.output_flattener(eq_features_out)
+                else:
+                    out_equiv = eq_features_out
 
         # -- 5. Combine and return outputs --
         if out_scalars is None and out_equiv is None:
@@ -244,3 +272,14 @@ class EquivariantScalarMLP(nn.Module):
         
         # The first n_scalars_out dimensions of the concatenated tensor are the scalars
         return torch.cat([out_scalars, out_equiv], dim=-1)
+
+    def _convert_to_o3_irreps(self, irreps_input: Union[str, int, o3.Irreps]) -> o3.Irreps:
+        """Converts an integer, string, or existing o3.Irreps object to an o3.Irreps object."""
+        if isinstance(irreps_input, int):
+            return o3.Irreps(f"{irreps_input}x0e")
+        elif isinstance(irreps_input, str):
+            return o3.Irreps(irreps_input)
+        elif isinstance(irreps_input, o3.Irreps):
+            return irreps_input
+        else:
+            raise TypeError(f"Unsupported irreps type: {type(irreps_input)}. Expected int, str, or o3.Irreps.")
