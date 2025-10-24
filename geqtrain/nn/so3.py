@@ -108,14 +108,26 @@ class SO3_Linear(torch.nn.Module):
         # We will add the results of each path to this tensor.
         output = torch.zeros(x.shape[0], self.out_irreps.dim, device=x.device, dtype=x.dtype)
 
+        # Check if the input is flat (batch, features) or has a channel dim (batch, mul, features)
+        is_flat_input = len(x.shape) == 2
+
         if self.internal_weights:
             for ins in self.instructions:
                 # 1. Slice the input to get the features for one irrep type
-                input_chunk = x[:, ins["in_slice"]]
+                if is_flat_input:
+                    input_chunk = x[:, ins["in_slice"]]
+                else:
+                    # For channel-wise input, the features are distributed across the last dimension.
+                    # We need to scale the slice indices by the multiplicity.
+                    s_in = ins["in_slice"]
+                    mul = self.in_irreps[0].mul
+                    channel_slice = slice(s_in.start // mul, s_in.stop // mul)
+                    input_chunk = x[..., channel_slice]
 
                 # 2. Reshape to separate multiplicity and irrep dimensions
                 # from (batch, mul_in * dim) -> (batch, mul_in, dim)
-                input_chunk = input_chunk.reshape(x.shape[0], -1, ins["dim"])
+                if is_flat_input:
+                    input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
                 
                 # 3. Transpose for torch.nn.Linear, which expects features in the last dim
                 # from (batch, mul_in, dim) -> (batch, dim, mul_in)
@@ -139,17 +151,24 @@ class SO3_Linear(torch.nn.Module):
             assert weights is not None
             for ins in self.instructions:
                 # 1. Slice input and weights
-                input_chunk = x[:, ins["in_slice"]]
                 weight_chunk = weights[..., ins["weight_slice"]]
+                if is_flat_input:
+                    input_chunk = x[:, ins["in_slice"]]
+                else:
+                    # For channel-wise input, scale the slice indices by the multiplicity.
+                    s_in = ins["in_slice"]
+                    mul = self.in_irreps[0].mul
+                    channel_slice = slice(s_in.start // mul, s_in.stop // mul)
+                    input_chunk = x[..., channel_slice]
 
                 # 2. Reshape for einsum
                 # input: (batch, mul_in * dim) -> (batch, mul_in, dim)
-                input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
+                if is_flat_input:
+                    input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
                 # weights: (..., mul_in * mul_out) -> (..., mul_out, mul_in)
                 weight_chunk = weight_chunk.reshape(weights.shape[:-1] + (ins["mul_out"], ins["mul_in"]))
 
                 # 3. Apply weights with einsum
-                # '...oi,...id->...od'
                 processed_chunk = torch.einsum('...oi,...id->...od', weight_chunk, input_chunk)
 
                 # 4. Reshape and add to output
