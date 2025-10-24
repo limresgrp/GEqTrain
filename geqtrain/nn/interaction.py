@@ -190,7 +190,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         conditioning_fields: Optional[List[str]] = None,
         irreps_in = None,
         debug: bool = False,
-        _dry_run_mode: bool = False,
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -255,24 +254,25 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # The local environment will have these irreps
         local_env_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in initial_eq_latent_irreps])
-        # The recurrent equivariant latent state only has l>0
-        eq_latent_irreps = o3.Irreps([(mul, ir) for mul, ir in local_env_irreps if ir.l > 0])
-        # Since we only use l>0 from input, the latent space will also only have l>0
-        if not _dry_run_mode: # in dry run mode, some required eq attrs migh be filled with placeholder 0e
-            assert all(ir.l > 0 for _, ir in eq_latent_irreps), "eq_latent_irreps should only contain l>0 components"
 
         # 2. Build list of dimensions for initial scalar latent
         initial_scalar_latent_dim = self.edge_radial_emb_field_irreps.dim
         if self.has_edge_invariant_field_input: initial_scalar_latent_dim += self.edge_invariant_field_irreps.dim
         if self.has_node_invariant_field_input: initial_scalar_latent_dim += 2 * self.node_invariant_field_irreps.dim
 
-        final_out_irreps, _, _ = process_out_irreps(
-            out_irreps=out_irreps, output_ls=output_ls, output_mul=output_mul,
-            latent_dim=latent_dim, edge_attrs_irreps=self.edge_spharm_emb_field_irreps,
+        default_irreps =o3.Irreps([
+            (self.latent_dim, ir) if ir.l == 0 else (eq_latent_multiplicity, ir)
+            for _, ir in self.edge_spharm_emb_field_irreps]
+        )
+        final_out_irreps = process_out_irreps(
+            out_irreps=out_irreps,
+            output_ls=output_ls,
+            output_mul=None if output_mul=="hidden" else output_mul,
+            default_irreps=default_irreps,
         )
 
         # The tensor product takes the l>0 eq_latent and the l>=0 env_nodes
-        tp_recurrent_irreps = eq_latent_irreps
+        tp_recurrent_irreps = local_env_irreps
         tp_out_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in final_out_irreps])
         tps_irreps_in, tps_irreps_out = build_tps_irreps_list(num_layers, tp_recurrent_irreps, tp_out_irreps, tp_recurrent_irreps)
 
@@ -281,18 +281,21 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # into the initial latent space for the interaction layers.
         self.initial_latent_generator = EquivariantScalarMLP(
             in_irreps=(o3.Irreps(f"{initial_scalar_latent_dim}x0e"), initial_eq_latent_irreps),
-            out_irreps=(o3.Irreps(f"{self.latent_dim}x0e"), eq_latent_irreps),
+            out_irreps=(o3.Irreps(f"{self.latent_dim}x0e"), local_env_irreps),
             latent_module=ScalarMLPFunction,
-            latent_kwargs={'mlp_latent_dimensions': [128, 128]},
+            latent_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
             equiv_linear_module=SO3_Linear,
+            output_shape_spec="channel_wise",
         )
 
         self._latent_resnet_update_params = torch.nn.Parameter(torch.zeros(self.num_layers - 1))
         self.interaction_layers = torch.nn.ModuleList()
-        final_latent_dim = self.latent_dim
         
         for i in range(self.num_layers):
             is_last_layer = (i == self.num_layers - 1)
+            linear_out_irreps = o3.Irreps(
+                [(mul, ir) for mul, ir in local_env_irreps if ir.l != 0]
+            ) if is_last_layer else local_env_irreps
 
             layer = InteractionLayer(
                 latent_dim=self.latent_dim,
@@ -304,7 +307,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 tps_irreps_in=tps_irreps_in[i],
                 tps_irreps_out=tps_irreps_out[i],
                 local_env_irreps=local_env_irreps,
-                linear_out_irreps=final_out_irreps if is_last_layer else eq_latent_irreps,
+                linear_out_irreps=linear_out_irreps,
                 irreps_in=self.irreps_in,
                 node_invariant_field=self.node_invariant_field,
                 edge_invariant_field=self.edge_invariant_field,
@@ -316,10 +319,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 debug=self.debug,
             )
             self.interaction_layers.append(layer)
-            final_latent_dim += eq_latent_multiplicity * layer.tp_n_scalar_out
-        
-        self.eq_latent_l0_dim = sum(ir.dim for _, ir in local_env_irreps if ir.l == 0)
-        self.eq_latent_irreps = eq_latent_irreps
 
         # The output field will contain the final equivariant features
         self.irreps_out[self.out_field] = final_out_irreps
@@ -477,8 +476,6 @@ class InteractionLayer(torch.nn.Module):
         self.env_embed_mlp = EquivariantScalarMLP(
             in_irreps=(o3.Irreps(f"{self.latent_dim}x0e"), local_env_irreps),
             out_irreps=local_env_irreps,
-            reshape_in=False,
-            reshape_back=False,
             **edge_mlp_kwargs
         )
         self.node_env_norm = SO3_LayerNorm(local_env_irreps)
@@ -517,25 +514,21 @@ class InteractionLayer(torch.nn.Module):
         self.rearrange_scalars = Rearrange('e m s -> e (m s)')
 
         # === Final Scalar Projection === #
-        scalar_in_dim_for_linear = self.latent_dim + self.tp_n_scalar_out
         self.scalar_linear_out = EquivariantScalarMLP(
-            in_irreps=scalar_in_dim_for_linear,
+            in_irreps=self.tp_n_scalar_out,
             out_irreps=self.latent_dim,
             **edge_mlp_kwargs
         )
         self.scalar_latent_norm = torch.nn.LayerNorm(self.latent_dim)
 
         # === Final Equivariant Projection === #
-        # The input to this linear layer is already the 'equivariants' part from tp_out
-        # So its in_irreps should reflect only the l>0 part of full_out_irreps
-        equiv_in_irreps_for_linear = o3.Irreps([(mul, ir) for mul, ir in full_out_irreps if ir.l > 0])
-        # The output of this linear layer should be the l>0 part of linear_out_irreps
-        equiv_out_irreps_for_linear = o3.Irreps([(mul, ir) for mul, ir in linear_out_irreps if ir.l > 0])
+        # The input to this linear layer is the full output of the tensor product
+        equiv_in_irreps_for_linear = full_out_irreps
+        equiv_out_irreps_for_linear = linear_out_irreps
         self.equivariant_linear_out = EquivariantScalarMLP(
             in_irreps=equiv_in_irreps_for_linear,
             out_irreps=equiv_out_irreps_for_linear,
-            reshape_in=False, # equiv_in_irreps_for_linear is already reshaped if needed by TP
-            reshape_back=is_last_layer, # Only reshape back if it's the very last layer output
+            output_shape_spec="flat" if is_last_layer else "channel_wise", # Only flatten if it's the very last layer output
             **edge_mlp_kwargs
         ) if len(equiv_in_irreps_for_linear) > 0 else None
 
@@ -543,7 +536,7 @@ class InteractionLayer(torch.nn.Module):
         tmp_i_out = 0
         tp_n_scalar_outs = 0
         instr = []
-        full_out_irreps_list = []
+        full_out_irreps_list: List[Tuple[int, o3.Irrep]] = []
         for i_out, (_, ir_out) in enumerate(tps_irreps_out):
             for i_1, (_, ir_1) in enumerate(tps_irreps_in): # this is eq_latent (l>0)
                 for i_2, (mul, ir_2) in enumerate(local_env_irreps): # this is env_nodes (l>=0)
@@ -579,7 +572,7 @@ class InteractionLayer(torch.nn.Module):
         num_nodes = node_invariants.shape[0]
 
         # === 1. Build local environment embedding ===
-        env_edges = self.env_embed_mlp(scalar_latent, equiv_latent)
+        env_edges = self.env_embed_mlp((scalar_latent, equiv_latent))
         
         if self.use_attention:
             assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
@@ -604,15 +597,15 @@ class InteractionLayer(torch.nn.Module):
         tp_out = self.tp_norm(tp_out)
         
         # === 4. Extract new features ===
-        scalars, equivariants = torch.split(tp_out, [self.tp_n_scalar_out, tp_out.shape[-1] - self.tp_n_scalar_out], dim=-1)
+        scalars = self.rearrange_scalars(tp_out[..., :self.tp_n_scalar_out])
         
         # New scalar latents for next layer are concatenation of old ones and new scalars from TP
-        new_scalar_latent = self.scalar_linear_out(self.rearrange_scalars(scalars), edge_conditioning)
+        new_scalar_latent = self.scalar_linear_out(scalars, edge_conditioning)
         scalar_latent = apply_residual_stream(scalar_latent, new_scalar_latent, this_layer_update_coeff, active_edges)
         scalar_latent = self.scalar_latent_norm(scalar_latent)
 
         # New equivariant features for next layer
         if self.equivariant_linear_out is not None:
-            equiv_latent = self.equivariant_linear_out(equivariants, edge_conditioning)
+            equiv_latent = self.equivariant_linear_out(tp_out, edge_conditioning)
             return scalar_latent, equiv_latent
         return scalar_latent, None

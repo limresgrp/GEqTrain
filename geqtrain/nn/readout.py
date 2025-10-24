@@ -135,12 +135,13 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             combined_in_irreps_list = []
             if self.invariant_field and self.invariant_field in irreps_in: combined_in_irreps_list.append(irreps_in[self.invariant_field])
             if self.equivariant_field and self.equivariant_field in irreps_in: combined_in_irreps_list.append(irreps_in[self.equivariant_field])
-            processor_in_irreps = o3.Irreps.sum(combined_in_irreps_list).simplify()
+            processor_in_irreps = (combined_in_irreps_list[0], combined_in_irreps_list[1])
             
         # Prepare irreps_out for GraphModuleMixin, reflecting the actual output fields
         gm_irreps_out = {}
         if self.output_mode == "single":
-            gm_irreps_out[self.out_field] = processor_out_irreps_combined
+            processor_out_irreps = processor_out_irreps_combined
+            gm_irreps_out[self.out_field] = processor_out_irreps
         else:
             # Split the combined output irreps into scalar and equivariant parts for GraphModuleMixin
             scalar_out_irreps_for_gm = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps_combined if ir.l == 0])
@@ -149,6 +150,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 gm_irreps_out[self.invariant_out_field] = scalar_out_irreps_for_gm
             if self.equivariant_out_field and len(equivariant_out_irreps_for_gm) > 0:
                 gm_irreps_out[self.equivariant_out_field] = equivariant_out_irreps_for_gm
+            processor_out_irreps = (scalar_out_irreps_for_gm, equivariant_out_irreps_for_gm)
 
         self.irreps_out.update(gm_irreps_out)
         
@@ -175,11 +177,12 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         # --- Core Processing Module ---
         self.processor = EquivariantScalarMLP(
             in_irreps=processor_in_irreps,
-            out_irreps=processor_out_irreps_combined,
+            out_irreps=processor_out_irreps,
             conditioning_dim=self.total_conditioning_dim,
             latent_module=readout_latent,
             latent_kwargs=readout_latent_kwargs,
             strict_irreps=strict_irreps,
+            output_shape_spec="flat",
         )
         # n_scalars_out is the total dimension of the scalar part of the output
         self.n_scalars_out = sum(mul * ir.dim for mul, ir in processor_out_irreps_combined if ir.l == 0)
@@ -226,11 +229,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         # --- 2. Run the core processor ---
         # The processor can return a single tensor or a tuple
-        out_features_or_tuple = self.processor(
-            features, 
-            conditioning_tensor,
-            return_split=(self.output_mode == "split")
-        )
+        out_features_or_tuple = self.processor(features, conditioning_tensor)
 
         # --- 3. Handle ResNet connection ---
         if self.resnet:

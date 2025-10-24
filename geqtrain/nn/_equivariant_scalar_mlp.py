@@ -36,8 +36,8 @@ class EquivariantScalarMLP(nn.Module):
         output_shape_spec: str = "input", # "flat", "channel_wise", or "input"
     ):
         super().__init__()
-        self.input_mode = "split" if isinstance(in_irreps, (Tuple)) else "single"
-        self.output_mode = "split" if isinstance(out_irreps, (Tuple)) else "single"
+        self.input_mode = "single" if isinstance(in_irreps, (o3.Irreps, int))  else "split"
+        self.output_mode = "single" if isinstance(out_irreps, (o3.Irreps, int)) else "split"
         self.conditioning_dim = conditioning_dim
 
         self.equiv_linear_module = equiv_linear_module

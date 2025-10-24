@@ -21,34 +21,53 @@ def add_tags_to_module(model: torch.nn.Module, tag: str):
         add_tags_to_parameter(p, tag)
 
 def process_out_irreps(
-    out_irreps: Optional[Union[Irreps, str]]        = None,
-    output_ls : Optional[List[int]]                 = None,
-    output_mul: Optional[int]                       = None,
-    latent_dim: Optional[int]                       = None,
-    edge_attrs_irreps: Optional[Union[Irreps, str]] = None,
+    out_irreps: Optional[Union[Irreps, str]] = None,
+    output_ls: Optional[List[int]] = None,
+    output_mul: Optional[Union[int, List[int]]] = None,
+    default_irreps: Optional[Irreps] = None,
 ):
-    # if not out_irreps is specified, default to hidden irreps with degree of spharms and multiplicity of latent
+    """
+    Processes and validates output irreps configuration.
+
+    1.  If `out_irreps` is provided, it is used as the base.
+    2.  If `out_irreps` is None, `default_irreps` is used as a fallback.
+    3.  If `output_ls` is provided, the irreps are filtered to only include those `l` values.
+    4.  `output_mul` can be an integer or a list to flexibly set multiplicities.
+    """
+    # 1. Determine the base irreps
     if out_irreps is None:
-        out_irreps = Irreps([(latent_dim, ir) for _, ir in edge_attrs_irreps])
+        if default_irreps is None:
+            raise ValueError("Either `out_irreps` or `default_irreps` must be provided.")
+        out_irreps = default_irreps
     else:
         out_irreps = out_irreps if isinstance(out_irreps, Irreps) else Irreps(out_irreps)
-    
-    # - [optional] filter out_irreps l degrees
-    if output_ls is None:
-        output_ls = out_irreps.ls
-    assert isinstance(output_ls, List)
-    assert all([(l in edge_attrs_irreps.ls) for l in output_ls]), \
-        f"Required output ls {output_ls} cannot be computed using l={edge_attrs_irreps.ls}"
-    
-    # [optional] set out_irreps multiplicity
-    if output_mul is None:
-        output_mul = out_irreps[0].mul
-    if isinstance(output_mul, str):
-        if output_mul == 'hidden':
-            output_mul = latent_dim
 
-    out_irreps = Irreps([(output_mul, ir) for _, ir in edge_attrs_irreps if ir.l in output_ls])
-    return out_irreps, output_ls, output_mul
+    # 2. Filter by `l` degrees if `output_ls` is specified
+    if output_ls is not None:
+        out_irreps = Irreps([(mul, ir) for mul, ir in out_irreps if ir.l in output_ls])
+
+    # 3. Set multiplicities based on `output_mul`
+    if output_mul is not None:
+        new_irreps_list = []
+        if isinstance(output_mul, int):
+            # Overwrite all multiplicities with a single integer value
+            for _, ir in out_irreps:
+                new_irreps_list.append((output_mul, ir))
+        elif isinstance(output_mul, list):
+            if len(output_mul) == len(out_irreps.ls):
+                # Assign multiplicity based on the list, matching `l` values
+                for i, (mul, ir) in enumerate(out_irreps):
+                    new_irreps_list.append((output_mul[i], ir))
+            elif len(output_mul) == 2:
+                # Assign first for l=0, second for l>0
+                for _, ir in out_irreps:
+                    new_mul = output_mul[0] if ir.l == 0 else output_mul[1]
+                    new_irreps_list.append((new_mul, ir))
+            else:
+                raise ValueError(f"Length of `output_mul` list ({len(output_mul)}) is not compatible with the number of irreps `l`s ({len(out_irreps.ls)}).")
+        out_irreps = Irreps(new_irreps_list)
+
+    return out_irreps
 
 def build_concatenation_permutation(
     irreps_list: List[Irreps], device: torch.device = torch.device("cpu")
@@ -97,4 +116,4 @@ def build_concatenation_permutation(
         [torch.arange(dims[i], device=device) + offsets[i] for i in arg_p_blocks]
     )
 
-    return p_elements, sorted_irreps
+    return p_elements, sorted_irreps.simplify()

@@ -188,14 +188,13 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         assert node_eq_irreps[0].ir == SCALAR, "node_eq_irreps must start with scalars"
 
         # === Process output irreps using the same logic as InteractionModule ===
-        out_irreps_node, _, output_mul = process_out_irreps(
+        out_irreps_node = process_out_irreps(
             out_irreps=out_irreps_node,
             output_ls=output_ls,
             output_mul=output_mul,
-            latent_dim=latent_dim,
-            edge_attrs_irreps=node_eq_irreps, # Use node_eq_irreps as reference
+            default_irreps=node_eq_irreps,
         )
-        self.out_multiplicity = output_mul
+        self.out_multiplicity = out_irreps_node[0].mul
         self.out_feat_elems = sum(irr.ir.dim for irr in out_irreps_node)
         
         # Split out_irreps into scalar and equivariant parts
