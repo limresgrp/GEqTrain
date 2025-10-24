@@ -48,7 +48,7 @@ def main(args=None, running_as_script: bool = True):
             "either set append to True or use a different root or runname"
         )
 
-    test_equivariance(config, logger)
+    _test_equivariance(config, logger)
 
     return
 
@@ -74,7 +74,7 @@ def parse_command_line(args=None):
     return config
 
 
-def test_equivariance(config, logger):
+def _test_equivariance(config, logger):
     apply_global_config(config)
 
     # = Load the dataset =
