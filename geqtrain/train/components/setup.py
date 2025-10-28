@@ -38,7 +38,7 @@ def setup_metrics(config):
     metrics, _ = instantiate(
         builder=Metrics,
         prefix="metrics",
-        positional_args=dict(components=config.get('metrics_components'), standardize_fields=config.get('standardize_fields', {})),
+        positional_args=dict(components=config.get('metrics_components'), destandardize_fields=config.get('destandardize_fields', {})),
         all_args=config,
     )
     return metrics

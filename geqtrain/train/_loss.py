@@ -161,10 +161,10 @@ class LossWrapper:
                 loss = loss.sum(dim=-1)
             return loss.mean() if mean else loss
 
-    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, standardize_fields: dict = {}, **kwargs):
+    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, destandardize_fields: dict = {}, **kwargs):
         # 1. Determine prediction key and prepare tensors
         pred_key_name = self._get_pred_key_name(key)
-        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean, standardize_fields)
+        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean, destandardize_fields)
 
         # 2. Initialize supervision weights if needed
         self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
@@ -178,7 +178,7 @@ class LossWrapper:
         # 5. Calculate and return the loss
         return self._calculate_loss(pred_key, ref_key, mean)
 
-    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool, standardize_fields: dict = {}):
+    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool, destandardize_fields: dict = {}):
         pred_key = pred.get(pred_key_name)
         assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
         ref_key = ref.get(ref_key_name)
@@ -201,8 +201,8 @@ class LossWrapper:
             global_std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
 
             irreps = None
-            if ref_key_name in standardize_fields:
-                mode_str = standardize_fields[ref_key_name]
+            if ref_key_name in destandardize_fields:
+                mode_str = destandardize_fields[ref_key_name]
                 parts = mode_str.split(':', 1)
                 irreps_str = parts[1] if len(parts) > 1 else None
                 if irreps_str:

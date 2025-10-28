@@ -35,6 +35,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         # Output fields
         out_field: Optional[str] = None, # The key where the output will be stored
         invariant_out_field: Optional[str] = None,
+        scalar_out_field: Optional[str] = None, # New: secondary field for scalar output
         equivariant_out_field: Optional[str] = None,
         # Other params
         conditioning_fields: Optional[List[str]] = None, # List of keys to use for conditioning
@@ -71,6 +72,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             self.out_field = out_field
             self.invariant_out_field = None
             self.equivariant_out_field = None
+            self.scalar_out_field = scalar_out_field
             self.output_mode = "single"
         else:
             if invariant_out_field is None and equivariant_out_field is None:
@@ -80,16 +82,19 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                     self.invariant_out_field = None
                     self.equivariant_out_field = None
                     self.output_mode = "single"
+                    self.scalar_out_field = scalar_out_field
                 else:
                     self.out_field = None
                     self.invariant_out_field = self.invariant_field
                     self.equivariant_out_field = self.equivariant_field
                     self.output_mode = "split"
+                    self.scalar_out_field = None # Not supported in this default case
             else:
                 self.out_field = None
                 self.invariant_out_field = invariant_out_field
                 self.equivariant_out_field = equivariant_out_field
                 self.output_mode = "split"
+                self.scalar_out_field = None # Not supported in this default case
 
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         self.ignore_amp = ignore_amp
@@ -142,6 +147,9 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         if self.output_mode == "single":
             processor_out_irreps = processor_out_irreps_combined
             gm_irreps_out[self.out_field] = processor_out_irreps
+            if self.scalar_out_field is not None:
+                scalar_part = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps if ir.l == 0])
+                if scalar_part.dim > 0: gm_irreps_out[self.scalar_out_field] = scalar_part
         else:
             # Split the combined output irreps into scalar and equivariant parts for GraphModuleMixin
             scalar_out_irreps_for_gm = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps_combined if ir.l == 0])
@@ -253,13 +261,10 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
     def _apply_bias_and_write_single(self, data: AtomicDataDict.Type, out_features: torch.Tensor):
         if self.bias is not None:
-            out_scalars = out_features[..., :self.n_scalars_out]
-            out_equiv = out_features[..., self.n_scalars_out:]
-            biased_scalars = out_scalars + self.bias
-            if out_equiv.shape[-1] > 0:
-                out_features = torch.cat([biased_scalars, out_equiv], dim=-1)
-            else:
-                out_features = biased_scalars
+            out_features[..., :self.n_scalars_out] = out_features[..., :self.n_scalars_out] + self.bias
+
+        if self.scalar_out_field is not None and self.n_scalars_out > 0:
+            data[self.scalar_out_field] = out_features[..., :self.n_scalars_out]
 
         data[self.out_field] = out_features
 
