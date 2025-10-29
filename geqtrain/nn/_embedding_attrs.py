@@ -281,7 +281,8 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             edge_irreps_out = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
         else:
             edge_irreps_out = self.edge_emb.out_irreps
-        irreps_out[self.edge_out_field] = edge_irreps_out
+        if edge_irreps_out is not None:
+            irreps_out[self.edge_out_field] = edge_irreps_out
         
         # edge equivariant
         self.edge_eq_emb = edge_eq_emb(
@@ -292,14 +293,14 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
             irreps_in     = irreps_out,
             **edge_eq_emb_kwargs
         ) if edge_eq_emb is not None else None
-        if self.edge_eq_emb is not None:
+        if self.edge_eq_emb is not None and self.edge_eq_emb.out_irreps is not None:
             irreps_out[self.edge_eq_out_field] = self.edge_eq_emb.out_irreps
         self.irreps_out.update(irreps_out)
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         # node scalar
         if self.node_emb is None:
-            node_attr: torch.Tensor = data.pop(self.node_field) # default embedding
+            node_attr: torch.Tensor = data.get(self.node_field) # default embedding
         else:
             node_attr: torch.Tensor = self.node_emb(data)
         data[self.node_out_field] = node_attr

@@ -2,6 +2,8 @@ from typing import List, Optional, Tuple, Union, Set
 import torch
 from e3nn.o3 import Irreps
 
+from geqtrain.data import AtomicDataDict
+
 
 def add_tags_to_parameter(p: torch.nn.Parameter, tag: str):
     """
@@ -117,3 +119,55 @@ def build_concatenation_permutation(
     )
 
     return p_elements, sorted_irreps.simplify()
+
+def prepare_conditioning_tensors(
+    data: AtomicDataDict.Type,
+    conditioning_fields: List[str],
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    Prepares conditioning tensors for node and edge operations.
+
+    Args:
+        data (AtomicDataDict.Type): The input data dictionary.
+        conditioning_fields (List[str]): A list of field names to use for conditioning.
+        node_fields (List[str]): A list of keys that are considered node fields.
+        edge_fields (List[str]): A list of keys that are considered edge fields.
+
+    Returns:
+        A tuple containing:
+        - node_conditioning_tensor (Optional[torch.Tensor]): Concatenated tensor of node-level conditioning fields.
+        - edge_conditioning_tensor (Optional[torch.Tensor]): Concatenated tensor of edge-level conditioning fields.
+    """
+    node_cond_tensors = []
+    edge_cond_tensors = []
+
+    if not conditioning_fields:
+        return None, None
+
+    edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+    edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+    num_nodes = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+    num_edges = edge_center.shape[0]
+
+    for field in conditioning_fields:
+        # Not jittable if uncommented
+        # if field not in irreps_in:
+        #     raise ValueError(f"Conditioning field '{field}' not found in irreps_in.")
+        
+        # cond_irreps = irreps_in[field]
+        # if not all(ir.l == 0 for _, ir in cond_irreps):
+        #     raise ValueError(f"Conditioning field '{field}' must have scalar (l=0) irreps, but got {cond_irreps}.")
+
+        tensor = data[field]
+
+        if len(tensor) == num_nodes:
+            node_cond_tensors.append(tensor)
+            edge_cond_tensors.append(tensor[edge_center])
+            edge_cond_tensors.append(tensor[edge_neigh])
+        elif len(tensor) == num_edges:
+            edge_cond_tensors.append(tensor)
+
+    node_conditioning = torch.cat(node_cond_tensors, dim=-1) if node_cond_tensors else None
+    edge_conditioning = torch.cat(edge_cond_tensors, dim=-1) if edge_cond_tensors else None
+    
+    return node_conditioning, edge_conditioning

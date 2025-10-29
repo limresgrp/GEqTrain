@@ -239,9 +239,7 @@ def assert_AtomicData_equivariant(
     is_problem = [e[-1] > o3_tolerance for e in all_errs]
 
     message = (permutation_message + "\n") + "\n".join(
-        "   (parity_k={:1d}, did_translate={:5}, field={:20})     -> max error={:.3e}".format(
-            int(k[0]), str(bool(k[1])), str(k[2]), float(k[3])
-        )
+        f"   (parity_k={int(k[0])}, did_translate={str(bool(k[1]))}, field={str(k[2]):20})     -> max error={float(k[3]):.3e}{'  FAIL' if prob else ''}"
         for k, prob in zip(all_errs, is_problem)
     )
 

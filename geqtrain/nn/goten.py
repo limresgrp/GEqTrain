@@ -22,7 +22,7 @@ from geqtrain.nn.allegro import (
     Contracter,
     MakeWeightedChannels,
 )
-from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+from geqtrain.utils.so3 import PSEUDO_SCALAR, SCALAR
 from geqtrain.nn.mace.irreps_tools import inverse_reshape_irreps
 
 

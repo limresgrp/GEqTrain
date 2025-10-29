@@ -1,3 +1,4 @@
+from typing import Tuple
 from e3nn import o3
 from collections import defaultdict
 
@@ -15,6 +16,22 @@ def tp_path_exists(irreps_in1, irreps_in2, ir_out):
             if ir_out in ir1 * ir2:
                 return True
     return False
+
+def split_irreps(irreps: o3.Irreps) -> Tuple[o3.Irreps, o3.Irreps]:
+    """
+    Splits an o3.Irreps object into its scalar (l=0) and equivariant (l>0) parts.
+
+    Args:
+        irreps (o3.Irreps): The input irreps.
+
+    Returns:
+        A tuple containing:
+        - o3.Irreps: The scalar part of the input irreps.
+        - o3.Irreps: The equivariant part of the input irreps.
+    """
+    scalar_irreps = o3.Irreps([(mul, ir) for mul, ir in irreps if ir.l == 0])
+    equivariant_irreps = o3.Irreps([(mul, ir) for mul, ir in irreps if ir.l > 0])
+    return scalar_irreps, equivariant_irreps
 
 def complete_parities(irreps_in: o3.Irreps) -> o3.Irreps:
     """

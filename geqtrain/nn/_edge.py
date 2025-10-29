@@ -7,7 +7,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn._embedding import BaseEmbedding
 from ._graph_mixin import GraphModuleMixin
 from .radial_basis import BesselBasis
-from .cutoffs import TanhCutoff
+from .cutoffs import PolynomialCutoff
 
 
 @compile_mode("script")
@@ -63,7 +63,7 @@ class BasisEdgeRadialAttrs(GraphModuleMixin, torch.nn.Module):
     def __init__(
         self,
         basis=BesselBasis,
-        cutoff=TanhCutoff,
+        cutoff=PolynomialCutoff,
         basis_kwargs={},
         cutoff_kwargs={},
         out_field: str = AtomicDataDict.EDGE_RADIAL_EMB_KEY,
@@ -98,14 +98,14 @@ class BaseEdgeEmbedding(BaseEmbedding):
             self.has_edge_attr = True
             edge_dim += self.irreps_in[self.edge_field].dim
 
-        self.out_irreps = o3.Irreps(f"{edge_dim}x0e")
+        self.out_irreps = o3.Irreps(f"{edge_dim}x0e") if edge_dim > 0 else None
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
         edge_attrs_to_cat = []
         if self.has_edge_attr:
             edge_field = self.edge_field
             assert isinstance(edge_field, str)
-            edge_attrs_to_cat.append(data.pop(edge_field))
+            edge_attrs_to_cat.append(data.get(edge_field))
         if len(edge_attrs_to_cat) == 0:
             return None
         return torch.cat(edge_attrs_to_cat, dim=-1)
@@ -145,7 +145,7 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
         else:
             # If there are no node features to concatenate, no permutation is needed.
             self.concatenation_permutation = None
-            edge_eq_irreps = o3.Irreps(unsorted_irreps_list)
+            edge_eq_irreps = None
         self.out_irreps = edge_eq_irreps
     
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
@@ -154,7 +154,7 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
             # 1 Perform the naive concatenation.
             edge_eq_field = self.edge_eq_field
             assert isinstance(edge_eq_field, str)
-            edge_eq_attr = data.pop(edge_eq_field)
+            edge_eq_attr = data.get(edge_eq_field)
         if self.has_edge_eq_attr:
             # 2. Apply the pre-computed element-wise permutation.
             #    This `edge_attr` tensor now correctly corresponds to `input_edge_eq_irreps`.

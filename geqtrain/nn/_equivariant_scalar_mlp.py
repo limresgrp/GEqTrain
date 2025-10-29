@@ -10,7 +10,7 @@ from geqtrain.nn import ScalarMLPFunction, SO3_Linear
 from geqtrain.nn._film import FiLMFunction
 from geqtrain.nn.allegro import Linear
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+from geqtrain.utils.so3 import PSEUDO_SCALAR, SCALAR
 
 
 @compile_mode("script")
@@ -36,8 +36,8 @@ class EquivariantScalarMLP(nn.Module):
         output_shape_spec: str = "input", # "flat", "channel_wise", or "input"
     ):
         super().__init__()
-        self.input_mode = "single" if isinstance(in_irreps, (o3.Irreps, int))  else "split"
-        self.output_mode = "single" if isinstance(out_irreps, (o3.Irreps, int)) else "split"
+        self.input_mode = "single" if isinstance(in_irreps, (o3.Irreps, int, str))  else "split"
+        self.output_mode = "single" if isinstance(out_irreps, (o3.Irreps, int, str)) else "split"
         self.conditioning_dim = conditioning_dim
 
         self.equiv_linear_module = equiv_linear_module
@@ -183,8 +183,6 @@ class EquivariantScalarMLP(nn.Module):
                 # Input is channel-wise: [N, C, D_channel]
                 # We need to extract scalars and reshape them to be flat for the MLP.
                 # The number of scalar features per channel is self.n_scalars_in // multiplicity
-                if not self.has_equivariant_output:
-                    raise ValueError("Channel-wise input (3D tensor) is only supported when there are equivariant features.")
                 n_scalar_channels = self.n_scalars_in // self.in_multiplicity
                 scalars_channel, equiv_channel = torch.split(features, [n_scalar_channels, features.shape[-1] - n_scalar_channels], dim=-1)
                 scalars = scalars_channel.reshape(features.shape[0], -1) # [N, C, D_scalar_channel] -> [N, C * D_scalar_channel]

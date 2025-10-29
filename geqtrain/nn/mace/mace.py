@@ -14,7 +14,7 @@ from geqtrain.nn import (
 )
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
-from geqtrain.utils.tp_utils import complete_parities
+from geqtrain.utils.so3 import complete_parities
 
 
 @compile_mode("script")
