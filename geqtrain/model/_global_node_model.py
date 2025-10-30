@@ -34,7 +34,7 @@ def buildGlobalNodeModelLayers():
             edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_mul="hidden",
+            output_ls=[0]
         )),
         "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -43,7 +43,7 @@ def buildGlobalNodeModelLayers():
         "update": (ReadoutModule, dict(
             field=AtomicDataDict.NODE_FEATURES_KEY,
             invariant_out_field=AtomicDataDict.NODE_ATTRS_KEY,
-            equivariant_out_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+            # equivariant_out_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
             out_irreps=None, # outs tensor of same o3.irreps of out_field
         )),
         "context_aware_interaction": (InteractionModule, dict(
@@ -52,7 +52,6 @@ def buildGlobalNodeModelLayers():
             edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_mul="hidden",
         )),
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,

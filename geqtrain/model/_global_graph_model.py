@@ -54,7 +54,6 @@ def buildGlobalGraphModelLayers():
             edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_mul="hidden",
         )),
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
@@ -126,7 +125,6 @@ def appendNGNNLayers(config):
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_mul="hidden",
         )),
         "global_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,

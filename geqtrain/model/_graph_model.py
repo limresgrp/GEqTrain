@@ -31,7 +31,6 @@ def buildGraphModelLayers():
             edge_invariant_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_mul="hidden",
         )),
         "edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,

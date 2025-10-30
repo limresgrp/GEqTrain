@@ -1,5 +1,6 @@
 import math
 import torch
+from dataclasses import dataclass
 
 from typing import Optional, List, Tuple, Union
 from geqtrain.utils._model_utils import build_concatenation_permutation, prepare_conditioning_tensors, process_out_irreps
@@ -87,6 +88,26 @@ def build_tps_irreps_list(
         tps_irreps = list(reversed(new_tps_irreps))
         
         return tps_irreps[:-1], tps_irreps[1:]
+
+
+@dataclass
+class InteractionLayerConfig:
+    """Configuration for an InteractionLayer."""
+    latent_dim: int
+    eq_latent_multiplicity: int
+    head_dim: int
+    use_attention: bool
+    use_mace_product: bool
+    product_correlation: int
+    tp_irreps_in: o3.Irreps
+    tp_irreps_out: o3.Irreps
+    equiv_latent_irreps: o3.Irreps
+    last_layer_equiv_latent_irreps: o3.Irreps
+    node_invariant_field: str
+    combined_edge_inv_dim: int
+    edge_conditioning_dim: int
+    is_last_layer: bool
+    irreps_in: dict
 
 
 @compile_mode("script")
@@ -193,7 +214,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         tp_recurrent_irreps = equiv_latent_irreps
         tp_out_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in final_out_irreps])
         # On last layer, the equiv_latent should be of only equivariant features, as scalar ones are not used and would be discarded
-        _, last_layer_equiv_latent_irreps = split_irreps(equiv_latent_irreps)
+        _, last_layer_equiv_latent_irreps = split_irreps(o3.Irreps([(mul, ir) for mul, ir in equiv_latent_irreps if ir in tp_out_irreps]))
 
         tps_irreps_in, tps_irreps_out = build_tps_irreps_list(num_layers, tp_recurrent_irreps, tp_out_irreps, tp_recurrent_irreps)
 
@@ -215,28 +236,29 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         for i in range(self.num_layers):
             is_last_layer = (i == self.num_layers - 1)
 
-            layer = InteractionLayer(
-                latent_dim=latent_dim,
-                eq_latent_multiplicity=eq_latent_multiplicity,
-                use_attention=use_attention,
-                head_dim=head_dim,
-                use_mace_product=use_mace_product and not is_last_layer, # MACE product only for intermediate layers
-                product_correlation=product_correlation,
-                tp_irreps_in=tps_irreps_in[i],
-                tp_irreps_out=tps_irreps_out[i],
-                equiv_latent_irreps=equiv_latent_irreps,
-                last_layer_equiv_latent_irreps=last_layer_equiv_latent_irreps,
-                irreps_in=self.irreps_in,
-                node_invariant_field=self.node_invariant_field,
-                is_last_layer=is_last_layer,
-                edge_conditioning_dim=self.edge_conditioning_dim,
-                combined_edge_inv_dim=initial_scalar_latent_dim,
+            layer_config = InteractionLayerConfig(
+                latent_dim = latent_dim,
+                eq_latent_multiplicity = eq_latent_multiplicity,
+                use_attention = use_attention,
+                head_dim = head_dim,
+                use_mace_product = use_mace_product and not is_last_layer,
+                product_correlation = product_correlation,
+                tp_irreps_in = tps_irreps_in[i],
+                tp_irreps_out = tps_irreps_out[i],
+                equiv_latent_irreps = equiv_latent_irreps,
+                last_layer_equiv_latent_irreps = last_layer_equiv_latent_irreps,
+                irreps_in = self.irreps_in,
+                node_invariant_field = self.node_invariant_field,
+                is_last_layer = is_last_layer,
+                edge_conditioning_dim = self.edge_conditioning_dim,
+                combined_edge_inv_dim = initial_scalar_latent_dim,
             )
-            self.interaction_layers.append(layer)
+
+            self.interaction_layers.append(InteractionLayer(layer_config))
 
         # Final projection to the desired output irreps
         self.final_projection = EquivariantScalarMLP(
-            in_irreps=(latent_dim, equiv_latent_irreps), # Input from the last interaction layer
+            in_irreps=(latent_dim, last_layer_equiv_latent_irreps), # Input from the last interaction layer
             out_irreps=final_out_irreps, # Desired final output irreps
             latent_module=ScalarMLPFunction,
             latent_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
@@ -342,73 +364,54 @@ class InteractionLayer(torch.nn.Module):
     - Forward pass is clarified and returns the correct signature.
     """
     def __init__(
-        self,
-        latent_dim: int,
-        eq_latent_multiplicity: int,
-        head_dim: int,
-        use_attention: bool,
-        use_mace_product: bool,
-        product_correlation: int,
-        tp_irreps_in: o3.Irreps,
-        tp_irreps_out: o3.Irreps,
-        equiv_latent_irreps: o3.Irreps,
-        last_layer_equiv_latent_irreps: o3.Irreps,
-        node_invariant_field: str,
-        combined_edge_inv_dim: int,
-        edge_conditioning_dim: int,
-        is_last_layer: bool,
-        irreps_in: dict,
+        self, config: InteractionLayerConfig
     ):
         super().__init__()
-        self.eq_latent_multiplicity = eq_latent_multiplicity
-        self.use_attention = use_attention
-        self.use_mace_product = use_mace_product
-        self.node_invariant_field = node_invariant_field
-        self.combined_edge_inv_dim = combined_edge_inv_dim
+        self.config = config
 
         # === Define dimensions and irreps ===
-        node_inv_dim = irreps_in[node_invariant_field].dim
-        # edge_inv_dim = irreps_in[edge_invariant_field].dim
-        # node_inv_irreps = irreps_in[node_invariant_field]
+        node_inv_dim = config.irreps_in[config.node_invariant_field].dim
         
-        edge_mlp_kwargs = {"conditioning_dim": edge_conditioning_dim, 'latent_kwargs': {'mlp_latent_dimensions': [128, 128]}}
-        # node_mlp_kwargs = {"conditioning_dim": node_conditioning_dim, 'latent_kwargs': {'mlp_latent_dimensions': [128, 128]}}
+        edge_mlp_kwargs = {
+            "conditioning_dim": config.edge_conditioning_dim,
+            'latent_kwargs': {'mlp_latent_dimensions': [128, 128]}
+        }
 
         # === Environment embedding modules ===
         self.env_embed_mlp = EquivariantScalarMLP(
-            in_irreps=(latent_dim, equiv_latent_irreps),
-            out_irreps=equiv_latent_irreps,
+            in_irreps=(config.latent_dim, config.equiv_latent_irreps),
+            out_irreps=config.equiv_latent_irreps,
             **edge_mlp_kwargs
         )
-        self.node_env_norm = SO3_LayerNorm(equiv_latent_irreps)
+        self.node_env_norm = SO3_LayerNorm(config.equiv_latent_irreps)
 
         # === Attention modules ===
         self.node_attr_to_query = None
         self.latent_to_key = None
-        if self.use_attention:
-            self.isqrtd = math.isqrt(head_dim)
-            self.node_attr_to_query = ScalarMLPFunction(node_inv_dim, [], eq_latent_multiplicity * head_dim)
-            self.latent_to_key = ScalarMLPFunction(latent_dim, [], eq_latent_multiplicity * head_dim)
-            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=eq_latent_multiplicity, d=head_dim)
+        if config.use_attention:
+            self.isqrtd = math.isqrt(config.head_dim)
+            self.node_attr_to_query = ScalarMLPFunction(node_inv_dim, [], config.eq_latent_multiplicity * config.head_dim)
+            self.latent_to_key = ScalarMLPFunction(config.latent_dim, [], config.eq_latent_multiplicity * config.head_dim)
+            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=config.eq_latent_multiplicity, d=config.head_dim)
         
         # === MACE product modules ===
         self.node_inv_to_product_mlp = None
         self.reshape_in_module = None
-        if self.use_mace_product:
+        if config.use_mace_product:
             # Project node invariants to match the multiplicity of the equivariant features
             self.node_inv_to_product_mlp = ScalarMLPFunction(
                 mlp_input_dimension=node_inv_dim,
                 mlp_latent_dimensions=[],
-                mlp_output_dimension=eq_latent_multiplicity
+                mlp_output_dimension=config.eq_latent_multiplicity
             )
 
             self.product = EquivariantProductBasisBlock(
-                node_feats_irreps=equiv_latent_irreps,
-                target_irreps=equiv_latent_irreps,
-                correlation=product_correlation,
+                node_feats_irreps=config.equiv_latent_irreps,
+                target_irreps=config.equiv_latent_irreps,
+                correlation=config.product_correlation,
                 num_elements=node_inv_dim,
             )
-            self.reshape_in_module = reshape_irreps(equiv_latent_irreps)
+            self.reshape_in_module = reshape_irreps(config.equiv_latent_irreps)
 
         # === Tensor Product modules ===
         # Build the tensor product for this layer
@@ -416,16 +419,16 @@ class InteractionLayer(torch.nn.Module):
         instr = []
         full_out_irreps_list: List[Tuple[int, o3.Irrep]] = []
         i_out_running = 0
-        for _, ir_out in tp_irreps_out:
-            for i_1, (_, ir_1) in enumerate(tp_irreps_in): # this is eq_latent (l>0)
-                for i_2, (mul, ir_2) in enumerate(equiv_latent_irreps): # this is env_nodes (l>=0)
+        for _, ir_out in config.tp_irreps_out:
+            for i_1, (_, ir_1) in enumerate(config.tp_irreps_in): # this is eq_latent (l>0)
+                for i_2, (mul, ir_2) in enumerate(config.equiv_latent_irreps): # this is env_nodes (l>=0)
                     if ir_out in ir_1 * ir_2:
                         instr.append((i_1, i_2, i_out_running))
                         full_out_irreps_list.append((mul, ir_out))
                         i_out_running += 1
         tp_out_irreps = o3.Irreps(full_out_irreps_list)
         self.tp = Contracter(
-            irreps_in1=tp_irreps_in, irreps_in2=equiv_latent_irreps, irreps_out=tp_out_irreps,
+            irreps_in1=config.tp_irreps_in, irreps_in2=config.equiv_latent_irreps, irreps_out=tp_out_irreps,
             instructions=instr, connection_mode="uuu", shared_weights=False, has_weight=False, normalization='component',
         )
         self.tp_norm = SO3_LayerNorm(tp_out_irreps)
@@ -433,8 +436,8 @@ class InteractionLayer(torch.nn.Module):
         # === Final Scalar+Equivariant Projection === #
         self.projection = EquivariantScalarMLP(
             in_irreps=tp_out_irreps,
-            out_irreps=(latent_dim, equiv_latent_irreps),
-            output_shape_spec="flat" if is_last_layer else "channel_wise", # Only flatten if it's the very last layer output
+            out_irreps=(config.latent_dim, config.last_layer_equiv_latent_irreps if config.is_last_layer else config.equiv_latent_irreps),
+            output_shape_spec="flat" if config.is_last_layer else "channel_wise", # Only flatten if it's the very last layer output
             **edge_mlp_kwargs
         )
         
@@ -450,14 +453,14 @@ class InteractionLayer(torch.nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         
         # === Prepare inputs ===
-        node_invariants = data[self.node_invariant_field]
+        node_invariants = data[self.config.node_invariant_field]
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         num_nodes = node_invariants.shape[0]
 
         # === 1. Build local environment embedding ===
         env_edges = self.env_embed_mlp((scalar_latent, equiv_latent))
         
-        if self.use_attention:
+        if self.config.use_attention:
             assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
             Q = self.rearrange_qk(self.node_attr_to_query(node_invariants[edge_center]))
             K = self.rearrange_qk(self.latent_to_key(scalar_latent))
@@ -466,7 +469,7 @@ class InteractionLayer(torch.nn.Module):
             env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
         
         env_nodes = scatter_sum(env_edges, edge_center, dim=0, dim_size=num_nodes)
-        if self.use_mace_product:
+        if self.config.use_mace_product:
             assert self.node_inv_to_product_mlp is not None
             assert self.reshape_in_module is not None
             env_nodes = self.reshape_in_module(self.product(node_feats=env_nodes, node_attrs=node_invariants, sc=None))

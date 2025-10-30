@@ -67,6 +67,8 @@ def process_out_irreps(
                     new_irreps_list.append((new_mul, ir))
             else:
                 raise ValueError(f"Length of `output_mul` list ({len(output_mul)}) is not compatible with the number of irreps `l`s ({len(out_irreps.ls)}).")
+        else:
+            raise ValueError(f"Unsupported type for `output_mul`: {type(output_mul)}. Allowed types are int or list.")
         out_irreps = Irreps(new_irreps_list)
 
     return out_irreps
