@@ -25,18 +25,19 @@ class TrainingLoop:
         self.lr_sched = trainer.lr_sched
         self.warmup_sched = trainer.warmup_sched
 
-    def run_epoch(self, summary: EpochSummary, validation_only=False):
+    def run_epoch(self, summary: EpochSummary, run_validation: bool, train_phase: bool):
         """
         Runs a full training and validation epoch, populating the provided summary object.
         """
-        if not validation_only:
+        if train_phase:
             if self.trainer.train_sampler is not None:
                 self.trainer.train_sampler.set_epoch(self.trainer.iepoch + 1)
             self.run_phase(TRAIN, summary)
 
-        ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
-        with ema_cm:
-            self.run_phase(VALIDATION, summary)
+        if run_validation:
+            ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
+            with ema_cm:
+                self.run_phase(VALIDATION, summary)
 
         # Step the LR scheduler after the epoch summary is built
         self._lr_sched_step(summary=summary, batch_lvl=False)

@@ -202,12 +202,13 @@ class Trainer:
     def _extract_config_parameters(self):
         """Extract parameters from the config file to trainer attributes for easy access via self. """
         params_to_extract = [
-            ("learning_rate", 1e-3), ("metrics_key", "validation_loss"), ("metric_criteria", "decreasing"),
-            ("log_batch_freq", 10), ("log_epoch_freq", 1), ("save_checkpoint_freq", -1),
-            ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
-            ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
-            ("n_val", None), ("train_val_split", "random"), ("shuffle", True),
-            ("metrics_metadata", {}),
+            ("learning_rate", 1e-3), ("metrics_key", "validation_loss"),
+            ("metric_criteria", "decreasing"), ("log_batch_freq", 10),
+            ("log_epoch_freq", 1), ("save_checkpoint_freq", -1), ("max_epochs", 1000),
+            ("warmup_epochs", 0), ("report_init_validation", True), ("use_ema", False),
+            ("train_idcs", None), ("val_idcs", None), ("n_train", None), ("n_val", None),
+            ("train_val_split", "random"), ("shuffle", True), ("metrics_metadata", {}),
+            ("validation_freq", 1),
         ]
         for param, default in params_to_extract:
             setattr(self, param, self.config.get(param, default))
@@ -335,17 +336,23 @@ class Trainer:
 
             self._dispatch_callbacks('on_epoch_begin')
             
+            # Determine if validation should run this epoch
+            run_validation = (self.iepoch == -1) or ((self.iepoch + 1) % self.validation_freq == 0)
+
             # 2. Run epoch and pass the summary object to the loop to be populated
             self.training_loop.run_epoch(
                 summary=epoch_summary,
-                validation_only=(self.iepoch == -1)
+                # Only run validation if it's the initial check or if it's a validation epoch
+                run_validation=run_validation,
+                # If it's the initial check, don't run the training phase
+                train_phase=(self.iepoch > -1)
             )
             
             # 3. Finalize the summary with end-of-epoch data (timings, LR)
             epoch_summary.finalize(self)
             
             # 4. Pass the completed summary to the callbacks
-            self._dispatch_callbacks('on_epoch_end', summary=epoch_summary)
+            self._dispatch_callbacks('on_epoch_end', summary=epoch_summary, run_validation=run_validation)
             
             # 5. Next epoch
             self.iepoch += 1

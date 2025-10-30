@@ -81,7 +81,7 @@ class EpochSummary:
         if isinstance(key, (list, tuple)):
             values = torch.tensor([flat_dict[metric] for metric in key], dtype=torch.float32)
             return values.mean().item()
-        return flat_dict[key]
+        return flat_dict.get(key)
 
     def to_flat_dict(self) -> Dict[str, Union[int, float]]:
         """Generates and caches a flat dictionary of all epoch results for logging."""

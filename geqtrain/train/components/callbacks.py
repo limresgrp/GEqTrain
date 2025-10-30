@@ -71,8 +71,10 @@ class Logger(Callback):
         if self.trainer.dist.is_master:
             self.trainer.validation_wall = perf_counter() - self.trainer._phase_start_time
             self.trainer.cumulative_wall += self.trainer.train_wall + self.trainer.validation_wall
-
-    def on_epoch_end(self, summary: EpochSummary):
+    
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
+        if not run_validation:
+            return
         if self.trainer.dist.is_master:
             self._log_epoch(summary)
 
@@ -224,8 +226,7 @@ class GradientClippingCallback(Callback):
             self.gradnorms_queue = None
 
     def on_before_step(self, summary: EpochSummary, **kwargs):
-        if self.max_gradient_norm == math.inf:
-            return
+        if self.max_gradient_norm == math.inf: return
 
         model_params = self.trainer.model.parameters()
 
@@ -249,8 +250,9 @@ class GradientClippingCallback(Callback):
         if self.trainer.dist.is_master:
             summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
 
-class CheckpointCallback(Callback):
-    def on_epoch_end(self, summary: EpochSummary):
+class CheckpointCallback(Callback):    
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
+        if not run_validation: return
         if not self.trainer.dist.is_master: return
         
         current_metrics = summary.get_target_metric(self.trainer.metrics_key)
@@ -272,8 +274,10 @@ class CheckpointCallback(Callback):
 
 class EarlyStoppingCallback(Callback):
     """Handles early stopping with proper DDP synchronization."""
-    def on_epoch_end(self, summary: EpochSummary):
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
         should_stop = False
+        if not run_validation:
+            return
         # 1. Only the master rank evaluates the stopping condition
         if self.trainer.dist.is_master:
             if self.trainer.early_stopping_conds is not None and summary is not None:
