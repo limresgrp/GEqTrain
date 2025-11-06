@@ -93,6 +93,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         dampen: bool = False,
         wd: bool = False,
         gain: Optional[float] = None,
+        final_non_lin:str=None,
     ):
         super().__init__()
         dimensions = (
@@ -191,6 +192,9 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
             for module in modules:
                 module_name, mod = module
                 sequential_dict[module_name] = mod
+
+        if final_non_lin is not None:
+            sequential_dict[final_non_lin] = select_nonlinearity(final_non_lin)
 
         self.sequential = torch.nn.Sequential(sequential_dict)
 

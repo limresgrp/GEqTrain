@@ -144,16 +144,26 @@ class SimpleLossWithNaNsFilter(SimpleLoss):
         pred_key, not_nan_pred_filter, ref_key, not_nan_ref_filter = self.prepare(pred, ref, key, **kwargs)
         not_nan_filter = not_nan_pred_filter * not_nan_ref_filter
 
-        if 'ensemble_index' in pred:
-            assert 'ensemble_index' in ref
-            pred_key, ref_key = ensemble_predictions_and_targets(pred_key.squeeze(), ref_key.squeeze(), pred['ensemble_index'])
-            n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
-            ref_key = ref_key/n_ens
-            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
-            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
-            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+        if torch.isnan(ref[key]).any():
+            mask = ~torch.isnan(ref[key])
+            ref_key = ref[key][mask]
+            pred_key = pred[key][mask]
 
-        loss = self.func(pred_key, ref_key) * not_nan_filter
+        if torch.isnan(pred[key]).any():
+            mask = ~torch.isnan(pred[key])
+            ref_key = ref[key][mask]
+            pred_key = pred[key][mask]
+
+        # if 'ensemble_index' in pred:
+        #     assert 'ensemble_index' in ref
+        #     pred_key, ref_key = ensemble_predictions_and_targets(pred_key.squeeze(), ref_key.squeeze(), pred['ensemble_index'])
+        #     n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
+        #     ref_key = ref_key/n_ens
+        #     not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
+        #     not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
+        #     not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+
+        loss = self.func(pred_key, ref_key) #* not_nan_filter
         if mean:
             return loss.sum() / torch.max(not_nan_filter.sum(), torch.ones(1, device=not_nan_filter.device))
         loss[~not_nan_filter.bool()] = torch.nan
@@ -332,14 +342,14 @@ class BinaryAUROCMetric:
         logits = pred[key].squeeze()
         target = ref[key].squeeze()
 
-        if 'ensemble_index' in pred:
-            assert 'ensemble_index' in ref
-            logits, target = ensemble_predictions_and_targets(logits, target, pred['ensemble_index'])
-            n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
-            target = target/n_ens
-            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
-            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
-            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+        # if 'ensemble_index' in pred:
+        #     assert 'ensemble_index' in ref
+        #     logits, target = ensemble_predictions_and_targets(logits, target, pred['ensemble_index'])
+        #     n_ens = pred['ensemble_index'].shape[0]/torch.unique(pred['ensemble_index']).shape[0]
+        #     target = target/n_ens
+        #     not_nan_filter = (scatter_sum(ref[key].squeeze(), pred['ensemble_index'])+1)
+        #     not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
+        #     not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
 
         if target.dim() == 0: # if bs = 1
             target = target.unsqueeze(0)

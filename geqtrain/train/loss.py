@@ -84,7 +84,11 @@ class Loss:
                     **kwargs,
                 )
                 contrib[key] = _loss
-                loss += self.coeffs[key] * _loss # total_loss += weight_i * loss_i
+                try:
+                    loss += (self.coeffs[key] * _loss)
+                except:
+                    loss += (self.coeffs[key] * _loss).squeeze() # total_loss += weight_i * loss_i
+
         except:
             print(f'Error while computing loss for key: {key}')
             raise
