@@ -134,13 +134,19 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
 
         # Determine the combined input irreps for the EquivariantScalarMLP processor
         processor_in_irreps: o3.Irreps
+        self.split_index: int = 0
+        self.n_scalars_in: int = 0
         if self.input_mode == "single":
             processor_in_irreps = self.irreps_in[self.field]
+            self.n_scalars_in = sum(mul * ir.dim for mul, ir in processor_in_irreps if ir.l == 0)
+            self.split_index = self.n_scalars_in
         else: # "split"
             combined_in_irreps_list = []
-            if self.invariant_field and self.invariant_field in irreps_in: combined_in_irreps_list.append(irreps_in[self.invariant_field])
-            if self.equivariant_field and self.equivariant_field in irreps_in: combined_in_irreps_list.append(irreps_in[self.equivariant_field])
+            if self.invariant_field and self.invariant_field in irreps_in: combined_in_irreps_list.append(o3.Irreps(irreps_in[self.invariant_field]))
+            if self.equivariant_field and self.equivariant_field in irreps_in: combined_in_irreps_list.append(o3.Irreps(irreps_in[self.equivariant_field]))
             processor_in_irreps = (combined_in_irreps_list[0], combined_in_irreps_list[1])
+            self.n_scalars_in = combined_in_irreps_list[0].dim
+            self.split_index = self.n_scalars_in
             
         # Prepare irreps_out for GraphModuleMixin, reflecting the actual output fields
         gm_irreps_out = {}
@@ -170,7 +176,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                  raise ValueError(f"For resnet=True, out_field='{representative_out_field}' must be in `irreps_in`")
             if self.irreps_in[representative_out_field] != processor_out_irreps_combined:
                  raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
-            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0], dtype=torch.float32))
+            # Start close to identity by using a strongly negative logit.
+            self._resnet_update_coeff = nn.Parameter(torch.tensor([-5.0], dtype=torch.float32))
         
         # --- Conditioning Fields Validation and Dimension Calculation ---
         self.total_conditioning_dim = 0
@@ -219,21 +226,24 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         if self.input_mode == "single":
             features = data[self.field]
         else: # "split"
-            # Concatenate scalar and equivariant features in the order expected by EquivariantScalarMLP
-            # (scalars first, then equivariants)
-            features_list = []
-            if self.invariant_field and self.invariant_field in data:
-                features_list.append(data[self.invariant_field])
-            if self.equivariant_field and self.equivariant_field in data:
-                features_list.append(data[self.equivariant_field])
-            if not features_list:
+            if self.invariant_field is None or self.equivariant_field is None:
+                raise ValueError("Split input requires both invariant_field and equivariant_field.")
+            if self.invariant_field not in data or self.equivariant_field not in data:
                 raise ValueError("No input features found for split input mode.")
-            features = torch.cat(features_list, dim=-1)
+            features = (
+                data[self.invariant_field],
+                data[self.equivariant_field],
+            )
 
         conditioning_tensor: Optional[torch.Tensor] = None
         if len(self.conditioning_fields) > 0:
             conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
             conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
+            # Broadcast graph-level conditioning to node-level if needed
+            if conditioning_tensor.shape[0] == 1 and self.input_mode == "single":
+                conditioning_tensor = conditioning_tensor.expand(features.shape[0], -1)
+            elif conditioning_tensor.shape[0] == 1 and self.input_mode == "split":
+                conditioning_tensor = conditioning_tensor.expand(features[0].shape[0], -1)
 
         # --- 2. Run the core processor ---
         # The processor can return a single tensor or a tuple
@@ -337,12 +347,12 @@ class AttentionReadoutModule(ReadoutModule):
             # This is a pre-processing step for the main readout forward pass.
             # We modify the feature tensor in `data` before calling super().forward().
             features = data[self.field]
-            scalars, equiv = torch.split(features, [self.processor.split_index, features.shape[-1] - self.processor.split_index], dim=-1)
-            
+            scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+
             # The original L0IndexedAttention implementation seems to operate on a tensor of scalars.
             scalars = self.ensemble_attnt1(scalars, data)
             scalars = self.ensemble_attnt2(scalars, data)
-            
+
             data[self.field] = torch.cat((scalars, equiv), dim=-1)
 
         return super().forward(data)

@@ -48,9 +48,16 @@ class BesselBasis(nn.Module):
         x : torch.Tensor
             Input
         """
-        numerator = torch.sin(self.bessel_weights * x.unsqueeze(-1) / self.r_max)
+        x_exp = x.unsqueeze(-1)
+        scaled = self.bessel_weights * x_exp / self.r_max
+        numerator = torch.sin(scaled)
 
-        return self.prefactor * (numerator / x.unsqueeze(-1))
+        # Use the limit sin(kx)/x -> k as x -> 0 to avoid NaNs
+        eps = 1e-8
+        safe_den = torch.where(torch.abs(x_exp) < eps, torch.ones_like(x_exp), x_exp)
+        base = self.prefactor * (numerator / safe_den)
+        near_zero = self.prefactor * (self.bessel_weights / self.r_max)
+        return torch.where(torch.abs(x_exp) < eps, near_zero, base)
 
 
 class BesselBasisVec(nn.Module):
@@ -61,6 +68,7 @@ class BesselBasisVec(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
+        self._max_index = self.num_points - 1
 
         r_values = torch.linspace(0., r_max, self.num_points)
         Jn_values = []
@@ -94,6 +102,7 @@ class BesselBasisVec(nn.Module):
         """
         x = torch.clip(x, max=self.r_values.max())
         idcs = torch.searchsorted(self.r_values, x)
+        idcs = torch.clamp(idcs, max=self._max_index)
         return torch.einsum("i,ji->ji", self.bessel_weights, self.bessel_values[idcs])
 
 
@@ -105,6 +114,7 @@ class GaussianBasis(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
+        self._max_index = self.num_points - 1
 
         r_values = torch.linspace(0., r_max, self.num_points)
 
@@ -141,6 +151,7 @@ class GaussianBasis(nn.Module):
         """
         x = torch.clip(x, max=self.r_values.max())
         idcs = torch.searchsorted(self.r_values, x)
+        idcs = torch.clamp(idcs, max=self._max_index)
         return torch.einsum("i,ji->ji", self.gaussian_weights, self.gaussian_values[idcs])
 
 
@@ -152,11 +163,15 @@ class PolyBasisVec(nn.Module):
         self.trainable = trainable
         self.num_basis = num_basis
         self.num_points = int(r_max / accuracy)
+        self._max_index = self.num_points - 1
+        self.r_max = float(r_max)
+        self.min_r = max(accuracy, 1e-6)
 
-        r_values = torch.linspace(0., r_max, self.num_points)
+        r_values = torch.linspace(self.min_r, r_max, self.num_points)
 
         def poly(x, power):
-            return torch.pow(x, -power)
+            # Use normalized positive powers to keep values bounded and smooth near zero.
+            return torch.pow(x / self.r_max, power)
 
         P_values = []
         for power in range(1, num_basis + 1):
@@ -183,6 +198,7 @@ class PolyBasisVec(nn.Module):
         x : torch.Tensor
             Input
         """
-        x = torch.clip(x, max=self.r_values.max())
+        x = torch.clamp(x, min=self.min_r, max=self.r_values.max())
         idcs = torch.searchsorted(self.r_values, x)
+        idcs = torch.clamp(idcs, max=self._max_index)
         return torch.einsum("i,ji->ji", self.poly_weights, self.poly_values[idcs])

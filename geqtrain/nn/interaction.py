@@ -330,9 +330,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             initial_equiv_latent = initial_equiv_latent[:, self.eq_concat_permutation]
 
         # === 2. Generate Initial Latent State ===
-        scalar_latent, equiv_latent = self.initial_latent_generator(
+        init_out = self.initial_latent_generator(
             (initial_scalar_latent, initial_equiv_latent),
         )
+        if torch.jit.isinstance(init_out, Tuple[torch.Tensor, torch.Tensor]):
+            scalar_latent, equiv_latent = init_out
+        else:
+            raise RuntimeError("initial_latent_generator must return scalar and equivariant tensors.")
 
         # Prepare conditioning tensors for interaction layers
         node_conditioning, edge_conditioning = prepare_conditioning_tensors(
@@ -351,7 +355,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 edge_conditioning=edge_conditioning,
                 this_layer_update_coeff=layer_update_coefficients[i - 1] if i > 0 else None,
             )
-        data[self.out_field] = self.final_projection((scalar_latent, equiv_latent))
+        final_out = self.final_projection((scalar_latent, equiv_latent))
+        if torch.jit.isinstance(final_out, torch.Tensor):
+            data[self.out_field] = final_out
+        else:
+            raise RuntimeError("final_projection must return a Tensor.")
         return data
 
 
@@ -363,11 +371,14 @@ class InteractionLayer(torch.nn.Module):
     - `__init__` is streamlined and groups related module constructions.
     - Forward pass is clarified and returns the correct signature.
     """
+    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product"]
     def __init__(
         self, config: InteractionLayerConfig
     ):
         super().__init__()
-        self.config = config
+        self.node_invariant_field = config.node_invariant_field
+        self.use_attention = config.use_attention
+        self.use_mace_product = config.use_mace_product
 
         # === Define dimensions and irreps ===
         node_inv_dim = config.irreps_in[config.node_invariant_field].dim
@@ -445,22 +456,26 @@ class InteractionLayer(torch.nn.Module):
         self,
         data: AtomicDataDict.Type,
         scalar_latent: torch.Tensor,
-        equiv_latent: Optional[torch.Tensor],
+        equiv_latent: torch.Tensor,
         active_edges: torch.Tensor,
         node_conditioning: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
         this_layer_update_coeff: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         
         # === Prepare inputs ===
-        node_invariants = data[self.config.node_invariant_field]
+        node_invariants = data[self.node_invariant_field]
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         num_nodes = node_invariants.shape[0]
 
         # === 1. Build local environment embedding ===
-        env_edges = self.env_embed_mlp((scalar_latent, equiv_latent))
+        env_edges_raw = self.env_embed_mlp((scalar_latent, equiv_latent))
+        if torch.jit.isinstance(env_edges_raw, torch.Tensor):
+            env_edges = env_edges_raw
+        else:
+            raise RuntimeError("env_embed_mlp must return a Tensor.")
         
-        if self.config.use_attention:
+        if self.use_attention:
             assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
             Q = self.rearrange_qk(self.node_attr_to_query(node_invariants[edge_center]))
             K = self.rearrange_qk(self.latent_to_key(scalar_latent))
@@ -469,7 +484,7 @@ class InteractionLayer(torch.nn.Module):
             env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
         
         env_nodes = scatter_sum(env_edges, edge_center, dim=0, dim_size=num_nodes)
-        if self.config.use_mace_product:
+        if self.use_mace_product:
             assert self.node_inv_to_product_mlp is not None
             assert self.reshape_in_module is not None
             env_nodes = self.reshape_in_module(self.product(node_feats=env_nodes, node_attrs=node_invariants, sc=None))
@@ -478,12 +493,15 @@ class InteractionLayer(torch.nn.Module):
         local_env_per_edge = env_nodes[edge_center]
         
         # === 3. Interact via Tensor Product ===
-        assert equiv_latent is not None
         tp_out = self.tp(equiv_latent, local_env_per_edge)
         tp_out = self.tp_norm(tp_out)
         
         # === 4. Extract new features ===
-        new_scalar_latent, equiv_latent = self.projection(tp_out, edge_conditioning)
+        proj_out = self.projection(tp_out, edge_conditioning)
+        if torch.jit.isinstance(proj_out, Tuple[torch.Tensor, torch.Tensor]):
+            new_scalar_latent, equiv_latent = proj_out
+        else:
+            raise RuntimeError("Projection must return scalar and equivariant tensors.")
         scalar_latent = apply_residual_stream(scalar_latent, new_scalar_latent, this_layer_update_coeff, active_edges)
 
         return scalar_latent, equiv_latent

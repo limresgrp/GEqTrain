@@ -5,7 +5,7 @@ from e3nn import o3
 from e3nn.util.test import assert_equivariant, FLOAT_TOLERANCE
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn import EquivariantScalarMLP
-from geqtrain.utils.deploy_test import assert_module_deployable
+from tests.utils.deployability import assert_module_deployable
 
 # Define a list of test configurations. Each dictionary represents one test case.
 # This makes it easy to add new test cases in the future.

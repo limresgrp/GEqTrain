@@ -236,7 +236,10 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.head_dim =  self.n_inpt_scalars//self.n_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
+        self.use_radial_bias = (
+            (field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY)
+            and (AtomicDataDict.EDGE_RADIAL_EMB_KEY in irreps_in)
+        )
         if self.use_radial_bias:
             rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
             self.bias_norm = nn.LayerNorm(rbf_emb_dim)
@@ -313,13 +316,13 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         return padded_edge_attrs
 
     # --------------------------------------------------- #
-    def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+    def forward(self, features: torch.Tensor, data: AtomicDataDict.Type) -> torch.Tensor:
         if not torch.jit.is_scripting():
             with torch.amp.autocast('cuda', enabled=False): # attention always kept to high precision, regardless of AMP
-                return self._forward_impl(data)
-        return self._forward_impl(data)
+                return self._forward_impl(features, data)
+        return self._forward_impl(features, data)
 
-    def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
+    def _forward_impl(self, features: torch.Tensor, data: AtomicDataDict.Type) -> torch.Tensor:
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
         attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"

@@ -5,7 +5,7 @@ from e3nn.util.test import assert_equivariant, FLOAT_TOLERANCE
 
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn.so3 import SO3_Linear, SO3_LayerNorm
-from geqtrain.utils.deploy_test import assert_module_deployable
+from tests.utils.deployability import assert_module_deployable
 
 
 @pytest.fixture(scope="session", autouse=True, params=["float32"])

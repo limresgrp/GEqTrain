@@ -186,7 +186,7 @@ class EquivariantScalarMLP(nn.Module):
 
     def forward(
         self,
-        features,
+        features: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         conditioning_tensor: Optional[torch.Tensor] = None,
     ) -> Any:
 

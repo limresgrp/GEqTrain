@@ -1,12 +1,13 @@
 import pytest
 import torch
+from tests.utils.deployability import assert_module_deployable
 import copy
 from e3nn import o3
 
 from geqtrain.data import AtomicData, AtomicDataDict
 from geqtrain.data.dataset import _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _FIXED_FIELDS
 from geqtrain.nn import InteractionModule
-from geqtrain.utils.test import assert_AtomicData_equivariant
+from tests.utils.equivariance import assert_AtomicData_equivariant
 
 # Common parameters for tests
 BATCH_SIZE = 1
@@ -188,3 +189,16 @@ def test_interaction_module(config):
         )
     except AssertionError as e:
         pytest.fail(f"Equivariance test failed for config '{config['name']}': {e}")
+
+
+def test_interaction_module_deployable(tmp_path):
+    """Smoke-test that InteractionModule can be scripted/frozen/saved and reloaded."""
+    device = "cpu"
+    config = TEST_CONFIGS[0]
+    params = config["params"]
+    irreps_in = config["irreps_in"]  # type: ignore
+
+    model = InteractionModule(irreps_in=irreps_in, **params).to(device)
+    data_in, _ = _create_dummy_data(config, device)
+
+    assert_module_deployable(model, (data_in,), tmp_path=tmp_path)
