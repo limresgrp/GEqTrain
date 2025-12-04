@@ -5,6 +5,7 @@ from e3nn import o3
 from e3nn.util.test import assert_equivariant, FLOAT_TOLERANCE
 from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn import EquivariantScalarMLP
+from geqtrain.utils.deploy_test import assert_module_deployable
 
 # Define a list of test configurations. Each dictionary represents one test case.
 # This makes it easy to add new test cases in the future.
@@ -244,3 +245,19 @@ def test_equivariant_scalar_mlp_behavior(config, float_tolerance):
         )
     except AssertionError as e:
         pytest.fail(f"Equivariance test failed for config '{config['name']}': {e}")
+
+
+def test_equivariant_scalar_mlp_deployable(tmp_path, float_tolerance):
+    """Ensure a representative EquivariantScalarMLP can be scripted/frozen and reloaded."""
+    model = EquivariantScalarMLP(
+        in_irreps="2x1o",
+        out_irreps="3x1o",
+        conditioning_dim=16,
+        output_shape_spec="flat",
+        latent_kwargs=BASE_PARAMS["latent_kwargs"],
+    )
+    features_irreps = o3.Irreps("2x1o")
+    features = features_irreps.randn(4, -1, dtype=torch.get_default_dtype())
+    conditioning = torch.randn(4, 16, dtype=torch.get_default_dtype())
+
+    assert_module_deployable(model, (features, conditioning), tmp_path=tmp_path)

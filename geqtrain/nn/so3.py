@@ -1,5 +1,5 @@
 import math
-from typing import Optional
+from typing import Optional, NamedTuple, List
 import torch
 
 from e3nn import o3
@@ -7,16 +7,30 @@ from e3nn.util.jit import compile_mode
 from einops.layers.torch import Rearrange
 
 
+class _LinearInstruction(NamedTuple):
+    in_start: int
+    in_stop: int
+    out_start: int
+    out_stop: int
+    path_idx: int
+    mul_in: int
+    mul_out: int
+    dim: int
+    weight_start: int
+    weight_stop: int
+
+
 @compile_mode("script")
 class SO3_Linear(torch.nn.Module):
+    __constants__ = ["in_mul", "out_dim", "internal_weights", "bias_start", "bias_stop"]
+    instructions: List[_LinearInstruction]
     def __init__(
         self,
         in_irreps: o3.Irreps,
         out_irreps: o3.Irreps,
         bias: bool = True,
         internal_weights: bool = True,
-        shared_weights: Optional[bool] = None, # unused
-        pad_to_alignment: int = 1, # unused
+        **kwargs,
     ):
         '''
         Initializes a fully-connected SO(3)-equivariant linear layer that
@@ -35,8 +49,12 @@ class SO3_Linear(torch.nn.Module):
         self.internal_weights = internal_weights
 
         self.paths = torch.nn.ModuleList()
-        self.instructions = []
+        self.instructions = torch.jit.annotate(List[_LinearInstruction], [])
         self.weight_numel = 0
+        self.in_mul = self.in_irreps[0].mul if len(self.in_irreps) > 0 else 0
+        self.out_dim = self.out_irreps.dim
+        self.bias_start = 0
+        self.bias_stop = 0
 
         # Get convenient slicing information for our input and output tensors
         in_slices = {ir: s for ir, s in zip(self.in_irreps, self.in_irreps.slices())}
@@ -60,15 +78,20 @@ class SO3_Linear(torch.nn.Module):
                         path_idx = -1 # Not used
 
                     # Store instructions for the forward pass
-                    self.instructions.append({
-                        "in_slice": s_in,
-                        "out_slice": s_out,
-                        "path_idx": path_idx,
-                        "mul_in": ir_in.mul,
-                        "mul_out": ir_out.mul,
-                        "dim": ir_in.ir.dim,
-                        "weight_slice": slice(weight_start_idx, weight_start_idx + path_weight_numel),
-                    })
+                    self.instructions.append(
+                        _LinearInstruction(
+                            in_start=s_in.start,
+                            in_stop=s_in.stop,
+                            out_start=s_out.start,
+                            out_stop=s_out.stop,
+                            path_idx=path_idx,
+                            mul_in=ir_in.mul,
+                            mul_out=ir_out.mul,
+                            dim=ir_in.ir.dim,
+                            weight_start=weight_start_idx,
+                            weight_stop=weight_start_idx + path_weight_numel,
+                        )
+                    )
                     weight_start_idx += path_weight_numel
         
         self.bias = None
@@ -78,6 +101,8 @@ class SO3_Linear(torch.nn.Module):
             scalar_out_irreps = o3.Irreps([ir for ir in self.out_irreps if ir.ir.l == 0])
             if scalar_out_irreps.dim > 0:
                 self.bias_slice = self.out_irreps.slices()[0]
+                self.bias_start = self.bias_slice.start
+                self.bias_stop = self.bias_slice.stop
                 self.bias = torch.nn.Parameter(torch.zeros(scalar_out_irreps.dim, dtype=torch.float32))
 
     def init_path_weights(self, path: torch.nn.Linear):
@@ -106,35 +131,33 @@ class SO3_Linear(torch.nn.Module):
 
         # Create an output tensor of the correct shape, filled with zeros.
         # We will add the results of each path to this tensor.
-        output = torch.zeros(x.shape[0], self.out_irreps.dim, device=x.device, dtype=x.dtype)
+        output = torch.zeros(x.shape[0], self.out_dim, device=x.device, dtype=x.dtype)
 
         # Check if the input is flat (batch, features) or has a channel dim (batch, mul, features)
         is_flat_input = len(x.shape) == 2
 
         if self.internal_weights:
-            for ins in self.instructions:
+            for idx, path in enumerate(self.paths):
+                ins = self.instructions[idx]
                 # 1. Slice the input to get the features for one irrep type
                 if is_flat_input:
-                    input_chunk = x[:, ins["in_slice"]]
+                    input_chunk = x[:, ins.in_start:ins.in_stop]
                 else:
                     # For channel-wise input, the features are distributed across the last dimension.
                     # We need to scale the slice indices by the multiplicity.
-                    s_in = ins["in_slice"]
-                    mul = self.in_irreps[0].mul
-                    channel_slice = slice(s_in.start // mul, s_in.stop // mul)
+                    channel_slice = slice(ins.in_start // self.in_mul, ins.in_stop // self.in_mul)
                     input_chunk = x[..., channel_slice]
 
                 # 2. Reshape to separate multiplicity and irrep dimensions
                 # from (batch, mul_in * dim) -> (batch, mul_in, dim)
                 if is_flat_input:
-                    input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
+                    input_chunk = input_chunk.reshape(x.shape[0], ins.mul_in, ins.dim)
                 
                 # 3. Transpose for torch.nn.Linear, which expects features in the last dim
                 # from (batch, mul_in, dim) -> (batch, dim, mul_in)
                 input_chunk = input_chunk.transpose(1, 2)
 
                 # 4. Apply the linear layer to the multiplicity channel
-                path = self.paths[ins["path_idx"]]
                 processed_chunk = path(input_chunk) # output: (batch, dim, mul_out)
 
                 # 5. Transpose back
@@ -146,37 +169,35 @@ class SO3_Linear(torch.nn.Module):
                 processed_chunk = processed_chunk.reshape(x.shape[0], -1)
 
                 # 7. Add the result to the correct slice of the output tensor
-                output[:, ins["out_slice"]] += processed_chunk
+                output[:, ins.out_start:ins.out_stop] += processed_chunk
         else: # use external weights
             assert weights is not None
             for ins in self.instructions:
                 # 1. Slice input and weights
-                weight_chunk = weights[..., ins["weight_slice"]]
+                weight_chunk = weights[..., ins.weight_start:ins.weight_stop]
                 if is_flat_input:
-                    input_chunk = x[:, ins["in_slice"]]
+                    input_chunk = x[:, ins.in_start:ins.in_stop]
                 else:
                     # For channel-wise input, scale the slice indices by the multiplicity.
-                    s_in = ins["in_slice"]
-                    mul = self.in_irreps[0].mul
-                    channel_slice = slice(s_in.start // mul, s_in.stop // mul)
+                    channel_slice = slice(ins.in_start // self.in_mul, ins.in_stop // self.in_mul)
                     input_chunk = x[..., channel_slice]
 
                 # 2. Reshape for einsum
                 # input: (batch, mul_in * dim) -> (batch, mul_in, dim)
                 if is_flat_input:
-                    input_chunk = input_chunk.reshape(x.shape[0], ins["mul_in"], ins["dim"])
+                    input_chunk = input_chunk.reshape(x.shape[0], ins.mul_in, ins.dim)
                 # weights: (..., mul_in * mul_out) -> (..., mul_out, mul_in)
-                weight_chunk = weight_chunk.reshape(weights.shape[:-1] + (ins["mul_out"], ins["mul_in"]))
+                weight_chunk = weight_chunk.reshape(weights.shape[:-1] + (ins.mul_out, ins.mul_in))
 
                 # 3. Apply weights with einsum
                 processed_chunk = torch.einsum('...oi,...id->...od', weight_chunk, input_chunk)
 
                 # 4. Reshape and add to output
                 processed_chunk = processed_chunk.reshape(x.shape[0], -1)
-                output[:, ins["out_slice"]] += processed_chunk
+                output[:, ins.out_start:ins.out_stop] += processed_chunk
         
         if self.bias is not None:
-            output[:, self.bias_slice] += self.bias
+            output[:, self.bias_start:self.bias_stop] += self.bias
 
         return output
 
