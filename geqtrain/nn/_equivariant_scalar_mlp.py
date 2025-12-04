@@ -106,7 +106,9 @@ class EquivariantScalarMLP(nn.Module):
 
         # --- Conditioning Layers ---
         self.conditioner = None
-        if has_conditioning:
+        # Only build FiLM when scalar inputs exist; otherwise the FiLM MLP would
+        # have zero outputs and create empty parameters.
+        if has_conditioning and self.n_scalars_in > 0:
             self.conditioner = nn.ModuleDict({
                 "film": FiLMFunction(self.conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None)
             })
