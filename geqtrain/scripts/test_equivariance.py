@@ -12,10 +12,10 @@ from os.path import isdir
 
 from geqtrain.model import model_from_config
 from geqtrain.utils import Config
-from geqtrain.data import dataset_from_config
+from geqtrain.data._build import dataset_from_config
 from geqtrain.utils import load_file
 from geqtrain.utils.test import assert_AtomicData_equivariant
-from geqtrain.utils._global_options import _set_global_options
+from geqtrain.utils._global_options import set_global_options
 from geqtrain.scripts._logger import set_up_script_logger
 
 default_config = dict(
@@ -75,7 +75,7 @@ def parse_command_line(args=None):
 
 
 def test_equivariance(config, logger):
-    _set_global_options(config)
+    set_global_options(config)
 
     # = Load the dataset =
     dataset = dataset_from_config(config, prefix="dataset")
