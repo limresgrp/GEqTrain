@@ -456,20 +456,23 @@ class InteractionLayer(torch.nn.Module):
         self,
         data: AtomicDataDict.Type,
         scalar_latent: torch.Tensor,
-        equiv_latent: torch.Tensor,
+        equiv_latent: Optional[torch.Tensor],
         active_edges: torch.Tensor,
         node_conditioning: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
         this_layer_update_coeff: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         
         # === Prepare inputs ===
         node_invariants = data[self.node_invariant_field]
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         num_nodes = node_invariants.shape[0]
+        if equiv_latent is None:
+            raise RuntimeError("InteractionLayer expected an equivariant latent tensor but received None.")
+        equiv_latent_tensor = equiv_latent
 
         # === 1. Build local environment embedding ===
-        env_edges_raw = self.env_embed_mlp((scalar_latent, equiv_latent))
+        env_edges_raw = self.env_embed_mlp((scalar_latent, equiv_latent_tensor))
         if torch.jit.isinstance(env_edges_raw, torch.Tensor):
             env_edges = env_edges_raw
         else:
@@ -493,15 +496,16 @@ class InteractionLayer(torch.nn.Module):
         local_env_per_edge = env_nodes[edge_center]
         
         # === 3. Interact via Tensor Product ===
-        tp_out = self.tp(equiv_latent, local_env_per_edge)
+        tp_out = self.tp(equiv_latent_tensor, local_env_per_edge)
         tp_out = self.tp_norm(tp_out)
-        
+
         # === 4. Extract new features ===
         proj_out = self.projection(tp_out, edge_conditioning)
-        if torch.jit.isinstance(proj_out, Tuple[torch.Tensor, torch.Tensor]):
-            new_scalar_latent, equiv_latent = proj_out
+        new_equiv_latent = torch.jit.annotate(Optional[torch.Tensor], None)
+        if torch.jit.isinstance(proj_out, Tuple[torch.Tensor, Optional[torch.Tensor]]):
+            new_scalar_latent, new_equiv_latent = proj_out
         else:
             raise RuntimeError("Projection must return scalar and equivariant tensors.")
         scalar_latent = apply_residual_stream(scalar_latent, new_scalar_latent, this_layer_update_coeff, active_edges)
 
-        return scalar_latent, equiv_latent
+        return scalar_latent, new_equiv_latent

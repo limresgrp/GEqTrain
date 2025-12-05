@@ -50,6 +50,19 @@ BASE_IRREPS_IN = {
 }
 
 
+SCALAR_ONLY_OUTPUT_CONFIG = {
+    "name": "scalar_only_output",
+    "params": {
+        "num_layers": 2,
+        "latent_dim": 16,
+        "eq_latent_multiplicity": 4,
+        "output_ls": [0],  # Only scalar output
+        "output_mul": 8,
+    },
+    "irreps_in": BASE_IRREPS_IN,
+    "expected_out_irreps": "8x0e",
+}
+
 TEST_CONFIGS = [
     {
         "name": "base_case_so3",
@@ -142,6 +155,7 @@ TEST_CONFIGS = [
         "irreps_in": BASE_IRREPS_IN,
         "expected_out_irreps": "8x0e+8x1o",
     },
+    SCALAR_ONLY_OUTPUT_CONFIG,
 ]
 
 
@@ -191,10 +205,10 @@ def test_interaction_module(config):
         pytest.fail(f"Equivariance test failed for config '{config['name']}': {e}")
 
 
-def test_interaction_module_deployable(tmp_path):
+@pytest.mark.parametrize("config", [TEST_CONFIGS[0], SCALAR_ONLY_OUTPUT_CONFIG], ids=["base_case", "scalar_only_output"])
+def test_interaction_module_deployable(config, tmp_path):
     """Smoke-test that InteractionModule can be scripted/frozen/saved and reloaded."""
     device = "cpu"
-    config = TEST_CONFIGS[0]
     params = config["params"]
     irreps_in = config["irreps_in"]  # type: ignore
 

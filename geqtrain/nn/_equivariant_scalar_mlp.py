@@ -31,6 +31,7 @@ class EquivariantScalarMLP(nn.Module):
         "use_so3_linear",
         "output_shape_spec",
         "use_full_feature_set",
+        "has_equivariant_input",
         "in_multiplicity",
         "out_multiplicity",
     ]
@@ -114,6 +115,7 @@ class EquivariantScalarMLP(nn.Module):
         self.n_scalars_out = sum(mul * ir.dim for mul, ir in self.out_irreps_scalar)
         self.has_invariant_output = self.n_scalars_out > 0
         self.has_equivariant_output = self.out_irreps_equiv.dim > 0
+        self.has_equivariant_input = self.in_irreps_equiv.dim > 0
         has_conditioning = self.conditioning_dim > 0
 
         # --- Conditioning Layers ---
@@ -186,16 +188,19 @@ class EquivariantScalarMLP(nn.Module):
 
     def forward(
         self,
-        features: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        features: Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]],
         conditioning_tensor: Optional[torch.Tensor] = None,
     ) -> Any:
 
         # -- 1. Unpack inputs --
+        equiv = torch.jit.annotate(Optional[torch.Tensor], None)
         if self.input_mode == "split":
-            if not torch.jit.isinstance(features, Tuple[torch.Tensor, torch.Tensor]):
+            if not torch.jit.isinstance(features, Tuple[torch.Tensor, Optional[torch.Tensor]]):
                 raise ValueError("input_mode is 'split', but 'features' was not a tuple.")
             scalars, equiv = features
             input_is_channel_wise = (equiv is not None and len(equiv.shape) == 3)
+            if equiv is None and self.has_equivariant_input:
+                raise RuntimeError("Equivariant input features are required by in_irreps but were provided as None.")
         else:
             if torch.jit.isinstance(features, Tuple[torch.Tensor, torch.Tensor]):
                 raise ValueError("input_mode is 'single', but 'features' was a tuple.")
@@ -247,6 +252,9 @@ class EquivariantScalarMLP(nn.Module):
         # -- 4. Process equivariant features --
         out_equiv: Optional[torch.Tensor] = None
         if self.has_equivariant_output:
+            if equiv is None:
+                raise RuntimeError("EquivariantScalarMLP expects equivariant inputs but received None.")
+            equiv_features = equiv
             # If output is split and the equivariant part contains scalars,
             # the linear layer needs the full feature set to compute them.
             if self.use_full_feature_set:
@@ -254,14 +262,14 @@ class EquivariantScalarMLP(nn.Module):
                     # Reshape scalars from [N, D_scalar_total] back to [N, C, D_scalar_per_channel]
                     n_scalar_channels = self.n_scalars_in // self.in_multiplicity
                     scalars_channel_wise = scalars.view(scalars.shape[0], self.in_multiplicity, n_scalar_channels)
-                    equiv = torch.cat([scalars_channel_wise, equiv], dim=-1)
+                    equiv_features = torch.cat([scalars_channel_wise, equiv_features], dim=-1)
                 else:
                     # For flat input, simple concatenation is correct
-                    equiv = torch.cat([scalars, equiv], dim=-1)
+                    equiv_features = torch.cat([scalars, equiv_features], dim=-1)
 
             if self.eq_readout_internal is not None:
                 assert self.eq_readout_internal is not None
-                eq_features_out = self.eq_readout_internal(equiv)
+                eq_features_out = self.eq_readout_internal(equiv_features)
             else:
                 assert self.eq_readout is not None
                 assert self.weights_emb is not None
@@ -271,7 +279,7 @@ class EquivariantScalarMLP(nn.Module):
                     assert conditioning_tensor is not None, "Conditioning tensor must be provided when n_scalars_in is 0 and conditioning is enabled."
                     weights = self.weights_emb(conditioning_tensor)
                 
-                eq_features_out = self.eq_readout(equiv, weights)
+                eq_features_out = self.eq_readout(equiv_features, weights)
             
             # Determine the desired output shape based on output_shape_spec and input shape
             is_channel_wise_output_desired = (

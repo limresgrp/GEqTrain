@@ -247,6 +247,23 @@ def test_equivariant_scalar_mlp_behavior(config, float_tolerance):
         pytest.fail(f"Equivariance test failed for config '{config['name']}': {e}")
 
 
+def test_equivariant_scalar_mlp_accepts_none_equivariant_input(tmp_path):
+    """Ensure split-input MLP handles an absent equivariant part when irreps specify scalars only."""
+    model = EquivariantScalarMLP(
+        in_irreps=("4x0e", o3.Irreps("")),
+        out_irreps="2x0e",
+        output_shape_spec="flat",
+        latent_kwargs=BASE_PARAMS["latent_kwargs"],
+    )
+    scalars = o3.Irreps("4x0e").randn(3, -1, dtype=torch.get_default_dtype())
+
+    output = model((scalars, None))
+    assert isinstance(output, torch.Tensor)
+    assert output.shape == (3, 2)
+
+    assert_module_deployable(model, ((scalars, None),), tmp_path=tmp_path)
+
+
 def test_equivariant_scalar_mlp_deployable(tmp_path, float_tolerance):
     """Ensure a representative EquivariantScalarMLP can be scripted/frozen and reloaded."""
     model = EquivariantScalarMLP(
