@@ -40,7 +40,7 @@ class LossWrapper:
     """
     def __init__(self, func_name: str, params: dict = {}):
         self.func_name = func_name
-        self.params = params
+        self.params = {} if params is None else dict(params)
 
         self.ignore_nan = self.params.pop("ignore_nan", False)
         self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
