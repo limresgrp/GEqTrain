@@ -93,10 +93,12 @@ def build_tps_irreps_list(
 @dataclass
 class InteractionLayerConfig:
     """Configuration for an InteractionLayer."""
+    latent_module: torch.nn.Module
+    latent_module_kwargs: dict
     latent_dim: int
     eq_latent_multiplicity: int
-    head_dim: int
     use_attention: bool
+    attention_head_dim: int
     use_mace_product: bool
     product_correlation: int
     tp_irreps_in: o3.Irreps
@@ -127,10 +129,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_spharm_emb_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
         edge_radial_emb_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+        latent_module=ScalarMLPFunction,
+        latent_module_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
         latent_dim: int = 256,
         eq_latent_multiplicity: int = 16,
         use_attention: bool = False,
-        head_dim: int = 64,
+        attention_head_dim: int = 32,
         use_mace_product: bool = False,
         product_correlation: int = 2,
         conditioning_fields: Optional[List[str]] = None,
@@ -224,8 +228,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.initial_latent_generator = EquivariantScalarMLP(
             in_irreps=(initial_scalar_latent_dim, initial_equiv_latent_irreps),
             out_irreps=(latent_dim, equiv_latent_irreps),
-            latent_module=ScalarMLPFunction,
-            latent_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
+            latent_module=latent_module,
+            latent_kwargs=latent_module_kwargs,
             equiv_linear_module=SO3_Linear,
             output_shape_spec="channel_wise",
         )
@@ -237,10 +241,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             is_last_layer = (i == self.num_layers - 1)
 
             layer_config = InteractionLayerConfig(
+                latent_module = latent_module,
+                latent_module_kwargs = latent_module_kwargs,
                 latent_dim = latent_dim,
                 eq_latent_multiplicity = eq_latent_multiplicity,
                 use_attention = use_attention,
-                head_dim = head_dim,
+                attention_head_dim = attention_head_dim,
                 use_mace_product = use_mace_product and not is_last_layer,
                 product_correlation = product_correlation,
                 tp_irreps_in = tps_irreps_in[i],
@@ -260,8 +266,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.final_projection = EquivariantScalarMLP(
             in_irreps=(latent_dim, last_layer_equiv_latent_irreps), # Input from the last interaction layer
             out_irreps=final_out_irreps, # Desired final output irreps
-            latent_module=ScalarMLPFunction,
-            latent_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
+            latent_module=latent_module,
+            latent_kwargs=latent_module_kwargs,
             equiv_linear_module=SO3_Linear,
             output_shape_spec="flat", # The out_field expects a single flat tensor
             conditioning_dim=self.edge_conditioning_dim, # Pass edge conditioning to the final projection
@@ -400,17 +406,17 @@ class InteractionLayer(torch.nn.Module):
         self.node_attr_to_query = None
         self.latent_to_key = None
         if config.use_attention:
-            self.isqrtd = math.isqrt(config.head_dim)
-            self.node_attr_to_query = ScalarMLPFunction(node_inv_dim, [], config.eq_latent_multiplicity * config.head_dim)
-            self.latent_to_key = ScalarMLPFunction(config.latent_dim, [], config.eq_latent_multiplicity * config.head_dim)
-            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=config.eq_latent_multiplicity, d=config.head_dim)
+            self.isqrtd = math.isqrt(config.attention_head_dim)
+            self.node_attr_to_query = config.latent_module(node_inv_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            self.latent_to_key = config.latent_module(config.latent_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=config.eq_latent_multiplicity, d=config.attention_head_dim)
         
         # === MACE product modules ===
         self.node_inv_to_product_mlp = None
         self.reshape_in_module = None
         if config.use_mace_product:
             # Project node invariants to match the multiplicity of the equivariant features
-            self.node_inv_to_product_mlp = ScalarMLPFunction(
+            self.node_inv_to_product_mlp = config.latent_module(
                 mlp_input_dimension=node_inv_dim,
                 mlp_latent_dimensions=[],
                 mlp_output_dimension=config.eq_latent_multiplicity

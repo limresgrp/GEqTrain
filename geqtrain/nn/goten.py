@@ -159,7 +159,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         latent_dim: int = 64,
         eq_multiplicity: int = 8,
         use_attention: bool = False,
-        head_dim: int = 16,
+        attention_head_dim: int = 16,
         latent: Callable = ScalarMLPFunction,
         latent_kwargs: dict = {},
         irreps_in=None,
@@ -227,7 +227,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         # === Interaction Layers ===
         self.layers = torch.nn.ModuleList([])
         for _ in range(num_layers):
-            self.layers.append(GotenInteractionLayer(spharms_irreps, eq_multiplicity, use_attention, head_dim, latent_dim, latent))
+            self.layers.append(GotenInteractionLayer(spharms_irreps, eq_multiplicity, use_attention, attention_head_dim, latent_dim, latent))
         self.update_coeffs = torch.nn.Parameter(torch.zeros(num_layers, dtype=torch.float32))
 
         # === Final Projection ===
@@ -317,16 +317,16 @@ class GotenInteractionLayer(torch.nn.Module):
         spharms_irreps: o3.Irreps,
         eq_multiplicity: int,
         use_attention: bool,
-        head_dim: int,
+        attention_head_dim: int,
         latent_dim: int,
         latent,
     ) -> None:
         super().__init__()
         self.use_attention = use_attention
         self.latent_dim = latent_dim
-        self.head_dim = head_dim
-        self.num_heads = latent_dim // head_dim
-        assert self.num_heads * head_dim == latent_dim, "latent_dim must be divisible by head_dim"
+        self.attention_head_dim = attention_head_dim
+        self.num_heads = latent_dim // attention_head_dim
+        assert self.num_heads * attention_head_dim == latent_dim, "latent_dim must be divisible by attention_head_dim"
 
         eq_irreps = o3.Irreps([(eq_multiplicity, ir) for _, ir in spharms_irreps])
 
@@ -413,17 +413,17 @@ class GotenInteractionLayer(torch.nn.Module):
         spatial_message = self.W_rs(t_ij) * self.gamma_s(h_j)
         
         if self.use_attention:
-            q_i = self.W_q(h_i).view(-1, self.num_heads, self.head_dim)
-            k_j = self.W_k(h_j).view(-1, self.num_heads, self.head_dim)
+            q_i = self.W_q(h_i).view(-1, self.num_heads, self.attention_head_dim)
+            k_j = self.W_k(h_j).view(-1, self.num_heads, self.attention_head_dim)
             v_j = self.gamma_v(h_j)
             
             t_ij_attn = torch.nn.functional.silu(self.W_re(t_ij))
-            t_ij_attn = t_ij_attn.view(-1, self.num_heads, self.head_dim)
+            t_ij_attn = t_ij_attn.view(-1, self.num_heads, self.attention_head_dim)
             
-            alpha_ij = (q_i * k_j * t_ij_attn).sum(dim=-1) / math.sqrt(self.head_dim)
+            alpha_ij = (q_i * k_j * t_ij_attn).sum(dim=-1) / math.sqrt(self.headattention_head_dim_dim)
             attn_weights = scatter_softmax(alpha_ij, edge_center, dim=0)
             
-            sea_ij = (attn_weights.view(-1, self.num_heads, 1) * v_j.view(-1, self.num_heads, self.head_dim)).view(-1, self.latent_dim)
+            sea_ij = (attn_weights.view(-1, self.num_heads, 1) * v_j.view(-1, self.num_heads, self.attention_head_dim)).view(-1, self.latent_dim)
             
             combined_message = sea_ij + spatial_message
         else:

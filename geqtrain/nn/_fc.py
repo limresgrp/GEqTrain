@@ -4,22 +4,10 @@ import math
 import torch
 from typing import List, Optional
 from collections import OrderedDict
-from e3nn.math import normalize2mom
 from e3nn.util.codegen import CodeGenMixin
-from geqtrain.nn.nonlinearities import ShiftedSoftPlus, SwiGLU, Swish, ShiftedSoftPlusModule, SwiGLUModule, SwishModule
+from geqtrain.nn.nonlinearities import select_nonlinearity, select_nonlinearity_module
 from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
-
-def select_nonlinearity(nonlinearity):
-    if nonlinearity == 'ssp': non_lin_instance = ShiftedSoftPlusModule()
-    elif nonlinearity == "silu": non_lin_instance = torch.nn.SiLU()
-    elif nonlinearity == "selu": non_lin_instance = torch.nn.SELU()
-    elif nonlinearity == "relu": non_lin_instance = torch.nn.ReLU()
-    elif nonlinearity == "swiglu": non_lin_instance = SwiGLUModule()
-    elif nonlinearity == "sigmoid": non_lin_instance = torch.nn.Sigmoid()
-    elif nonlinearity == "swish": non_lin_instance = SwishModule()
-    elif nonlinearity: raise ValueError(f'Nonlinearity {nonlinearity} is not supported')
-    return non_lin_instance
 
 
 @compile_mode("script")
@@ -108,16 +96,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         self.dim_weight_norm = dim_weight_norm
         self.use_layer_norm = use_layer_norm
 
-        nonlinearity = {
-            None: None,
-            "silu": torch.nn.functional.silu,
-            "ssp": ShiftedSoftPlus,
-            "selu": torch.nn.functional.selu,
-            "relu": torch.nn.functional.relu,
-            "swiglu": SwiGLU,
-            "sigmoid": torch.nn.functional.sigmoid,
-            "swish": Swish
-        }[mlp_nonlinearity]
+        nonlinearity, nonlinearity_gain = select_nonlinearity(mlp_nonlinearity)
 
         if nonlinearity is None:
             gain = None
@@ -127,17 +106,8 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
         if self.gain is not None:
             nonlin_const = self.gain
         else:
-            if nonlinearity is not None:
-                if mlp_nonlinearity == "ssp":
-                    nonlin_const = normalize2mom(ShiftedSoftPlus).cst
-                elif mlp_nonlinearity == "swish":
-                    nonlin_const = normalize2mom(Swish).cst
-                elif mlp_nonlinearity in ["selu", "relu", "sigmoid"]:
-                    nonlin_const = torch.nn.init.calculate_gain(mlp_nonlinearity, param=None)
-                elif mlp_nonlinearity == "silu":
-                    nonlin_const = normalize2mom(nonlinearity).cst
-                elif mlp_nonlinearity == "swiglu":
-                    nonlin_const = 1.55
+            if nonlinearity_gain is not None:
+                nonlin_const = nonlinearity_gain
 
         if bias is not None:
             has_bias = True
@@ -157,7 +127,7 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
                 norm_const = 1.
             else:
                 norm_const = nonlin_const
-                non_lin_instance = select_nonlinearity(mlp_nonlinearity)
+                non_lin_instance = select_nonlinearity_module(mlp_nonlinearity)
                 modules.append((f"activation_{layer_index}", non_lin_instance))
                 if dropout is not None:
                     assert 0 <= dropout < 1., f"Dropout must be a float in range [0., 1.). Got {dropout} ({type(dropout)})"

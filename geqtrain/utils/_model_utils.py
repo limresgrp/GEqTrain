@@ -14,7 +14,6 @@ def add_tags_to_parameter(p: torch.nn.Parameter, tag: str):
         p.tags = set()
     p.tags.add(tag)
 
-
 def add_tags_to_module(model: torch.nn.Module, tag: str):
     """
     Adds a tag to the 'tags' attribute of each parameter in the model.

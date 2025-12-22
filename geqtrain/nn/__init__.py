@@ -1,5 +1,5 @@
 from .kan import KAN
-from ._fc import ScalarMLPFunction, select_nonlinearity
+from ._fc import ScalarMLPFunction, select_nonlinearity, select_nonlinearity_module
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from ._embedding_attrs import EmbeddingInputAttrs, EmbeddingAttrs
@@ -60,4 +60,5 @@ __all__ = [
     MACEModule,
     EquivariantScalarMLP,
     select_nonlinearity,
+    select_nonlinearity_module,
 ]

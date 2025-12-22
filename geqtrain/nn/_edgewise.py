@@ -25,7 +25,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         use_attention: bool = False,
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
-        head_dim: int = 32,
+        attention_head_dim: int = 32,
         avg_num_neighbors: Optional[float] = 5.0,
         avg_num_neighbors_is_learnable: bool = False,
         irreps_in={},
@@ -65,8 +65,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             if 'zero_init_last_layer_weights' not in readout_latent_kwargs:
                 readout_latent_kwargs['zero_init_last_layer_weights'] = True
 
-            self.head_dim = head_dim
-            self.isqrtd = math.isqrt(head_dim)
+            self.attention_head_dim = attention_head_dim
+            self.isqrtd = math.isqrt(attention_head_dim)
 
             self.n_scalars = self.irreps_mul * self.n_l[0]
 
@@ -74,17 +74,17 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
             self.node_attr_to_query = readout_latent(
                 mlp_input_dimension=irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim,
-                mlp_output_dimension=self.irreps_mul * self.head_dim,
+                mlp_output_dimension=self.irreps_mul * self.attention_head_dim,
                 **readout_latent_kwargs,
             )
 
             self.edge_feat_to_key = readout_latent(
                 mlp_input_dimension=self.n_scalars,
-                mlp_output_dimension=self.irreps_mul * self.head_dim,
+                mlp_output_dimension=self.irreps_mul * self.attention_head_dim,
                 **readout_latent_kwargs,
             )
 
-            self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.irreps_mul, d=self.head_dim)
+            self.rearrange_qk = Rearrange('e (c d) -> e c d', c=self.irreps_mul, d=self.attention_head_dim)
 
             self.reshape_out = inverse_reshape_irreps(irreps)
             self.irreps_out.update({self.out_field: irreps})

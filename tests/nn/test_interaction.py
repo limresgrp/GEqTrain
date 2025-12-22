@@ -113,7 +113,7 @@ TEST_CONFIGS = [
             "latent_dim": 16,
             "eq_latent_multiplicity": 4,
             "use_attention": True,
-            "head_dim": 4,
+            "attention_head_dim": 4,
         },
         "irreps_in": BASE_IRREPS_IN,
         "expected_out_irreps": "16x0e+4x1o+4x2e",

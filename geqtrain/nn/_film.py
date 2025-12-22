@@ -1,5 +1,5 @@
 from typing import List, Optional
-from geqtrain.nn import ScalarMLPFunction, select_nonlinearity
+from geqtrain.nn import ScalarMLPFunction, select_nonlinearity_module
 from e3nn.util.jit import compile_mode
 import torch
 
@@ -57,7 +57,7 @@ class FiLMFunction(ScalarMLPFunction):
         )
 
         if final_non_lin is not None:
-            final_non_lin = select_nonlinearity(final_non_lin)
+            final_non_lin = select_nonlinearity_module(final_non_lin)
         self.final_non_lin = final_non_lin
 
         self._dim = mlp_output_dimension
