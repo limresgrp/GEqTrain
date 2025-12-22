@@ -170,7 +170,11 @@ def assert_AtomicData_equivariant(
     # Prevent pytest from showing this function in the traceback
     __tracebackhide__ = True
 
-    device = next(func.parameters()).device
+    device = None
+    try:
+        device = next(func.parameters()).device
+    except StopIteration:
+        device = None
     if not isinstance(data_in, list):
         data_in = [data_in]
     
@@ -178,7 +182,11 @@ def assert_AtomicData_equivariant(
     for d in data_in:
         if isinstance(d, dict):
             d = AtomicData.from_dict(d)
-        processed_data_in.append(AtomicData.to_AtomicDataDict(d.to(device)))
+        if device is None:
+            target_device = d[AtomicDataDict.POSITIONS_KEY].device
+        else:
+            target_device = device
+        processed_data_in.append(AtomicData.to_AtomicDataDict(d.to(target_device)))
     data_in = processed_data_in
 
     # == Test permutation of graph nodes ==
