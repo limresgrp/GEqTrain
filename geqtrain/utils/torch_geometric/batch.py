@@ -247,13 +247,15 @@ class Batch(Data):
             node_mask[subset] = True
             subset = node_mask
 
-        current_edge_index = edge_index if edge_index is not None else self.edge_index        
-        edge_set = set(map(tuple, current_edge_index.t().tolist()))
-        edge_mask = torch.tensor(
-            [tuple(e) in edge_set for e in self.edge_index.t().tolist()],
-            dtype=torch.bool,
-            device=self.edge_index.device,
-        )
+        current_edge_index = edge_index if edge_index is not None else self.edge_index
+
+        # Build edge_mask without Python loops by hashing edge pairs.
+        # We encode each directed edge as `src * num_nodes + dst` and do a vectorized membership test.
+        num_nodes = self.num_nodes if self.num_nodes is not None else int(self.edge_index.max()) + 1
+        encoded_edges_all = (self.edge_index[0].to(torch.int64) * num_nodes) + self.edge_index[1].to(torch.int64)
+        encoded_edges_keep = (current_edge_index[0].to(torch.int64) * num_nodes) + current_edge_index[1].to(torch.int64)
+        encoded_edges_keep = torch.unique(encoded_edges_keep)
+        edge_mask = torch.isin(encoded_edges_all, encoded_edges_keep)
 
         node_map = torch.full((self.num_nodes,), -1, dtype=torch.long, device=subset.device)
         node_map[subset] = torch.arange(subset.sum(), device=subset.device)
@@ -295,10 +297,14 @@ class Batch(Data):
             if key in _NODE_FIELDS or key == 'batch':
                 new_item_sizes = new_graph_node_counts
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
-            elif key in _EDGE_FIELDS or key == 'edge_index':
+            elif key == 'edge_index':
                 edge_batch = self.batch[self.edge_index[0, edge_mask]]
                 new_item_sizes = torch.bincount(graph_map[edge_batch], minlength=len(unique_graphs))
                 new_cumsum[key] = node_increments.tolist()
+            elif key in _EDGE_FIELDS:
+                edge_batch = self.batch[self.edge_index[0, edge_mask]]
+                new_item_sizes = torch.bincount(graph_map[edge_batch], minlength=len(unique_graphs))
+                new_cumsum[key] = [0] * (len(unique_graphs) + 1)
             elif key in _GRAPH_FIELDS:
                 new_item_sizes = torch.ones(len(unique_graphs), dtype=torch.long, device=self.batch.device)
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
@@ -336,4 +342,3 @@ class Batch(Data):
             return int(self.batch.max()) + 1
         else:
             raise ValueError
-
