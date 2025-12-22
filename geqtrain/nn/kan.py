@@ -283,8 +283,8 @@ class KANLinear(nn.Module):
         out = 0.0
         if self.base_linear is not None:
             if self.base_activation is not None:
-                self.base_activation(x2d)
-            out = self.base_linear()
+                x2d = self.base_activation(x2d)
+            out = self.base_linear(x2d)
 
         # Spline path
         bases = self.b_splines(x2d)  # (N,in,n_coeff)
