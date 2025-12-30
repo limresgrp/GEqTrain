@@ -1,7 +1,6 @@
 import logging
 from typing import Optional
 from geqtrain.data import AtomicDataDict
-from geqtrain.nn._embedding_attrs import EmbeddingAttrs
 from geqtrain.utils import Config
 from geqtrain.nn import (
     SequentialGraphNetwork,
@@ -34,7 +33,7 @@ def buildGlobalNodeModelLayers():
             edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
             edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
             out_field=AtomicDataDict.EDGE_FEATURES_KEY,
-            output_ls=[0]
+            output_ls=[0],
         )),
         "local_edge_pooling": (EdgewiseReduce, dict(
             field=AtomicDataDict.EDGE_FEATURES_KEY,
