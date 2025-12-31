@@ -97,6 +97,11 @@ def get_base_deploy_parser(parser=None):
         "-e", "--extra-metadata", nargs='*', default=[],
         help="Add key-value pairs to metadata. Format: key=value."
     )
+    parser.add_argument(
+        "--interactive-metadata",
+        action="store_true",
+        help="Interactively add metadata from NPZ files and custom key/value pairs.",
+    )
     return parser
 
 def load_deployed_model(
