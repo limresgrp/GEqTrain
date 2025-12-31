@@ -23,11 +23,11 @@ import torch.nn.functional as F
 from geqtrain.nn.nonlinearities import select_nonlinearity_module
 
 
-def _flatten_to_2d(x: torch.Tensor, mlp_input_dimension: int) -> Tuple[torch.Tensor, torch.Size]:
+def _flatten_to_2d(x: torch.Tensor, mlp_input_dimension: int) -> Tuple[torch.Tensor, List[int]]:
     """Reshape (..., mlp_input_dimension) -> (N, mlp_input_dimension). Return flattened and original shape."""
     if x.size(-1) != mlp_input_dimension:
         raise ValueError(f"Expected last dim = {mlp_input_dimension}, got {x.size(-1)}.")
-    orig = x.shape
+    orig = list(x.size())
     return x.reshape(-1, mlp_input_dimension), orig
 
 
@@ -164,7 +164,7 @@ class KANLinear(nn.Module):
         Output: (N, in, grid_size + spline_order)
         """
         if x2d.dim() != 2 or x2d.size(1) != self.mlp_input_dimension:
-            raise ValueError(f"b_splines expects (N,{self.mlp_input_dimension}), got {tuple(x2d.shape)}.")
+            raise ValueError("b_splines expects a 2D input with the configured last dimension.")
 
         x = x2d.unsqueeze(-1)  # (N, in, 1)
         grid = self.grid  # (in, M), M = grid_size + 2*k + 1
@@ -202,9 +202,9 @@ class KANLinear(nn.Module):
         Returns coeff: (out, in, n_coeff)
         """
         if x.dim() != 2 or x.size(1) != self.mlp_input_dimension:
-            raise ValueError(f"x must be (N,{self.mlp_input_dimension}), got {tuple(x.shape)}.")
+            raise ValueError("x must be 2D with the configured input dimension.")
         if y.dim() != 3 or y.size(1) != self.mlp_input_dimension or y.size(2) != self.mlp_output_dimension:
-            raise ValueError(f"y must be (N,{self.mlp_input_dimension},{self.mlp_output_dimension}), got {tuple(y.shape)}.")
+            raise ValueError("y must be 3D with configured input/output dimensions.")
 
         # A: (in, N, n_coeff), B: (in, N, out)
         A = self.b_splines(x).transpose(0, 1)
@@ -280,11 +280,11 @@ class KANLinear(nn.Module):
             x2d = self.pre_mix(x2d)
 
         # Base path
-        out = 0.0
+        out = x2d.new_zeros((x2d.shape[0], self.mlp_output_dimension))
         if self.base_linear is not None:
             if self.base_activation is not None:
                 x2d = self.base_activation(x2d)
-            out = self.base_linear(x2d)
+            out = out + self.base_linear(x2d)
 
         # Spline path
         bases = self.b_splines(x2d)  # (N,in,n_coeff)
@@ -297,7 +297,7 @@ class KANLinear(nn.Module):
         if self.post_mix is not None:
             out = self.post_mix(out)
 
-        return out.reshape(*orig_shape[:-1], self.mlp_output_dimension)
+        return out.reshape(orig_shape[:-1] + [self.mlp_output_dimension])
 
     def regularization_loss(self, reg_l1: float = 1.0, reg_entropy: float = 0.0) -> torch.Tensor:
         """
@@ -390,7 +390,7 @@ class KAN(nn.Module):
                 h = layer(h)
 
     def forward(self, x: torch.Tensor, update_grid: bool = False) -> torch.Tensor:
-        if update_grid:
+        if update_grid and not torch.jit.is_scripting():
             self.update_grid(x)
         h = x
         for layer in self.layers:

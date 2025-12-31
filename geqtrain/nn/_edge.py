@@ -1,5 +1,5 @@
 import torch
-from typing import Union
+from typing import Optional, Union
 
 from e3nn import o3
 from e3nn.util.jit import compile_mode
@@ -100,15 +100,11 @@ class BaseEdgeEmbedding(BaseEmbedding):
 
         self.out_irreps = o3.Irreps(f"{edge_dim}x0e") if edge_dim > 0 else None
     
-    def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_attrs_to_cat = []
-        if self.has_edge_attr:
-            edge_field = self.edge_field
-            assert isinstance(edge_field, str)
-            edge_attrs_to_cat.append(data.get(edge_field))
-        if len(edge_attrs_to_cat) == 0:
+    def forward(self, data: AtomicDataDict.Type) -> Optional[torch.Tensor]:
+        if not self.has_edge_attr:
             return None
-        return torch.cat(edge_attrs_to_cat, dim=-1)
+        edge_field = torch.jit._unwrap_optional(self.edge_field)
+        return data[edge_field]
 
 
 @compile_mode("script")
@@ -148,15 +144,12 @@ class BaseEdgeEqEmbedding(BaseEmbedding):
             edge_eq_irreps = None
         self.out_irreps = edge_eq_irreps
     
-    def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
-        edge_eq_attr = None
-        if self.has_edge_eq_attr:
-            # 1 Perform the naive concatenation.
-            edge_eq_field = self.edge_eq_field
-            assert isinstance(edge_eq_field, str)
-            edge_eq_attr = data.get(edge_eq_field)
-        if self.has_edge_eq_attr:
-            # 2. Apply the pre-computed element-wise permutation.
-            #    This `edge_attr` tensor now correctly corresponds to `input_edge_eq_irreps`.
+    def forward(self, data: AtomicDataDict.Type) -> Optional[torch.Tensor]:
+        if not self.has_edge_eq_attr:
+            return None
+        edge_eq_field = torch.jit._unwrap_optional(self.edge_eq_field)
+        edge_eq_attr = data[edge_eq_field]
+        if self.concatenation_permutation is not None:
+            # Apply the pre-computed element-wise permutation.
             edge_eq_attr = edge_eq_attr[:, self.concatenation_permutation]
         return edge_eq_attr

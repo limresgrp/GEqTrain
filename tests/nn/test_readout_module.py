@@ -3,6 +3,7 @@ import torch
 from e3nn import o3
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn.readout import ReadoutModule
+from tests.utils.deployability import assert_module_deployable
 
 def _dummy_atomic_dict(num_atoms, irreps_in):
     pos = torch.randn(num_atoms, 3)
@@ -130,3 +131,33 @@ def test_attention_readout_smoke_and_gradients():
     # check some grads exist
     grads = [p.grad for p in module.parameters() if p.requires_grad]
     assert any(g is not None and g.abs().sum() > 0 for g in grads), "No gradient in AttentionReadoutModule"
+
+
+def test_readout_module_deployable_single(tmp_path):
+    irreps_in = {"node_features": "4x0e+2x1o"}
+    readout = ReadoutModule(
+        irreps_in=irreps_in,
+        field="node_features",
+        out_field="node_features_out",
+        scalar_out_field="node_scalars",
+        out_irreps="6x0e+2x1o",
+        readout_latent_kwargs={"mlp_latent_dimensions": [8]},
+        bias=0.1,
+    )
+
+    data = _dummy_atomic_dict(num_atoms=5, irreps_in=irreps_in)
+    assert_module_deployable(readout, (data,), tmp_path=tmp_path)
+
+
+def test_readout_module_deployable_resnet(tmp_path):
+    irreps_in = {"feat": "4x0e+1x1o"}
+    readout = ReadoutModule(
+        irreps_in=irreps_in,
+        field="feat",
+        out_field="feat",
+        resnet=True,
+        readout_latent_kwargs={"mlp_latent_dimensions": [8]},
+    )
+
+    data = _dummy_atomic_dict(num_atoms=6, irreps_in=irreps_in)
+    assert_module_deployable(readout, (data,), tmp_path=tmp_path)

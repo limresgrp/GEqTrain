@@ -96,6 +96,15 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 self.output_mode = "split"
                 self.scalar_out_field = None # Not supported in this default case
 
+        self._out_field = self.out_field if self.out_field is not None else ""
+        self._has_out_field = self.out_field is not None
+        self._scalar_out_field = self.scalar_out_field if self.scalar_out_field is not None else ""
+        self._has_scalar_out_field = self.scalar_out_field is not None
+        self._invariant_out_field = self.invariant_out_field if self.invariant_out_field is not None else ""
+        self._has_invariant_out_field = self.invariant_out_field is not None
+        self._equivariant_out_field = self.equivariant_out_field if self.equivariant_out_field is not None else ""
+        self._has_equivariant_out_field = self.equivariant_out_field is not None
+
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         self.ignore_amp = ignore_amp
         self.resnet = resnet
@@ -249,22 +258,24 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         # The processor can return a single tensor or a tuple
         out_features_or_tuple = self.processor(features, conditioning_tensor)
 
-        # --- 3. Handle ResNet connection ---
-        if self.resnet:
-            # Resnet is only supported for single output field mode for simplicity
-            if self.output_mode != "single":
-                raise NotImplementedError("ResNet is only supported for single `out_field` mode.")
-            old_features = data[self.out_field]
-            assert self._resnet_update_coeff is not None
-            coeff = self._resnet_update_coeff.sigmoid()
-            coefficient_old = torch.rsqrt(coeff.square() + 1)
-            coefficient_new = coeff * coefficient_old
-            out_features_or_tuple = coefficient_old * old_features + coefficient_new * out_features_or_tuple
-
-        # --- 4. Handle bias and write outputs ---
+        # --- 3. Handle bias/residuals and write outputs ---
         if self.output_mode == "single":
-            self._apply_bias_and_write_single(data, out_features_or_tuple)
+            if not torch.jit.isinstance(out_features_or_tuple, torch.Tensor):
+                raise RuntimeError("ReadoutModule expected a Tensor output in single mode.")
+            out_features = out_features_or_tuple
+            if self.resnet:
+                if not self._has_out_field:
+                    raise RuntimeError("ReadoutModule resnet requires an out_field.")
+                old_features = data[self._out_field]
+                assert self._resnet_update_coeff is not None
+                coeff = self._resnet_update_coeff.sigmoid()
+                coefficient_old = torch.rsqrt(coeff.square() + 1)
+                coefficient_new = coeff * coefficient_old
+                out_features = coefficient_old * old_features + coefficient_new * out_features
+            self._apply_bias_and_write_single(data, out_features)
         else: # "split"
+            if not torch.jit.isinstance(out_features_or_tuple, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]):
+                raise RuntimeError("ReadoutModule expected a (scalars, equivariants) tuple in split mode.")
             self._apply_bias_and_write_split(data, out_features_or_tuple)
 
         return data
@@ -273,25 +284,27 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         if self.bias is not None:
             out_features[..., :self.n_scalars_out] = out_features[..., :self.n_scalars_out] + self.bias
 
-        if self.scalar_out_field is not None and self.n_scalars_out > 0:
-            data[self.scalar_out_field] = out_features[..., :self.n_scalars_out]
+        if self._has_scalar_out_field and self.n_scalars_out > 0:
+            data[self._scalar_out_field] = out_features[..., :self.n_scalars_out]
 
-        data[self.out_field] = out_features
+        if not self._has_out_field:
+            raise RuntimeError("ReadoutModule expected an out_field in single mode.")
+        data[self._out_field] = out_features
 
     def _apply_bias_and_write_split(self, data: AtomicDataDict.Type, out_tuple: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]):
         out_scalars, out_equiv = out_tuple
 
-        if self.invariant_out_field is not None:
+        if self._has_invariant_out_field:
             if out_scalars is None:
                 raise ValueError(f"Module was configured to write to '{self.invariant_out_field}' but produced no scalar output.")
             if self.bias is not None:
                 out_scalars = out_scalars + self.bias
-            data[self.invariant_out_field] = out_scalars
+            data[self._invariant_out_field] = out_scalars
 
-        if self.equivariant_out_field is not None:
-            # # # if out_equiv is None:
-            # # #     raise ValueError(f"Module was configured to write to '{self.equivariant_out_field}' but produced no equivariant output.")
-            data[self.equivariant_out_field] = out_equiv
+        if self._has_equivariant_out_field:
+            if out_equiv is None:
+                raise ValueError(f"Module was configured to write to '{self.equivariant_out_field}' but produced no equivariant output.")
+            data[self._equivariant_out_field] = out_equiv
 
 @compile_mode("script")
 class AttentionReadoutModule(ReadoutModule):

@@ -258,12 +258,27 @@ class LossWrapper:
                         f"Global de-standardization for equivariant field '{ref_key_name}' is not fully supported and may be incorrect. "
                         "Consider using per-type standardization."
                     )
-                mean = ref[global_mean_key].item()
-                std = ref[global_std_key].item()
-                
-                if std > 1e-8:
-                    pred_key = pred_key * std + mean
-                    ref_key = ref_key * std + mean
+                global_mean = ref[global_mean_key]
+                global_std = ref[global_std_key]
+
+                if not torch.is_tensor(global_mean):
+                    global_mean = torch.as_tensor(global_mean, device=pred_key.device, dtype=pred_key.dtype)
+                else:
+                    global_mean = global_mean.to(device=pred_key.device, dtype=pred_key.dtype)
+
+                if not torch.is_tensor(global_std):
+                    global_std = torch.as_tensor(global_std, device=pred_key.device, dtype=pred_key.dtype)
+                else:
+                    global_std = global_std.to(device=pred_key.device, dtype=pred_key.dtype)
+
+                if global_mean.numel() != 1:
+                    global_mean = global_mean.reshape(-1).mean()
+                if global_std.numel() != 1:
+                    global_std = global_std.reshape(-1).mean()
+
+                if global_std.item() > 1e-8:
+                    pred_key = pred_key * global_std + global_mean
+                    ref_key = ref_key * global_std + global_mean
 
         return pred_key, ref_key
 

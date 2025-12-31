@@ -1,5 +1,5 @@
 import math
-from typing import Any, List, Optional, Union, Tuple
+from typing import List, Optional, Union, Tuple
  
 import torch
 from torch import nn
@@ -190,7 +190,7 @@ class EquivariantScalarMLP(nn.Module):
         self,
         features: Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]],
         conditioning_tensor: Optional[torch.Tensor] = None,
-    ) -> Any:
+    ) -> Union[torch.Tensor, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]:
 
         # -- 1. Unpack inputs --
         equiv = torch.jit.annotate(Optional[torch.Tensor], None)
@@ -305,19 +305,22 @@ class EquivariantScalarMLP(nn.Module):
         if out_scalars is None and out_equiv is None:
             raise ValueError("EquivariantScalarMLP produced no output features.")
 
-        output = torch.jit.annotate(Any, None)
         if self.output_is_split:
-            output = (out_scalars, out_equiv)
+            return torch.jit.annotate(
+                Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+                (out_scalars, out_equiv),
+            )
         else:
             # output_mode is "single"
             if out_scalars is None:
-                output = out_equiv
+                if out_equiv is None:
+                    raise ValueError("EquivariantScalarMLP produced no output features.")
+                return out_equiv
             elif out_equiv is None:
-                output = out_scalars
+                return out_scalars
             else:
                 # The first n_scalars_out dimensions of the concatenated tensor are the scalars
-                output = torch.cat([out_scalars, out_equiv], dim=-1)
-        return output
+                return torch.cat([out_scalars, out_equiv], dim=-1)
 
     def _convert_to_o3_irreps(self, irreps_input: Union[str, int, o3.Irreps]) -> o3.Irreps:
         """Converts an integer, string, or existing o3.Irreps object to an o3.Irreps object."""

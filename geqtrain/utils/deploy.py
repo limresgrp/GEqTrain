@@ -65,13 +65,18 @@ def check_submodules_scripting(sequential_module_to_test):
             print(f"  Error: {e}")
         print("-----------------------------------------------------------")
 
+    if hasattr(torch.jit, "_state") and hasattr(torch.jit._state, "_clear_class_state"):
+        # Avoid TorchScript class redefinition errors when scripting the full model after probes.
+        torch.jit._state._clear_class_state()
+
 def _sanity_checks(model, config):
     if config.get("use_weight_norm", False):
         raise Exception("""Trying to compile with 'use_weight_norm' set to True.
                         This is not supported by PyTorch, as if you use PyTorch < 2, the scripting fails for a missing __name__ attribute in WeightNorm class.
                         If you use PyTorch version >= 2, the new implementation uses torch.nn.utils.parametrize.register_parametrization() which is not supported by scripting.
                         This is a lose-lose situation.""")
-    check_submodules_scripting(model)
+    if config.get("deploy_check_submodules", False) or os.environ.get("GEQTRAIN_DEPLOY_CHECK_SUBMODULES") == "1":
+        check_submodules_scripting(model)
 
 def _compile_for_deploy(model):
     model.eval()
