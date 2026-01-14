@@ -6,6 +6,18 @@ import torch
 from e3nn.util.jit import script
 
 
+def _clone_tree(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    if isinstance(value, dict):
+        return {key: _clone_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_tree(item) for item in value)
+    return value
+
+
 def _assert_close(expected: Any, actual: Any, rtol: float, atol: float) -> None:
     """Recursively compare tensors/collections for equality within tolerance."""
     if isinstance(expected, torch.Tensor):
@@ -47,15 +59,17 @@ def assert_module_deployable(
     """
     module = module.eval()
     example_args = tuple(example_args)
+    def _clone_args() -> Tuple[Any, ...]:
+        return tuple(_clone_tree(arg) for arg in example_args)
 
     with torch.no_grad():
-        eager_out = module(*example_args)
+        eager_out = module(*_clone_args())
 
     scripted = script(module)
     frozen = torch.jit.freeze(scripted)
 
     with torch.no_grad():
-        scripted_out = frozen(*example_args)
+        scripted_out = frozen(*_clone_args())
     _assert_close(eager_out, scripted_out, rtol=rtol, atol=atol)
 
     def _save_and_load(path: Path):
@@ -63,7 +77,7 @@ def assert_module_deployable(
         loaded = torch.jit.load(path)
         loaded.eval()
         with torch.no_grad():
-            return loaded(*example_args)
+            return loaded(*_clone_args())
 
     if tmp_path is None:
         with TemporaryDirectory() as d:
