@@ -116,7 +116,7 @@ def prepare_chunked_input_data(
         chunk_edge_index = chunk_edge_index[:, edge_mask]
 
     if len(chunk_edge_index[0].unique()) == 0:
-        return None, None, None
+        return batch, chunk_edge_index[0].unique()
 
     # Determine the center nodes for this chunk based on batch_max_atoms
     offset = 0
@@ -159,7 +159,7 @@ def prepare_chunked_input_data(
     batch_chunk = batch.subgraph(chunk_nodes, chunk_edge_index, chunk_ignore_keys)
 
     if batch_chunk is None:
-        return None, None
+        return batch, chunk_center_nodes
     
     return batch_chunk, chunk_center_nodes
 
@@ -184,4 +184,3 @@ def apply_dropout_edges(dropout_edges, input_data):
     input_data[AtomicDataDict.EDGE_INDEX_KEY] = edge_index[:, keep_edges]
     if AtomicDataDict.EDGE_CELL_SHIFT_KEY in input_data:
         input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY] = input_data[AtomicDataDict.EDGE_CELL_SHIFT_KEY][keep_edges]
-
