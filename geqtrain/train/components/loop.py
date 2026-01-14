@@ -147,7 +147,7 @@ class TrainingLoop:
             self.trainer.batch_metrics = syncd_batch_metrics
 
         # Dispatch the per-step hook for callbacks
-        self.trainer._dispatch_callbacks('on_step_end', batch_output=out, summary=summary)
+        self.trainer._dispatch_callbacks('on_step_end', batch_output=out, ref_data=ref_data, summary=summary)
         
         # Return values needed by the chunking controller
         return batch_chunk_center_nodes

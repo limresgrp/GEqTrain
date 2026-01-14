@@ -161,6 +161,179 @@ class Logger(Callback):
         csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in mae_dict.values()]
         epoch_logger.info(",".join(csv_values))
 
+class ValidationBatchPredictionLogger(Callback):
+    """Saves a single validation batch of predictions/targets to per-key CSVs."""
+    def __init__(self):
+        self._log_files = {}
+        self._header_written = {}
+        self._keys = []
+        self._loss_func_by_key = {}
+        self._capture_active = False
+        self._pred_cache = {}
+        self._ref_cache = {}
+        self._destandardize_fields = {}
+
+    def on_trainer_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        loss = self.trainer.loss
+        seen = set()
+        for loss_key in loss.keys:
+            clean_key = loss.remove_suffix(loss_key)
+            if clean_key in seen:
+                continue
+            seen.add(clean_key)
+            self._keys.append(clean_key)
+            self._loss_func_by_key[clean_key] = loss.funcs[loss_key]
+            safe_key = clean_key.replace("/", "_")
+            log_path = self.trainer.output.open_logfile(
+                f"pred_target_batch_{ABBREV[VALIDATION]}_{safe_key}.csv",
+                propagate=False,
+            )
+            self._log_files[clean_key] = log_path
+            self._header_written[clean_key] = False
+
+        self._destandardize_fields = self.trainer.config.get('destandardize_fields', {})
+
+    def on_validation_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        self._capture_active = False
+        self._pred_cache = {key: [] for key in self._keys}
+        self._ref_cache = {key: [] for key in self._keys}
+
+    def on_batch_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        if self.trainer.batch_type != VALIDATION or self.trainer.ibatch != 0:
+            return
+        self._capture_active = True
+
+    def on_step_end(self, batch_output=None, ref_data=None, **kwargs):
+        if not self._capture_active or not self.trainer.dist.is_master:
+            return
+        if batch_output is None or ref_data is None:
+            return
+        for key in self._keys:
+            pred_key, ref_key = self._extract_pred_ref(key, batch_output, ref_data)
+            if pred_key is None or ref_key is None:
+                continue
+            self._pred_cache[key].append(pred_key.detach().cpu())
+            self._ref_cache[key].append(ref_key.detach().cpu())
+
+    def on_batch_end(self, **kwargs):
+        if not self._capture_active or not self.trainer.dist.is_master:
+            return
+        if self.trainer.batch_type != VALIDATION or self.trainer.ibatch != 0:
+            return
+        self._capture_active = False
+        self._flush_cache()
+
+    def _extract_pred_ref(self, key, batch_output, ref_data):
+        loss_func = self._loss_func_by_key.get(key)
+        pred_key_name = key
+        if loss_func is not None and hasattr(loss_func, "_get_pred_key_name"):
+            pred_key_name = loss_func._get_pred_key_name(key)
+
+        if pred_key_name not in batch_output or key not in ref_data:
+            return None, None
+
+        pred_copy = dict(batch_output)
+        ref_copy = dict(ref_data)
+        pred_copy[pred_key_name] = pred_copy[pred_key_name].detach().clone()
+        ref_copy[key] = ref_copy[key].detach().clone()
+
+        pred_key = pred_copy[pred_key_name]
+        ref_key = ref_copy[key]
+
+        if loss_func is not None and hasattr(loss_func, "_prepare_tensors"):
+            pred_key, ref_key = loss_func._prepare_tensors(
+                pred_copy,
+                ref_copy,
+                pred_key_name,
+                key,
+                mean=False,
+                destandardize_fields=self._destandardize_fields,
+            )
+
+        if loss_func is not None and hasattr(loss_func, "_handle_supervision_shapes"):
+            ref_key = loss_func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
+        elif ref_key.shape != pred_key.shape:
+            ref_key = ref_key.reshape(pred_key.shape)
+
+        if loss_func is not None and hasattr(loss_func, "_apply_node_filter"):
+            pred_key, ref_key = loss_func._apply_node_filter(pred_key, ref_key, ref_copy, key)
+
+        return pred_key, ref_key
+
+    def _flush_cache(self):
+        epoch = self.trainer.iepoch + 1
+        batch = self.trainer.ibatch + 1
+
+        for key in self._keys:
+            pred_chunks = self._pred_cache.get(key, [])
+            ref_chunks = self._ref_cache.get(key, [])
+            if not pred_chunks or not ref_chunks:
+                continue
+
+            pred = self._concat_chunks(pred_chunks)
+            ref = self._concat_chunks(ref_chunks)
+            pred_2d = self._to_2d(pred)
+            ref_2d = self._to_2d(ref)
+
+            if pred_2d.shape != ref_2d.shape:
+                self.trainer.logger.warning(
+                    f"Skipping CSV log for '{key}': prediction shape {pred_2d.shape} "
+                    f"does not match target shape {ref_2d.shape}."
+                )
+                continue
+
+            n_cols = pred_2d.shape[1]
+            if n_cols == 1:
+                pred_headers = ["pred"]
+                ref_headers = ["target"]
+            else:
+                pred_headers = [f"pred_{i}" for i in range(n_cols)]
+                ref_headers = [f"target_{i}" for i in range(n_cols)]
+
+            if not self._header_written.get(key, False):
+                header = ["epoch", "batch"] + pred_headers + ref_headers
+                logging.getLogger(self._log_files[key]).info(",".join(header))
+                self._header_written[key] = True
+
+            logger = logging.getLogger(self._log_files[key])
+            pred_rows = pred_2d.tolist()
+            ref_rows = ref_2d.tolist()
+            for pred_row, ref_row in zip(pred_rows, ref_rows):
+                values = [epoch, batch] + pred_row + ref_row
+                logger.info(self._format_csv_row(values))
+
+    def _concat_chunks(self, tensors):
+        prepared = []
+        for tensor in tensors:
+            if tensor.dim() == 0:
+                tensor = tensor.unsqueeze(0)
+            prepared.append(tensor)
+        if len(prepared) == 1:
+            return prepared[0]
+        return torch.cat(prepared, dim=0)
+
+    def _to_2d(self, tensor):
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+        if tensor.dim() == 1:
+            return tensor.unsqueeze(1)
+        return tensor.reshape(tensor.shape[0], -1)
+
+    def _format_csv_row(self, values):
+        formatted = []
+        for value in values:
+            if isinstance(value, float):
+                formatted.append(f"{value:.6g}")
+            else:
+                formatted.append(str(value))
+        return ",".join(formatted)
+
 class WandbCallback(Callback):
     """Handles all logging and initialization for Weights & Biases."""
     def on_trainer_begin(self):

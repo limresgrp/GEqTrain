@@ -18,9 +18,10 @@ from geqtrain.model import model_from_config
 
 # Import the new components
 from .components.distributed import DistributedManager
-from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger, 
-                                   CheckpointCallback, EarlyStoppingCallback, 
-                                   SanitizeGradCallback, GradientClippingCallback)
+from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger,
+                                   ValidationBatchPredictionLogger, CheckpointCallback,
+                                   EarlyStoppingCallback, SanitizeGradCallback,
+                                   GradientClippingCallback)
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -196,8 +197,13 @@ class Trainer:
 
         self.logger = logging.getLogger(self.logfile)
         set_seed(self.config.get('seed'))
-        self.dataset_np_rng = np.random.default_rng(self.config.get('dataset_seed'))
-        self.dataset_torch_rng = torch.Generator().manual_seed(self.config.get('dataset_seed'))
+        dataset_seed = self.config.get('dataset_seed')
+        if dataset_seed is None:
+            self.dataset_np_rng = np.random.default_rng()
+            self.dataset_torch_rng = None
+        else:
+            self.dataset_np_rng = np.random.default_rng(dataset_seed)
+            self.dataset_torch_rng = torch.Generator().manual_seed(dataset_seed)
 
     def _extract_config_parameters(self):
         """Extract parameters from the config file to trainer attributes for easy access via self. """
@@ -291,7 +297,7 @@ class Trainer:
 
     def _setup_callbacks(self):
         # Core callbacks
-        callbacks = [Logger(), CheckpointCallback(), EarlyStoppingCallback()]
+        callbacks = [Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
 
         # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):

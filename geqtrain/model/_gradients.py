@@ -18,11 +18,11 @@ def WithGradients(model, config: Config) -> SequentialGraphNetwork:
     config.update({"model_requires_grads": True})
     
     # Retrieve configuration with new, clearer names
-    gradient_of = config.get("gradient_of_field") # formerly "grad_output_of_field"
-    gradient_wrt = config.get("gradient_wrt_field")  # formerly "grad_output_wrt_field"
-    out_field = config.get("gradient_out_field")     # formerly "grad_output_out_field"
+    gradient_of = config.get("gradient_of_field")
+    gradient_wrt = config.get("gradient_wrt_field")
+    out_field = config.get("gradient_out_field")
     sign = int(config.get("gradient_sign", -1))
-    scales = config.get("gradient_scales", None)   # <-- New optional parameter
+    scales = config.get("gradient_scales", None)
 
     if out_field in model.irreps_out:
         raise ValueError(f"This model already has an output field named '{out_field}'.")
