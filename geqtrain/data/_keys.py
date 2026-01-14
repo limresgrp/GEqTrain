@@ -81,6 +81,8 @@ EDGE_RADIAL_EMB_KEY:     Final[str] = "radial_emb"          # radial basis funct
 GRAPH_ATTRS_KEY:         Final[str] = "graph_attrs"         # graph scalar attributes (attributes do not change once computed)
 # [n_graphs, dim]
 GRAPH_FEATURES_KEY:      Final[str] = "graph_features"      # processed version of GRAPH_ATTRS_KEY
+# [n_graphs, dim]
+GRAPH_EQ_ATTRS_KEY:      Final[str] = "graph_eq_attrs"      # graph equivariant attributes (attributes do not change once computed)
 
 # (1)
 RECYCLE_STEP_KEY:        Final[str] = "recycle_step"        # step of recycling [integer]

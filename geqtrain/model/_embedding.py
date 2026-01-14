@@ -30,6 +30,14 @@ def buildEmbeddingLayers(config: Config, model = None):
         )),
     })
 
+    if 'graph_attributes' in config or 'eq_graph_attributes' in config:
+        layers["graph_input_attrs"] = (EmbeddingInputAttrs, dict(
+            out_field     = AtomicDataDict.GRAPH_ATTRS_KEY,
+            eq_out_field  = AtomicDataDict.GRAPH_EQ_ATTRS_KEY,
+            attributes    = config.get('graph_attributes'),
+            eq_attributes = config.get('eq_graph_attributes'),
+        ))
+
     if 'edge_attributes' in config or 'eq_edge_attributes' in config:
         layers["edge_input_attrs"] = (EmbeddingInputAttrs, dict(
             out_field     = AtomicDataDict.EDGE_INPUT_ATTRS_KEY,

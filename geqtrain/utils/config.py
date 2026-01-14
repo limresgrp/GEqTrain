@@ -362,7 +362,7 @@ class Config(object):
                 assert self["node_attributes"]["node_types"]["num_types"] == self["num_types"]
             else:
                 self["node_attributes"]["node_types"]["num_types"] = self["num_types"]
-        for attr in ["node_attributes", "edge_attributes", "graph_attributes", "extra_attributes"]:
+        for attr in ["node_attributes", "edge_attributes", "graph_attributes", "eq_graph_attributes", "extra_attributes"]:
             if attr not in self:
                 continue
             for key, field in self[attr].items():

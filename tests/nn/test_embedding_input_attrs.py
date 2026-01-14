@@ -195,3 +195,53 @@ def test_embedding_input_attrs_edge_mix_equivariant():
     edge_eq = out[AtomicDataDict.EDGE_EQ_INPUT_ATTRS_KEY]
     assert edge_attrs.shape == (num_edges, 7)
     assert edge_eq.shape == (num_edges, 3)
+
+
+def test_embedding_input_attrs_graph_attrs_equivariant():
+    attributes = {
+        "graph_cat": {
+            "attribute_type": "categorical",
+            "embedding_mode": "embedding",
+            "embedding_dimensionality": 4,
+            "num_types": 3,
+            "actual_num_types": 3,
+        },
+        "graph_num": {
+            "attribute_type": "numerical",
+            "embedding_dimensionality": 2,
+        },
+    }
+    eq_attributes = {
+        "graph_eq": {
+            "attribute_type": "numerical",
+            "irreps": "1x1o",
+            "embedding_dimensionality": 3,
+        }
+    }
+
+    module = EmbeddingInputAttrs(
+        out_field=AtomicDataDict.GRAPH_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.GRAPH_EQ_ATTRS_KEY,
+        attributes=attributes,
+        eq_attributes=eq_attributes,
+        irreps_in=_make_irreps_in(
+            {
+                "graph_cat": None,
+                "graph_num": Irreps("2x0e"),
+                "graph_eq": Irreps("1x1o"),
+            }
+        ),
+    )
+
+    data = {
+        AtomicDataDict.POSITIONS_KEY: torch.randn(4, 3),
+        "graph_cat": torch.tensor([[1]], dtype=torch.long),
+        "graph_num": torch.randn(1, 2),
+        "graph_eq": torch.randn(1, 3),
+    }
+
+    out = module(data)
+    graph_attrs = out[AtomicDataDict.GRAPH_ATTRS_KEY]
+    graph_eq = out[AtomicDataDict.GRAPH_EQ_ATTRS_KEY]
+    assert graph_attrs.shape == (1, 6)
+    assert graph_eq.shape == (1, 3)

@@ -73,7 +73,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
     """
     Build scalar/equivariant input embeddings from attribute fields.
 
-    YAML schema for attributes (node/edge):
+    YAML schema for attributes (node/edge/graph):
       - attribute_type: "categorical" (default) or "numerical"
       - embedding_mode: "embedding" (default) or "one_hot"
       - embedding_dimensionality: required for embedding mode and for numerical attrs
