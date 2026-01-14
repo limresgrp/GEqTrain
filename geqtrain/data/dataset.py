@@ -52,26 +52,60 @@ def fix_batch_dim(arr):
     return arr
 
 
+def _has_binning(options: Dict) -> bool:
+    return any(key in options for key in ("min_value", "max_value", "bin_edges", "bins"))
+
+
+def _build_bin_edges(options: Dict, num_types: int) -> np.ndarray:
+    if "bin_edges" in options:
+        bins = np.asarray(options["bin_edges"], dtype=np.float32)
+    elif "bins" in options:
+        bins = np.asarray(options["bins"], dtype=np.float32)
+    else:
+        min_value = options.get("min_value")
+        max_value = options.get("max_value")
+        if min_value is None or max_value is None:
+            raise ValueError("Binning requires 'min_value' and 'max_value' or explicit 'bin_edges'.")
+        bins = np.linspace(float(min_value), float(max_value), num_types + 1, dtype=np.float32)
+
+    if bins.ndim != 1 or bins.size < 2:
+        raise ValueError("Binning edges must be a 1D array with at least two entries.")
+
+    if num_types > 0 and bins.size - 1 != num_types:
+        raise ValueError(
+            f"Binning edges imply {bins.size - 1} bins, but num_types={num_types}."
+        )
+    return bins
+
+
+def _bin_values(values: np.ndarray, options: Dict, num_types: int) -> np.ndarray:
+    bins = _build_bin_edges(options, num_types)
+    binned = np.digitize(values, bins) - 1
+    return np.clip(binned, 0, bins.size - 2)
+
+
 def parse_attrs(
     _attributes: Dict,
     _fields: Dict,
     _fixed_fields: Dict = {},
 ) -> Dict[str, Any]:
-    '''
-    parses field properties
+    """
+    Parse attribute fields with support for categorical, numerical, and binned numerical inputs.
 
-    handles:
+    Attribute config schema (node/edge/graph/extra):
+      - attribute_type: "categorical" (default) or "numerical"
+      - embedding_mode: "embedding" (default) or "one_hot"
+      - num_types: number of categorical bins/classes (required for categorical or binned numerical)
+      - can_be_undefined: if True, allows NaN and adds an "unknown" bin at index num_types
+      - embedding_dimensionality: used by embedding layers (only enforced downstream)
 
-    num_types: 8
-    node_attributes:
-      node_types: # this kword must match the red kword in key_mapping
-        # num_types: 8 # 5 ! a +1 is always added due to "unspecified" class
-        embedding_dimensionality: 16
-        fixed: true # if equal for each frame, if so they must not have the batch dim in the npz
-        # unspecified: t/f
-
-    todo: describe logic
-    '''
+    Binning for numerical attributes:
+      - Provide attribute_type: numerical plus either:
+        - min_value and max_value (uniform bins), or
+        - bin_edges / bins (explicit bin edges)
+      - Values are mapped to integer bins in [0, num_types-1], with NaNs mapped to num_types
+        if can_be_undefined is True.
+    """
     for key, options in _attributes.items():
         if key in _fields or key in _fixed_fields:
 
@@ -85,13 +119,18 @@ def parse_attrs(
             assert attribute_type in ['categorical', 'numerical']
             embedding_mode = options.get('embedding_mode', 'embedding')
             assert embedding_mode in ['embedding', 'one_hot']
-            if attribute_type == 'numerical':
+            is_binned_numerical = attribute_type == "numerical" and _has_binning(options)
+
+            if attribute_type == 'numerical' and not is_binned_numerical:
                 if input_val is not None:
                     input_val = input_val.astype(np.float32)
-            elif attribute_type == 'categorical':
+            else:
                 if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
-                    continue # if 'embedding_mode' is embedding (default) and 'embedding_dimensionality' is missing, this means the field must not be used as input
-                if val is None: val = np.array([np.nan])
+                    continue  # skip if embedding is requested but dimensionality is missing
+                if val is None:
+                    val = np.array([np.nan], dtype=np.float32)
+                if "num_types" not in options:
+                    raise ValueError(f"Attribute {key} requires 'num_types' for categorical/binned input.")
                 num_types = int(options['num_types'])
                 can_be_undefined = options.get('can_be_undefined', False)
                 mask = np.isnan(val)
@@ -99,17 +138,14 @@ def parse_attrs(
                     if not can_be_undefined:
                         raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
                     assert num_types + 1 == options.get('actual_num_types')
-                if 'min_value' in options or 'max_value' in options:
-                    # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
-                    # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
-                    # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
-                    # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
-                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types + 1)
-                    input_val = np.digitize(val, bins) # x < min_value -> 0, x >= max_value -> num_types + 1 (total of num_types + 2 bins)
-                    input_val[input_val == num_types + 1] -= 1 # x>=20 fall together 15<=x<20
-                    input_val[input_val > 0] -= 1 # 0<=x<5 fall together with x<0
-                input_val[mask] = num_types # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
-                input_val = val.astype(np.int64)
+
+                if is_binned_numerical:
+                    input_val = _bin_values(val.astype(np.float32), options, num_types)
+                else:
+                    input_val = val
+
+                input_val[mask] = num_types  # unknown token has value 'num_types'
+                input_val = input_val.astype(np.int64)
             if input_val is not None: # input_val can be None if it is computed by a submodule and is not present in the dataset
                 if key in _fields:
                     _fields[key] = torch.from_numpy(input_val)
