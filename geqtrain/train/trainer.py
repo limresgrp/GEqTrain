@@ -1,5 +1,6 @@
 # trainer.py
 import logging
+import math
 from pathlib import Path
 import shutil
 from time import perf_counter
@@ -161,6 +162,8 @@ class Trainer:
                 final_config = new_config
             
             final_config['restart'] = is_restart
+            if is_restart and not final_config.get('append'):
+                final_config['append'] = True
             
         else:
             # Non-master ranks wait to receive the final config
@@ -291,7 +294,8 @@ class Trainer:
         self.loss = setup_loss(self.config)
         self.metrics = setup_metrics(self.config)
         self.optim = setup_optimizer(self.model, self.config)
-        self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, len(self.dl_train))
+        steps_per_epoch = self._get_steps_per_epoch()
+        self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, steps_per_epoch)
         self.ema = setup_ema(self.model, self.config)
         self.early_stopping_conds = setup_early_stopping(self.config)
 
@@ -325,6 +329,13 @@ class Trainer:
         for cb in callbacks:
             cb.set_trainer(self)
         self.callbacks = callbacks
+
+    def _get_steps_per_epoch(self):
+        steps_per_epoch = len(self.dl_train)
+        accumulation_steps = self.config.get('accumulation_steps', 1)
+        if accumulation_steps > 1:
+            steps_per_epoch = math.ceil(steps_per_epoch / accumulation_steps)
+        return steps_per_epoch
 
     def _dispatch_callbacks(self, event: str, **kwargs):
         for cb in self.callbacks:
