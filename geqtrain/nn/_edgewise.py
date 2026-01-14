@@ -85,7 +85,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                 readout_latent_kwargs['zero_init_last_layer_weights'] = True
 
             self.attention_head_dim = attention_head_dim
-            self.isqrtd = math.isqrt(attention_head_dim)
+            self.isqrtd = 1 / math.sqrt(attention_head_dim)
 
             self.node_attr_to_query = readout_latent(
                 mlp_input_dimension=self.n_node_scalars,

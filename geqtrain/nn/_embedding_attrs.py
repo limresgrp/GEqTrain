@@ -70,69 +70,110 @@ def apply_masking(x: torch.Tensor, mask_token_index: int) -> torch.Tensor:
 
 @compile_mode("script")
 class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
-    
+    """
+    Build scalar/equivariant input embeddings from attribute fields.
+
+    YAML schema for attributes (node/edge):
+      - attribute_type: "categorical" (default) or "numerical"
+      - embedding_mode: "embedding" (default) or "one_hot"
+      - embedding_dimensionality: required for embedding mode and for numerical attrs
+      - num_types: required for categorical or binned numerical attrs
+      - can_be_undefined: if True, allows NaN and adds an "unknown" bin at index num_types
+      - min_value/max_value or bin_edges/bins: enable binning for numerical attrs
+
+    Equivariant attributes (eq_attributes):
+      - irreps: required, e.g. "1x1o"
+      - attribute_type: only "numerical" is supported
+      - embedding_dimensionality: optional; if provided, must match irreps dim
+    """
+
     fields_to_mask: List[str]
 
     def __init__(
         self,
         out_field:      Optional[str]             = None,
         eq_out_field:   Optional[str]             = None,
-        attributes:     Dict[str, Dict]           = {}, # key to parse from yaml
+        attributes:     Optional[Dict[str, Dict]] = None, # key to parse from yaml
         eq_attributes:  Optional[Dict[str, Dict]] = None,
         use_masking:    bool                      = True,
-        fields_to_mask: List[str]                 = [],
+        fields_to_mask: Optional[List[str]]       = None,
         irreps_in                                 = None,
     ):
         super().__init__()
         self.out_field     = out_field
         self.eq_out_field  = eq_out_field
         self._categorical_attrs_modules = torch.nn.ModuleDict() # k: str field name, v: nn.Embedding layer or nn.OneHot if one-hot
+        self._categorical_num_types = {}
         self._numerical_attrs    = []
         self._eq_numerical_attrs = []
 
         self.use_masking = use_masking
-        self.fields_to_mask = fields_to_mask
-        self.n_types = 0
+        self.fields_to_mask = fields_to_mask if fields_to_mask is not None else []
+
+        attributes = attributes or {}
         
         output_embedding_dim = 0
         my_irreps_in = {}
         for field, values in attributes.items():
+            attribute_type = values.get('attribute_type', 'categorical')
             embedding_mode = values.get('embedding_mode', 'embedding')
-            if embedding_mode == 'embedding' and 'embedding_dimensionality' not in values: # if attr is not used as embedding
-                logging.warning(f"Field {field} is missing 'embedding_dimensionality'. Not using as invariant input")
-                continue
-            embedding_dim: int = values.get('embedding_dimensionality', 0)
-            if values.get('attribute_type', 'categorical') == 'numerical':
+            is_binned_numerical = attribute_type == 'numerical' and _uses_binning(values)
+
+            if attribute_type == 'numerical' and not is_binned_numerical:
+                if 'embedding_dimensionality' not in values:
+                    logging.warning(f"Field {field} is missing 'embedding_dimensionality'. Not using as numerical input")
+                    continue
+                embedding_dim = int(values['embedding_dimensionality'])
+                if embedding_dim <= 0:
+                    logging.warning(f"Field {field} has non-positive embedding_dimensionality. Skipping numerical input.")
+                    continue
                 output_embedding_dim += embedding_dim
                 self._numerical_attrs.append(field)
                 my_irreps_in[field] = Irreps(f'{embedding_dim}x0e')
             else:
-                self.n_types: int = values['actual_num_types']
+                if embedding_mode == 'embedding' and 'embedding_dimensionality' not in values:
+                    logging.warning(f"Field {field} is missing 'embedding_dimensionality'. Not using as invariant input")
+                    continue
+                n_types = values.get('actual_num_types', values.get('num_types'))
+                if n_types is None or int(n_types) <= 0:
+                    logging.warning(f"Field {field} is missing a valid 'num_types'. Skipping categorical input.")
+                    continue
+                n_types = int(n_types)
+                self._categorical_num_types[field] = n_types
                 if embedding_mode == 'one_hot':
                     # Use one-hot encoding
-                    emb_module = OneHotEncoding(self.n_types)
+                    emb_module = OneHotEncoding(n_types)
                     self._categorical_attrs_modules[field] = emb_module
-                    output_embedding_dim_incr = self.n_types
+                    output_embedding_dim_incr = n_types
                 else:
                     # Use Embedding
                     assert embedding_mode == 'embedding'
-                    emb_module = torch.nn.Embedding(self.n_types, embedding_dim)
+                    embedding_dim = int(values['embedding_dimensionality'])
+                    if embedding_dim <= 0:
+                        logging.warning(f"Field {field} has non-positive embedding_dimensionality. Skipping categorical embedding.")
+                        continue
+                    emb_module = torch.nn.Embedding(n_types, embedding_dim)
                     torch.nn.init.xavier_uniform_(emb_module.weight)
                     output_embedding_dim_incr = embedding_dim
                 output_embedding_dim += output_embedding_dim_incr
                 self._categorical_attrs_modules[field] = emb_module
                 my_irreps_in[field] = None # Categorical are integers
         
-        eq_output_embedding_dim = 0
         eq_irreps = None
         if eq_attributes is None: eq_attributes = {}
         for field, values in eq_attributes.items():
-            if 'embedding_dimensionality' not in values: # if attr is not used as embedding
-                logging.warning(f"Field {field} is missing 'embedding_dimensionality'. Not using as equivariant input")
-                continue
-            embedding_dim = values['embedding_dimensionality']
+            if values.get('attribute_type', 'numerical') != 'numerical':
+                raise ValueError(f"Equivariant attribute '{field}' must be numerical.")
+            if 'irreps' not in values:
+                raise ValueError(f"Equivariant attribute '{field}' is missing required 'irreps'.")
             field_irreps  = Irreps(values['irreps'])
-            eq_output_embedding_dim += embedding_dim
+            if 'embedding_dimensionality' in values:
+                embedding_dim = int(values['embedding_dimensionality'])
+                if embedding_dim != field_irreps.dim:
+                    raise ValueError(
+                        f"Equivariant attribute '{field}' embedding_dimensionality={embedding_dim} "
+                        f"does not match irreps dim={field_irreps.dim}."
+                    )
             if eq_irreps is None:
                 eq_irreps = field_irreps
             else:
@@ -163,8 +204,11 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         out = []
         for attribute_name, emb_layer in self._categorical_attrs_modules.items():
             x = data[attribute_name].squeeze(-1)
-            if self.use_masking and attribute_name in self.fields_to_mask and self.n_types > 0:
-                x = apply_masking(x, mask_token_index=self.n_types - 1) # last index is reserved for masking, make sure to match this in yaml
+            if self.use_masking and attribute_name in self.fields_to_mask:
+                num_types = self._categorical_num_types.get(attribute_name, 0)
+                if num_types > 0:
+                    # last index is reserved for masking, ensure can_be_undefined=True in yaml
+                    x = apply_masking(x, mask_token_index=num_types - 1)
             x_emb = emb_layer(x)
             out.append(x_emb)
         
@@ -183,9 +227,13 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
             for eq_attribute_name in self._eq_numerical_attrs:
                 x = data[eq_attribute_name]
                 eq_out.append(x)
-            data[self.eq_out_field] = torch.cat(eq_out, dim=-1).to()
+            data[self.eq_out_field] = torch.cat(eq_out, dim=-1).to(dtype)
         
         return data
+
+
+def _uses_binning(values: Dict) -> bool:
+    return any(key in values for key in ("min_value", "max_value", "bin_edges", "bins"))
 
 
 @compile_mode("script")
