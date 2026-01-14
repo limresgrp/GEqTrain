@@ -15,12 +15,21 @@ def save_txt_file(filename, arrays):
 
 def parse_txt_file(filename):
     arrays = []
+    has_multi_col = False
     with open(filename, "r") as f:
         for line in f:
             if line.strip():  # skip empty lines
                 arr = np.fromstring(line, sep=" ").astype(int).tolist()
+                if len(arr) > 1:
+                    has_multi_col = True
                 arrays.append(arr)
-    return arrays
+    if not arrays:
+        return arrays
+    if has_multi_col:
+        return arrays
+    # If every non-empty line has a single index, treat the file as one list.
+    flat = [value for row in arrays for value in row]
+    return [flat]
 
 class DatasetBuilder:
     """Handles instantiation, splitting, and indexing of datasets."""
