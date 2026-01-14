@@ -4,6 +4,7 @@ import inspect
 from typing import Dict, List, Union
 
 import torch
+import torch.distributed as dist
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.train.loss import Loss
@@ -115,11 +116,16 @@ class Metrics(Loss):
         for metric in self.metrics.values():
             metric.reset()
 
-    def current_result(self) -> Dict[str, torch.Tensor]:
+    def current_result(self, dist_manager=None) -> Dict[str, torch.Tensor]:
+        if dist_manager is not None and dist_manager.is_distributed:
+            self._sync_running_stats(dist_manager)
+
         final_metrics = {}
         for key, metric_handler in self.metrics.items():
             result = metric_handler.get_final_result()
             if result is not None:
+                if dist_manager is not None and dist_manager.is_distributed and isinstance(metric_handler.accumulator, StatefulMetric):
+                    result = dist_manager.sync_tensor(result)
                 final_metrics[key] = result
         return final_metrics
 
@@ -159,3 +165,45 @@ class Metrics(Loss):
                 flat_dict[metric_key] = value.item()
                 
         return flat_dict
+
+    def _sync_running_stats(self, dist_manager):
+        device = dist_manager.device
+        for metric_handler in self.metrics.values():
+            accumulator = metric_handler.accumulator
+            if not isinstance(accumulator, RunningStats):
+                continue
+
+            local_bins = torch.tensor([accumulator.n_bins], device=device, dtype=torch.long)
+            dist.all_reduce(local_bins, op=dist.ReduceOp.MAX)
+            max_bins = int(local_bins.item())
+
+            if accumulator.n_bins < max_bins:
+                pad = max_bins - accumulator.n_bins
+                accumulator._state = torch.cat(
+                    (
+                        accumulator._state,
+                        accumulator._state.new_zeros((pad,) + accumulator._state.shape[1:]),
+                    ),
+                    dim=0,
+                )
+                accumulator._n = torch.cat(
+                    (
+                        accumulator._n,
+                        accumulator._n.new_zeros((pad,) + accumulator._n.shape[1:]),
+                    ),
+                    dim=0,
+                )
+                accumulator._n_bins = max_bins
+
+            counts = accumulator._n.to(dtype=accumulator._state.dtype)
+            sums = accumulator._state * counts
+
+            dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+
+            accumulator._state = torch.where(
+                counts > 0,
+                sums / counts,
+                accumulator._state.new_zeros(accumulator._state.shape),
+            )
+            accumulator._n = counts.round().to(dtype=accumulator._n.dtype)
