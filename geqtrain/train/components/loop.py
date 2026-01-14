@@ -69,9 +69,25 @@ class TrainingLoop:
             self._run_batch(batch, is_train=is_train, summary=summary)
             self.trainer._dispatch_callbacks('on_batch_end')
 
+        if is_train and self.trainer.accumulation_counter > 0:
+            accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
+            if self.trainer.accumulation_counter != accumulation_steps:
+                scale = accumulation_steps / self.trainer.accumulation_counter
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad.mul_(scale)
+
+            self.trainer._dispatch_callbacks('on_before_step', summary=summary)
+            self.optim.step()
+            if self.ema:
+                self.ema.update()
+            self._lr_sched_step(summary=summary, batch_lvl=True)
+            self.optim.zero_grad(set_to_none=True)
+            self.trainer.accumulation_counter = 0
+
         # Get final results and record them in the summary object
         loss_results    = self.loss_fn.current_result()
-        metrics_results = self.metrics.current_result()
+        metrics_results = self.metrics.current_result(dist_manager=self.dist)
         summary.set_phase_results(phase, loss_results, metrics_results)
 
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
