@@ -29,7 +29,7 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
         self,
         irreps_edge_sh: Union[int, str, o3.Irreps],
         edge_sh_normalize: bool = True,
-        edge_sh_normalization: str = "component",
+        edge_sh_normalization: str = "norm",
         out_field: str = AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
         irreps_in = None,
     ):

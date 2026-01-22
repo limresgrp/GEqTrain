@@ -2,10 +2,8 @@ import logging
 from typing import Optional
 from geqtrain.model._embedding import buildEmbeddingLayers
 from geqtrain.utils import Config
-from geqtrain.nn import (
-    SequentialGraphNetwork,
-    GotenInteractionModule,
-)
+from geqtrain.nn._graph_mixin import SequentialGraphNetwork
+from geqtrain.nn.goten import GotenInteractionModule
 
 
 
