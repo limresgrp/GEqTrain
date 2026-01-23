@@ -196,9 +196,16 @@ class Trainer:
                 VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
             }
             config_path = self.output.generate_file("config.yaml")
-            # Note: Must use the initial config's filepath to copy the *source* config.
-            shutil.copyfile(Path(self.config.filepath).resolve(), config_path) 
-            logging.info(f"Copied config file to {config_path}")
+            if self.config.get("_hydra_config", False):
+                self.config.save(config_path)
+                source_path = self.output.generate_file("config.source.yaml")
+                shutil.copyfile(Path(self.config.filepath).resolve(), source_path)
+                logging.info(f"Saved resolved config to {config_path}")
+                logging.info(f"Copied source config file to {source_path}")
+            else:
+                # Note: Must use the initial config's filepath to copy the *source* config.
+                shutil.copyfile(Path(self.config.filepath).resolve(), config_path)
+                logging.info(f"Copied config file to {config_path}")
         else:
             self.output = None; self.logfile = "dummy"
 

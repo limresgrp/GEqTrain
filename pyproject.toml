@@ -17,6 +17,7 @@ dependencies = [
     "ase",
     "e3nn>=0.5",
     "einops",
+    "hydra-core>=1.3",
     "numpy",
     "pytorch-warmup",
     "pyyaml",

@@ -11,7 +11,7 @@ import numpy as np  # noqa: F401
 from os.path import isdir
 
 from geqtrain.model import model_from_config
-from geqtrain.utils import Config
+from geqtrain.utils import load_config
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.utils import load_file
 from tests.utils.equivariance import assert_AtomicData_equivariant
@@ -67,7 +67,7 @@ def parse_command_line(args=None):
         help='List of fields resembling Cartesian coordinates, necessitating equivariant responses to translations and rotations.')
     args = parser.parse_args(args=args)
 
-    config = Config.from_file(args.config, defaults=default_config)
+    config = load_config(args.config, defaults=default_config)
     config["cartesian_fields"] = args.cartesian_fields
     config["grad_anomaly_mode"] = True
 

@@ -3,7 +3,7 @@ import logging
 import argparse
 import os
 import torch.distributed as dist
-from geqtrain.utils import Config
+from geqtrain.utils import load_config
 from geqtrain.scripts._logger import set_up_script_logger
 from geqtrain.train.trainer import Trainer
 
@@ -16,9 +16,16 @@ def parse_command_line(args=None):
     parser.add_argument("-ma", "--master-addr", help="MASTER_ADDR for DDP. Defaults to 'localhost'.")
     parser.add_argument("-mp", "--master-port", help="MASTER_PORT for DDP. Defaults to a random free port.")
     parser.add_argument("-u", "--find-unused-parameters", action="store_true", help="Enable DDP's find_unused_parameters flag. Useful for models with conditional logic.")
+    parser.add_argument(
+        "-o",
+        "--override",
+        action="append",
+        default=[],
+        help="Hydra override string (e.g. 'model.num_layers=3'). Can be provided multiple times.",
+    )
 
     args = parser.parse_args(args=args)
-    config = Config.from_file(args.config)
+    config = load_config(args.config, overrides=args.override)
 
     # Update config with command-line arguments
     config['ddp'] = args.ddp

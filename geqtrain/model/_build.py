@@ -5,6 +5,7 @@ from torch.nn import Module
 from geqtrain.data.dataset import AtomicDataset
 from geqtrain.utils import load_callable, Config, add_tags_to_parameter
 from typing import Tuple, Dict
+from geqtrain.model._hydra_build import model_from_hydra_config
 
 def add_suffix(_str: str, i: int) -> str:
     return _str.__add__(f".__{i}__")
@@ -179,6 +180,14 @@ def model_from_config(
     Returns:
         built Model
     """
+    model_cfg = config.get("model", None)
+    if isinstance(model_cfg, dict) and model_cfg.get("stack"):
+        return model_from_hydra_config(
+            config=config,
+            initialize=initialize,
+            dataset=dataset,
+            deploy=deploy,
+        )
 
     # parse builders and extract their params
     model_builders = parse_model_builders(config)
