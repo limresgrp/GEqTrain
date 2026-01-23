@@ -355,11 +355,13 @@ class WandbCallback(Callback):
         if self.trainer.config.get("wandb_watch", False):
             wandb.watch(self.trainer.model, **self.trainer.config.get("wandb_watch_kwargs", {}))
 
-    def on_epoch_end(self, summary: EpochSummary):
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
         """Log the epoch's metrics to WandB from the master rank only."""
+        if not run_validation:
+            return
         if self.trainer.dist.is_master and wandb.run is not None:
             wandb.log(summary.to_flat_dict())
-            
+
             # Log each individual norm value for more detailed plots
             for norm in summary.grad_norms:
                 wandb.log({"train_gradient_norm_step": norm})
