@@ -377,29 +377,35 @@ class BinaryAUROCMetric(StatefulMetric):
     """
     def __init__(self, **params):
         super().__init__()
+        self.ensemble_mode = params.pop("ensemble_mode", "auto")
+        if self.ensemble_mode not in ("auto", "always", "never"):
+            raise ValueError("ensemble_mode must be one of: auto, always, never")
+        self.ensemble_reduce = params.pop("ensemble_reduce", "mean")
+        if self.ensemble_reduce not in ("mean", "sum"):
+            raise ValueError("ensemble_reduce must be one of: mean, sum")
         try:
             from torcheval.metrics import BinaryAUROC
         except ImportError:
             raise ImportError("Please `pip install torcheval` to use BinaryAUROCMetric.")
         self.metric = BinaryAUROC(**params)
         self.device = 'cpu'
+        self._warned_about_target = False
+        self._warned_about_ensemble = False
 
     def update(self, pred: dict, ref: dict, key: str):
         logits = pred[key].detach().squeeze()
         target = ref[key].detach().squeeze()
+        ensemble_indices = None
 
         if AtomicDataDict.ENSEMBLE_INDEX_KEY in pred:
             assert AtomicDataDict.ENSEMBLE_INDEX_KEY in ref
-            logits, target = ensemble_predictions_and_targets(logits, target, pred[AtomicDataDict.ENSEMBLE_INDEX_KEY])
-            n_ens = pred[AtomicDataDict.ENSEMBLE_INDEX_KEY].shape[0]/torch.unique(pred[AtomicDataDict.ENSEMBLE_INDEX_KEY]).shape[0]
-            target /= n_ens
-            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred[AtomicDataDict.ENSEMBLE_INDEX_KEY])+1)
-            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
-            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+            ensemble_indices = pred[AtomicDataDict.ENSEMBLE_INDEX_KEY].detach().squeeze()
 
         if target.dim() == 0: # if batch_size = 1
             target = target.unsqueeze(0)
             logits = logits.unsqueeze(0)
+            if ensemble_indices is not None and ensemble_indices.dim() == 0:
+                ensemble_indices = ensemble_indices.unsqueeze(0)
 
         # Create a mask to filter out rows with NaNs in either logits or target
         valid_mask = torch.isfinite(logits) & torch.isfinite(target)
@@ -407,6 +413,58 @@ class BinaryAUROCMetric(StatefulMetric):
         if not torch.all(valid_mask):
             logits = logits[valid_mask]
             target = target[valid_mask]
+            if ensemble_indices is not None and valid_mask.dim() == 1:
+                ensemble_indices = ensemble_indices[valid_mask]
+
+        if logits.numel() == 0 or target.numel() == 0:
+            return
+
+        if ensemble_indices is not None and self.ensemble_mode != "never":
+            ensemble_indices = ensemble_indices.to(dtype=torch.long, device=logits.device)
+            num_unique = torch.unique(ensemble_indices).numel()
+            has_duplicates = num_unique < ensemble_indices.numel()
+            should_ensemble = (
+                self.ensemble_mode == "always"
+                or (self.ensemble_mode == "auto" and has_duplicates and num_unique > 1)
+            )
+            if should_ensemble:
+                if logits.dim() > 1:
+                    if logits.shape[0] == ensemble_indices.shape[0]:
+                        sample_dim = 0
+                    elif logits.shape[-1] == ensemble_indices.shape[0]:
+                        sample_dim = logits.dim() - 1
+                    else:
+                        raise ValueError(
+                            "Ensemble indices shape does not align with logits; "
+                            f"logits shape={logits.shape}, ensemble_indices shape={ensemble_indices.shape}."
+                        )
+                else:
+                    sample_dim = 0
+                reduce_fn = scatter_mean if self.ensemble_reduce == "mean" else scatter_sum
+                logits = reduce_fn(logits, ensemble_indices, dim=sample_dim)
+                target = reduce_fn(target, ensemble_indices, dim=sample_dim)
+            elif self.ensemble_mode == "auto" and num_unique == 1 and not self._warned_about_ensemble:
+                logging.warning(
+                    "BinaryAUROCMetric: ensemble_index has a single unique value; "
+                    "skipping ensemble aggregation. Set ensemble_mode='always' to force it."
+                )
+                self._warned_about_ensemble = True
+
+        target = target.float()
+        is_binary = torch.all((target == 0) | (target == 1)).item()
+        if not is_binary:
+            threshold = 0.0 if target.min().item() < 0.0 else 0.5
+            target = (target > threshold).int()
+            if not self._warned_about_target:
+                logging.warning(
+                    "BinaryAUROCMetric expects targets in {0,1}. "
+                    "Auto-binarizing using threshold %.3f for key '%s'.",
+                    threshold,
+                    key,
+                )
+                self._warned_about_target = True
+        else:
+            target = target.int()
 
         # Ensure metric is on the correct device
         if self.device != logits.device:
@@ -415,7 +473,7 @@ class BinaryAUROCMetric(StatefulMetric):
 
         # Update with cleaned data, ensuring target is int
         if logits.numel() > 0 and target.numel() > 0:  # Only update if there is valid data
-            self.metric.update(logits, target.int())
+            self.metric.update(logits, target)
 
     def compute(self):
         return self.metric.compute().clone()

@@ -70,10 +70,10 @@ def test_embedding_input_attrs_node_mixed_equivariant():
     }
 
     module = EmbeddingInputAttrs(
-        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
-        eq_out_field=AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
         attributes=attributes,
         eq_attributes=eq_attributes,
+        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
         irreps_in=_make_irreps_in(
             {
                 "cat_embed": None,
@@ -122,8 +122,8 @@ def test_embedding_input_attrs_binned_numerical_one_hot():
     node_fields, _ = parse_attrs(attrs, fields, {})
 
     module = EmbeddingInputAttrs(
-        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
         attributes=attrs,
+        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
         irreps_in=_make_irreps_in({"binned": None}),
     )
     data = {
@@ -170,10 +170,10 @@ def test_embedding_input_attrs_edge_mix_equivariant():
     edge_fields, _ = parse_attrs(attributes, {"edge_binned": raw_vals}, {})
 
     module = EmbeddingInputAttrs(
-        out_field=AtomicDataDict.EDGE_INPUT_ATTRS_KEY,
-        eq_out_field=AtomicDataDict.EDGE_EQ_INPUT_ATTRS_KEY,
         attributes=attributes,
         eq_attributes=eq_attributes,
+        out_field=AtomicDataDict.EDGE_INPUT_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.EDGE_EQ_INPUT_ATTRS_KEY,
         irreps_in=_make_irreps_in(
             {
                 "edge_cat": None,
@@ -220,10 +220,10 @@ def test_embedding_input_attrs_graph_attrs_equivariant():
     }
 
     module = EmbeddingInputAttrs(
-        out_field=AtomicDataDict.GRAPH_ATTRS_KEY,
-        eq_out_field=AtomicDataDict.GRAPH_EQ_ATTRS_KEY,
         attributes=attributes,
         eq_attributes=eq_attributes,
+        out_field=AtomicDataDict.GRAPH_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.GRAPH_EQ_ATTRS_KEY,
         irreps_in=_make_irreps_in(
             {
                 "graph_cat": None,

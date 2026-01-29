@@ -91,10 +91,10 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
 
     def __init__(
         self,
+        attributes:     Optional[Dict[str, Dict]] = None,
+        eq_attributes:  Optional[Dict[str, Dict]] = None,
         out_field:      Optional[str]             = None,
         eq_out_field:   Optional[str]             = None,
-        attributes:     Optional[Dict[str, Dict]] = None, # key to parse from yaml
-        eq_attributes:  Optional[Dict[str, Dict]] = None,
         use_masking:    bool                      = True,
         fields_to_mask: Optional[List[str]]       = None,
         irreps_in                                 = None,
