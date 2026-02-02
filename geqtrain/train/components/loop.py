@@ -205,3 +205,5 @@ class TrainingLoop:
             metric = summary.get_target_metric(self.trainer.metrics_key)
             if metric is not None:
                 self.lr_sched.step(metrics=metric)
+        elif scheduler_name == "ExponentialLR":
+            self.lr_sched.step()
