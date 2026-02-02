@@ -112,7 +112,9 @@ class LossWrapper:
                 )
         else:
             if ref_key.shape != pred_key.shape:
-                ref_key = ref_key.reshape(pred_key.shape)
+                try:
+                    ref_key = ref_key.reshape(pred_key.shape)
+                except: pass
         return ref_key
 
     def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
