@@ -10,6 +10,28 @@ from .radial_basis import BesselBasis
 from .cutoffs import PolynomialCutoff
 
 
+def get_irreps_edge_sh(
+    l_max: Optional[int] = None,
+    parity: Optional[str] = None,
+    irreps_edge_sh: Optional[str] = None
+):
+    if l_max is not None or parity is not None:
+        assert l_max  is not None
+        assert parity is not None
+        assert l_max >= 0
+        assert parity in ("o3_full", "so3")
+        irreps_edge_sh_computed = repr(
+            o3.Irreps.spherical_harmonics(
+            l_max, p=(1 if parity == "so3" else -1)
+            )
+        )
+        if irreps_edge_sh is not None:
+            assert irreps_edge_sh_computed == irreps_edge_sh
+        return irreps_edge_sh_computed
+    assert irreps_edge_sh is not None
+    return irreps_edge_sh
+
+
 @compile_mode("script")
 class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
     """Construct edge attrs as spherical harmonic projections of edge vectors.
@@ -27,7 +49,9 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
 
     def __init__(
         self,
-        irreps_edge_sh: Union[int, str, o3.Irreps],
+        irreps_edge_sh: Optional[Union[int, str, o3.Irreps]],
+        l_max: Optional[int] = None,
+        parity: Optional[str] = None,
         edge_sh_normalize: bool = True,
         edge_sh_normalization: str = "norm",
         out_field: str = AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
@@ -36,6 +60,11 @@ class SphericalHarmonicEdgeAngularAttrs(GraphModuleMixin, torch.nn.Module):
         super().__init__()
         self.out_field = out_field
 
+        irreps_edge_sh = get_irreps_edge_sh(
+            l_max=l_max,
+            parity=parity,
+            irreps_edge_sh=irreps_edge_sh
+        )
         if isinstance(irreps_edge_sh, int):
             self.irreps_edge_sh = o3.Irreps.spherical_harmonics(irreps_edge_sh)
         else:
