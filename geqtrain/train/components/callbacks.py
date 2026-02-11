@@ -259,7 +259,9 @@ class ValidationBatchPredictionLogger(Callback):
         if loss_func is not None and hasattr(loss_func, "_handle_supervision_shapes"):
             ref_key = loss_func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
         elif ref_key.shape != pred_key.shape:
-            ref_key = ref_key.reshape(pred_key.shape)
+            try:
+                ref_key = ref_key.reshape(pred_key.shape)
+            except: pass # This could happen when e.g. predicting logits for CrossEntropy
 
         if loss_func is not None and hasattr(loss_func, "_apply_node_filter"):
             pred_key, ref_key = loss_func._apply_node_filter(pred_key, ref_key, ref_copy, key)

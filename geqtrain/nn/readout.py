@@ -33,10 +33,10 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         invariant_field: Optional[str] = None,
         equivariant_field: Optional[str] = None,
         # Output fields
-        out_field: Optional[str] = None, # The key where the output will be stored
-        invariant_out_field: Optional[str] = None,
-        scalar_out_field: Optional[str] = None, # New: secondary field for scalar output
-        equivariant_out_field: Optional[str] = None,
+        out_field: Optional[str] = None, # The key where the output will be stored (can be invariant+equivariant)
+        scalar_out_field: Optional[str] = None, # secondary field for scalar output only
+        invariant_out_field: Optional[str] = None, # Alternatively, specify invariant field directly
+        equivariant_out_field: Optional[str] = None, # And equivariant field directly as well
         # Other params
         conditioning_fields: Optional[List[str]] = None, # List of keys to use for conditioning
         out_irreps: Union[o3.Irreps, str, None] = None,

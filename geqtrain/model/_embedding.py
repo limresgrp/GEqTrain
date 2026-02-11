@@ -12,9 +12,6 @@ from geqtrain.nn import (
 def buildEmbeddingLayers(config: Config, model = None):
     logging.info("--- Building Embeddings ---")
 
-    from geqtrain.model.init_utils import update_config
-    update_config(config)
-
     layers = {}
     if model is not None:
         layers.update({
