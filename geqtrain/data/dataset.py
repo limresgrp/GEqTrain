@@ -712,7 +712,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 raise ValueError(f"Invalid standardization mode '{mode}' for field '{field}'. Must be 'per_type' or 'global'.")
 
             if mode == 'per_type':
-                if AtomicDataDict.NODE_TYPE_KEY not in data:
+                if len(data_list) == 0 or AtomicDataDict.NODE_TYPE_KEY not in data_list[0]:
                     raise ValueError("`standardize_per_type` is True, but node types are not available in the data.")
                 num_types = self.node_attributes.get(AtomicDataDict.NODE_TYPE_KEY, {}).get('num_types')
                 if num_types is None:
@@ -724,8 +724,16 @@ class AtomicInMemoryDataset(AtomicDataset):
                 
                 mean_tensor = mean_vals.to(dtype=data[field].dtype)
                 std_tensor = std_vals.to(dtype=data[field].dtype)
+                node_types = torch.cat(
+                    [d[AtomicDataDict.NODE_TYPE_KEY] for d in data_list], dim=0
+                ).squeeze().to(dtype=torch.long, device=data[field].device)
 
-                node_types = data[AtomicDataDict.NODE_TYPE_KEY].squeeze()
+                if node_types.shape[0] != data[field].shape[0]:
+                    raise ValueError(
+                        f"Per-type standardization for field '{field}' requires a node-level field "
+                        f"with first dimension matching the number of nodes, but got "
+                        f"{data[field].shape[0]} values and {node_types.shape[0]} node types."
+                    )
 
                 if irreps:
                     means_expanded = mean_tensor[node_types]
