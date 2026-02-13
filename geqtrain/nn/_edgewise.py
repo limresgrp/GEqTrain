@@ -25,7 +25,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
         readout_latent=ScalarMLPFunction,
         readout_latent_kwargs={},
         attention_head_dim: int = 32,
-        avg_num_neighbors: Optional[float] = 5.0,
+        avg_num_neighbors: Optional[float] = 10.0,
         avg_num_neighbors_is_learnable: bool = False,
         irreps_in={},
     ):

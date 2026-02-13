@@ -356,7 +356,7 @@ class EmbeddingAttrs(GraphModuleMixin, torch.nn.Module):
         # node equivariant
         node_eq_attr: Optional[torch.Tensor] = None
         if self.node_eq_emb is not None:
-            node_eq_attr = self.node_emb(data)
+            node_eq_attr = self.node_eq_emb(data)
             if node_eq_attr is not None:
                 data[self.node_eq_out_field] = node_eq_attr
         
