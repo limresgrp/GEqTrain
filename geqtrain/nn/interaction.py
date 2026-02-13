@@ -391,7 +391,7 @@ class InteractionLayer(torch.nn.Module):
         
         edge_mlp_kwargs = {
             "conditioning_dim": config.edge_conditioning_dim,
-            'latent_kwargs': {'mlp_latent_dimensions': [128, 128]}
+            'latent_kwargs': config.latent_module_kwargs
         }
 
         # === Environment embedding modules ===
