@@ -119,6 +119,21 @@ TEST_CONFIGS = [
         "expected_out_irreps": "16x0e+4x1o+4x2e",
     },
     {
+        "name": "with_attention_stability_knobs",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_attention": True,
+            "attention_head_dim": 4,
+            "attention_logit_clip": 8.0,
+            "residual_update_max": 0.25,
+            "use_equivariant_residual": True,
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+    },
+    {
         "name": "with_mace_product",
         "params": {
             "num_layers": 2,

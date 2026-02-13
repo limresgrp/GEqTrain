@@ -110,6 +110,9 @@ class InteractionLayerConfig:
     edge_conditioning_dim: int
     is_last_layer: bool
     irreps_in: dict
+    attention_logit_clip: float
+    residual_update_max: float
+    use_equivariant_residual: bool
 
 
 @compile_mode("script")
@@ -135,8 +138,11 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         eq_latent_multiplicity: int = 16,
         use_attention: bool = False,
         attention_head_dim: int = 32,
+        attention_logit_clip: float = 0.0,
         use_mace_product: bool = False,
         product_correlation: int = 2,
+        residual_update_max: float = 1.0,
+        use_equivariant_residual: bool = True,
         conditioning_fields: Optional[List[str]] = None,
         irreps_in = None,
     ):
@@ -151,6 +157,13 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.out_field              = out_field
         
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
+        if residual_update_max <= 0.0:
+            raise ValueError("`residual_update_max` must be > 0.")
+        if attention_logit_clip < 0.0:
+            raise ValueError("`attention_logit_clip` must be >= 0.")
+        self.residual_update_max = float(residual_update_max)
+        self.attention_logit_clip = float(attention_logit_clip)
+        self.use_equivariant_residual = bool(use_equivariant_residual)
         
         # --- Irreps Initialization and Validation ---
         required_irreps = [
@@ -258,6 +271,9 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 is_last_layer = is_last_layer,
                 edge_conditioning_dim = self.edge_conditioning_dim,
                 combined_edge_inv_dim = initial_scalar_latent_dim,
+                attention_logit_clip = self.attention_logit_clip,
+                residual_update_max = self.residual_update_max,
+                use_equivariant_residual = self.use_equivariant_residual,
             )
 
             self.interaction_layers.append(InteractionLayer(layer_config))
@@ -306,7 +322,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
         active_edges = torch.arange(data[self.edge_radial_emb_field].shape[0], device=data[AtomicDataDict.EDGE_INDEX_KEY].device)
-        layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
+        layer_update_coefficients = self._latent_resnet_update_params.sigmoid() * self.residual_update_max
 
         # === 1. Prepare Initial Scalar and Equivariant Latents ===
         edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
@@ -377,7 +393,7 @@ class InteractionLayer(torch.nn.Module):
     - `__init__` is streamlined and groups related module constructions.
     - Forward pass is clarified and returns the correct signature.
     """
-    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product"]
+    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product", "attention_logit_clip", "use_equivariant_residual"]
     def __init__(
         self, config: InteractionLayerConfig
     ):
@@ -385,6 +401,8 @@ class InteractionLayer(torch.nn.Module):
         self.node_invariant_field = config.node_invariant_field
         self.use_attention = config.use_attention
         self.use_mace_product = config.use_mace_product
+        self.attention_logit_clip = float(config.attention_logit_clip)
+        self.use_equivariant_residual = bool(config.use_equivariant_residual)
 
         # === Define dimensions and irreps ===
         node_inv_dim = config.irreps_in[config.node_invariant_field].dim
@@ -489,6 +507,8 @@ class InteractionLayer(torch.nn.Module):
             Q = self.rearrange_qk(self.node_attr_to_query(node_invariants[edge_center]))
             K = self.rearrange_qk(self.latent_to_key(scalar_latent))
             W = torch.einsum('emd,emd -> em', Q, K) * self.inv_sqrtd
+            if self.attention_logit_clip > 0.0:
+                W = torch.clamp(W, min=-self.attention_logit_clip, max=self.attention_logit_clip)
             attn_softmax = scatter_softmax(W, edge_center, dim=0)
             env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
         
@@ -513,8 +533,18 @@ class InteractionLayer(torch.nn.Module):
         else:
             raise RuntimeError("Projection must return scalar and equivariant tensors.")
         scalar_latent = apply_residual_stream(scalar_latent, new_scalar_latent, this_layer_update_coeff, active_edges)
+        if (
+            self.use_equivariant_residual
+            and new_equiv_latent is not None
+            and new_equiv_latent.shape == equiv_latent_tensor.shape
+        ):
+            equiv_latent_out = apply_residual_stream(
+                equiv_latent_tensor, new_equiv_latent, this_layer_update_coeff, active_edges
+            )
+        else:
+            equiv_latent_out = new_equiv_latent
 
-        return scalar_latent, new_equiv_latent
+        return scalar_latent, equiv_latent_out
 
 
 def _scalar_slices_from_irreps(irreps: o3.Irreps) -> List[Tuple[int, int]]:

@@ -201,7 +201,8 @@ class SO3_Linear(torch.nn.Module):
 
         if self.internal_weights:
             # One path per instruction
-            for ins in self.instructions:
+            for i, path in enumerate(self.paths):
+                ins = self.instructions[i]
                 # Slice input
                 if x_is_flat:
                     xin = x[:, ins.in_start:ins.in_stop].reshape(B, ins.mul_in, ins.dim)  # (B, mul_in, dim)
@@ -212,7 +213,6 @@ class SO3_Linear(torch.nn.Module):
                     xin = x[:, :, start_per:stop_per]  # (B, mul_in, dim)
 
                 # Apply multiplicity mixing
-                path = self.paths[ins.path_idx]
                 y = path(xin.transpose(1, 2)).transpose(1, 2)  # (B, mul_out, dim)
                 out[:, ins.out_start:ins.out_stop] += y.reshape(B, -1)
 
@@ -288,7 +288,7 @@ class SO3_LayerNorm(torch.nn.Module):
     Bias:
       - If bias=True, a learnable bias is added only to scalar (l=0) channels, per multiplicity and per scalar block.
     """
-    __constants__ = ["mul", "feat_per_mul", "normalization", "n_unique_l"]
+    __constants__ = ["mul", "feat_per_mul", "normalization", "n_unique_l", "irreps_dim"]
 
     groups: List[_NormGroup]
     scalar_bias_instructions: List[_BiasInstruction]
@@ -302,6 +302,7 @@ class SO3_LayerNorm(torch.nn.Module):
     ):
         super().__init__()
         self.irreps = o3.Irreps(irreps)
+        self.irreps_dim = int(self.irreps.dim)
         ok, mul = _has_common_mul(self.irreps)
         if not ok:
             raise ValueError(
@@ -322,8 +323,8 @@ class SO3_LayerNorm(torch.nn.Module):
             self.n_unique_l = 0
             return
 
-        self.feat_per_mul = int(self.irreps.dim // self.mul)
-        if self.irreps.dim % self.mul != 0:
+        self.feat_per_mul = int(self.irreps_dim // self.mul)
+        if self.irreps_dim % self.mul != 0:
             raise ValueError("Irreps dim is not divisible by multiplicity; cannot use channel format.")
 
         # Build contiguous groups in the *given irreps order*.
@@ -422,8 +423,8 @@ class SO3_LayerNorm(torch.nn.Module):
         x_is_flat = (x.ndim == 2)
         if x_is_flat:
             B, D = x.shape
-            if int(D) != int(self.irreps.dim):
-                raise ValueError(f"SO3_LayerNorm: expected last dim {self.irreps.dim}, got {D}.")
+            if int(D) != self.irreps_dim:
+                raise ValueError(f"SO3_LayerNorm: expected last dim {self.irreps_dim}, got {D}.")
             x_ch = x.reshape(B, self.mul, self.feat_per_mul)
         else:
             if x.ndim != 3:
@@ -467,7 +468,7 @@ class SO3_LayerNorm(torch.nn.Module):
                 out[:, :, bi.out_start:bi.out_stop] += self.bias[:, bi.bias_start:bi.bias_stop].unsqueeze(0)
 
         if x_is_flat:
-            return out.reshape(B, int(self.irreps.dim))
+            return out.reshape(B, self.irreps_dim)
         return out
 
     def __repr__(self) -> str:
