@@ -35,10 +35,17 @@ def setup_loss(config):
     return loss
 
 def setup_metrics(config):
+    destandardize_fields = config.get('destandardize_fields')
+    if destandardize_fields is None:
+        destandardize_fields = config.get('standardize_fields', {})
+
     metrics, _ = instantiate(
         builder=Metrics,
         prefix="metrics",
-        positional_args=dict(components=config.get('metrics_components'), destandardize_fields=config.get('destandardize_fields', {})),
+        positional_args=dict(
+            components=config.get('metrics_components'),
+            destandardize_fields=destandardize_fields,
+        ),
         all_args=config,
     )
     return metrics

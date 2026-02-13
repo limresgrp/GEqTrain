@@ -193,7 +193,9 @@ class ValidationBatchPredictionLogger(Callback):
             self._log_files[clean_key] = log_path
             self._header_written[clean_key] = False
 
-        self._destandardize_fields = self.trainer.config.get('destandardize_fields', {})
+        self._destandardize_fields = self.trainer.config.get('destandardize_fields')
+        if self._destandardize_fields is None:
+            self._destandardize_fields = self.trainer.config.get('standardize_fields', {})
 
     def on_validation_begin(self, **kwargs):
         if not self.trainer.dist.is_master:

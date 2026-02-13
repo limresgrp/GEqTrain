@@ -436,6 +436,9 @@ class AtomicDataset(Dataset):
             return params
 
         params = filter_attributes(self, pnames, IGNORE_KEYS)
+        if hasattr(self, "standardize_fields") and len(getattr(self, "standardize_fields", {})) > 0:
+            # Bump cache key when standardization math changes.
+            params["standardization_impl_version"] = 2
         # Add other relevant metadata:
         params["dtype"] = str(torch.float32)
         params["geqtrain_version"] = geqtrain.__version__
@@ -719,10 +722,21 @@ class AtomicInMemoryDataset(AtomicDataset):
                     raise ValueError("`num_types` for node types must be provided in `node_attributes` for per-type standardization.")
                 
                 mean_vals, std_vals = compute_per_type_statistics(data_list, field, num_types, irreps=irreps)
-                self.means[field] = mean_vals.tolist()
+                # For l > 0 irreps, only std scaling is invertible on vectors.
+                # Keep per-type means only for scalar (l=0) components.
+                mean_vals_to_store = mean_vals
+                if irreps:
+                    mean_vals_to_store = mean_vals.clone()
+                    i = 0
+                    for mul, ir in irreps:
+                        if ir.l > 0:
+                            mean_vals_to_store[:, i:i + 1] = 0.0
+                        i += 1
+
+                self.means[field] = mean_vals_to_store.tolist()
                 self.stds[field] = std_vals.tolist()
                 
-                mean_tensor = mean_vals.to(dtype=data[field].dtype)
+                mean_tensor = mean_vals_to_store.to(dtype=data[field].dtype)
                 std_tensor = std_vals.to(dtype=data[field].dtype)
                 node_types = torch.cat(
                     [d[AtomicDataDict.NODE_TYPE_KEY] for d in data_list], dim=0
@@ -743,12 +757,8 @@ class AtomicInMemoryDataset(AtomicDataset):
                         if ir.l == 0:
                             data[field][:, slice] -= means_expanded[:, i:i+1]
                             data[field][:, slice] /= stds_expanded[:, i:i+1]
-                        else: # l > 0, standardize norm
-                            norm = torch.linalg.norm(data[field][:, slice], dim=-1, keepdim=True)
-                            # Avoid division by zero
-                            norm = torch.where(norm > 1e-8, norm, torch.ones_like(norm))
-                            scale = (norm - means_expanded[:, i:i+1]) / (stds_expanded[:, i:i+1] * norm)
-                            data[field][:, slice] *= scale
+                        else: # l > 0, std-only scaling to preserve invertibility
+                            data[field][:, slice] /= stds_expanded[:, i:i+1]
                         i += 1
                 else:
                     data[field] -= mean_tensor[node_types].view(data[field].shape)
@@ -757,7 +767,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 # Store stats in fixed_fields
                 mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
                 std_key = f"{STD_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
-                fixed_fields[mean_key] = mean_vals
+                fixed_fields[mean_key] = mean_vals_to_store
                 fixed_fields[std_key] = std_vals
                 logging.info(f"Standardized field '{field}' per type.")
 

@@ -226,21 +226,9 @@ class LossWrapper:
                         if ir.l == 0:
                             pred_key[:, slice] = pred_key[:, slice] * std_bc + mean_bc
                             ref_key[:, slice] = ref_key[:, slice] * std_bc + mean_bc
-                        else: # l > 0, de-standardize norm
-                            # De-standardize pred
-                            norm_pred = torch.linalg.norm(pred_key[:, slice], dim=-1, keepdim=True)
-                            # The standardized norm is (norm - mean) / std.
-                            # To get the original norm back: norm = standardized_norm * std + mean
-                            # Here, the standardized value is the norm of the vector in pred_key.
-                            new_norm_pred = norm_pred * std_bc + mean_bc
-                            scale_pred = new_norm_pred / norm_pred.clamp(min=1e-8)
-                            pred_key[:, slice] = pred_key[:, slice] * scale_pred
-
-                            # De-standardize ref
-                            norm_ref = torch.linalg.norm(ref_key[:, slice], dim=-1, keepdim=True)
-                            new_norm_ref = norm_ref * std_bc + mean_bc
-                            scale_ref = new_norm_ref / norm_ref.clamp(min=1e-8)
-                            ref_key[:, slice] = ref_key[:, slice] * scale_ref
+                        else: # l > 0, inverse of std-only scaling
+                            pred_key[:, slice] = pred_key[:, slice] * std_bc
+                            ref_key[:, slice] = ref_key[:, slice] * std_bc
                         i += 1
                 else:
                     # Fallback for scalar fields without irreps info
