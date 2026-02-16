@@ -1,5 +1,6 @@
 import pytest
 import torch
+import torch.nn as nn
 from tests.utils.deployability import assert_module_deployable
 import copy
 from e3nn import o3
@@ -7,6 +8,7 @@ from e3nn import o3
 from geqtrain.data import AtomicData, AtomicDataDict
 from geqtrain.data.dataset import _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS, _FIXED_FIELDS
 from geqtrain.nn import InteractionModule
+from geqtrain.nn.interaction import _inverse_quadratic_alpha_cap
 from tests.utils.equivariance import assert_AtomicData_equivariant
 
 # Common parameters for tests
@@ -134,6 +136,58 @@ TEST_CONFIGS = [
         "expected_out_irreps": "16x0e+4x1o+4x2e",
     },
     {
+        "name": "with_fixed_point_recycling",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_fixed_point_recycling": True,
+            "fp_max_iter": 4,
+            "fp_tol": 1e-4,
+            "fp_alpha": 0.5,
+            "fp_grad_steps": 1,
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+    },
+    {
+        "name": "with_fixed_point_recycling_stabilized",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_fixed_point_recycling": True,
+            "fp_max_iter": 4,
+            "fp_tol": 1e-4,
+            "fp_alpha": 0.5,
+            "fp_grad_steps": 1,
+            "fp_adaptive_damping": True,
+            "fp_alpha_min": 0.1,
+            "fp_residual_growth_tol": 0.95,
+            "fp_first_layer_update_coeff": 0.2,
+            "fp_state_clip_value": 10.0,
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+    },
+    {
+        "name": "with_fixed_point_static_context",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_fixed_point_recycling": True,
+            "fp_max_iter": 4,
+            "fp_tol": 1e-4,
+            "fp_alpha": 0.5,
+            "fp_grad_steps": 1,
+            "fp_use_static_context": True,
+            "fp_static_context_strength": 0.5,
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+    },
+    {
         "name": "with_mace_product",
         "params": {
             "num_layers": 2,
@@ -231,3 +285,122 @@ def test_interaction_module_deployable(config, tmp_path):
     data_in, _ = _create_dummy_data(config, device)
 
     assert_module_deployable(model, (data_in,), tmp_path=tmp_path)
+
+
+def test_fixed_point_recycling_stops_before_max_iters_with_contractive_map(monkeypatch):
+    """The fixed-point solver should early-stop when the map is contractive."""
+    cfg = {
+        "num_layers": 2,
+        "latent_dim": 16,
+        "eq_latent_multiplicity": 4,
+        "use_fixed_point_recycling": True,
+        "fp_max_iter": 20,
+        "fp_tol": 1e-3,
+        "fp_alpha": 0.5,
+        "fp_grad_steps": 0,
+        "fp_enforce_inverse_quadratic": True,
+    }
+    model = InteractionModule(irreps_in=BASE_IRREPS_IN, **cfg).eval()
+
+    def fake_stack(
+        data,
+        scalar_latent,
+        equiv_latent,
+        active_edges,
+        node_conditioning,
+        edge_conditioning,
+        layer_update_coefficients,
+    ):
+        if equiv_latent is None:
+            return scalar_latent * 0.5, None
+        return scalar_latent * 0.5, equiv_latent * 0.5
+
+    monkeypatch.setattr(model, "_run_interaction_stack", fake_stack)
+
+    n_edges = 32
+    scalar_latent = torch.randn(n_edges, cfg["latent_dim"])
+    equiv_latent = torch.randn(n_edges, cfg["eq_latent_multiplicity"], 9)
+    active_edges = torch.arange(n_edges, dtype=torch.long)
+    layer_coeffs = torch.zeros(cfg["num_layers"] - 1)
+
+    _, _, iters_used, last_residual = model._fixed_point_refine(
+        data={},
+        scalar_latent=scalar_latent,
+        equiv_latent=equiv_latent,
+        active_edges=active_edges,
+        node_conditioning=None,
+        edge_conditioning=None,
+        layer_update_coefficients=layer_coeffs,
+    )
+
+    assert iters_used < cfg["fp_max_iter"]
+    assert float(last_residual) < cfg["fp_tol"]
+
+
+def test_fixed_point_static_context_fuses_dynamic_and_static():
+    cfg = {
+        "num_layers": 2,
+        "latent_dim": 8,
+        "eq_latent_multiplicity": 2,
+        "use_fixed_point_recycling": True,
+        "fp_use_static_context": True,
+        "fp_static_context_strength": 1.0,
+        "fp_grad_steps": 0,
+    }
+    model = InteractionModule(irreps_in=BASE_IRREPS_IN, **cfg).eval()
+
+    class _TakeStaticScalar(nn.Module):
+        def __init__(self, dim):
+            super().__init__()
+            self.dim = dim
+
+        def forward(self, x):
+            return x[:, self.dim:]
+
+    class _TakeStaticEquiv(nn.Module):
+        def forward(self, x):
+            feat = x.shape[1] // 2
+            return x[:, feat:]
+
+    model.fp_scalar_static_fuser = _TakeStaticScalar(cfg["latent_dim"])
+    model.fp_equiv_static_fuser = _TakeStaticEquiv()
+
+    n_edges = 7
+    dyn_s = torch.randn(n_edges, cfg["latent_dim"])
+    stat_s = torch.randn(n_edges, cfg["latent_dim"])
+    dyn_e = torch.randn(n_edges, cfg["eq_latent_multiplicity"], 9)
+    stat_e = torch.randn(n_edges, cfg["eq_latent_multiplicity"], 9)
+
+    fused_s, fused_e = model._fuse_fixed_point_inputs(
+        dynamic_scalar_latent=dyn_s,
+        dynamic_equiv_latent=dyn_e,
+        static_scalar_latent=stat_s,
+        static_equiv_latent=stat_e,
+    )
+
+    assert torch.allclose(fused_s, stat_s)
+    assert fused_e is not None
+    assert torch.allclose(fused_e, stat_e)
+
+
+def test_inverse_quadratic_alpha_cap_enforces_bound():
+    raw = torch.tensor(10.0)
+    alpha_max = 0.5
+    alpha = torch.tensor(alpha_max)
+    base = raw * alpha  # residual at iter 0
+
+    residuals = []
+    for it in range(10):
+        alpha_it, target = _inverse_quadratic_alpha_cap(
+            raw_residual=raw,
+            alpha=alpha,
+            base_residual=base,
+            it=it,
+            alpha_max=alpha_max,
+        )
+        residual = raw * alpha_it
+        residuals.append(float(residual))
+        assert float(residual) <= float(target) + 1e-6
+
+    # sequence should be non-increasing under the cap
+    assert all(residuals[i + 1] <= residuals[i] + 1e-12 for i in range(len(residuals) - 1))
