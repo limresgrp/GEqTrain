@@ -24,10 +24,14 @@ from geqtrain.nn.allegro import Contracter
 from geqtrain.utils.so3 import split_irreps, tp_path_exists
 from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
-from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
-def apply_residual_stream(latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
-    if this_layer_update_coeff is None:
+def apply_residual_stream(
+    latents: torch.Tensor,
+    new_latents: torch.Tensor,
+    residual_update_coeff: Optional[torch.Tensor],
+) -> torch.Tensor:
+    if residual_update_coeff is None:
         # This happens on the first layer, where the dimensions of `latents` (from initial edge attributes)
         # and `new_latents` (from the first MLP) are different. We just take the new latents.
         return new_latents
@@ -37,48 +41,15 @@ def apply_residual_stream(latents, new_latents, this_layer_update_coeff: Optiona
     # we always want the latent space to be normalized to variance = 1.0,
     # because it is critical for learnability. Still, we want to preserve
     # the _relative_ magnitudes of the current latent and the residual update
-    # to be controled by `this_layer_update_coeff`
+    # to be controled by `residual_update_coeff`
     # Solving the simple system for the two coefficients:
-    #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+    #   a^2 + b^2 = 1  (variances add)   &    a * residual_update_coeff = b
     # gives
-    #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+    #   a = 1 / sqrt(1 + residual_update_coeff^2)  &  b = residual_update_coeff / sqrt(1 + residual_update_coeff^2)
     # rsqrt is reciprocal sqrt
-    coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
-    coefficient_new = this_layer_update_coeff * coefficient_old
-    
-    # We update only the active edges.
-    # To do this, we scale the whole latent tensor, then add the new latents only for the active edges.
-    # This is more efficient than creating a zero tensor and using index_add for the old latents.
-    updated_latents = coefficient_old * latents
-    updated_latents.index_add_(0, active_edges, coefficient_new * new_latents)
-    return updated_latents
-
-
-def _inverse_quadratic_alpha_cap(
-    raw_residual: torch.Tensor,
-    alpha: torch.Tensor,
-    base_residual: torch.Tensor,
-    it: int,
-    alpha_max: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Cap step size so applied residual is <= base_residual / (it+1)^2."""
-    target = base_residual / float((it + 1) * (it + 1))
-    proposed = raw_residual * alpha
-    if proposed > target:
-        alpha = torch.clamp(
-            target / (raw_residual + 1e-12),
-            min=0.0,
-            max=alpha_max,
-        )
-    return alpha, target
-
-
-def _clean_mlp_kwargs(kwargs: dict) -> dict:
-    """Remove explicit IO dimensions so callers can override them safely."""
-    out = dict(kwargs)
-    out.pop("mlp_input_dimension", None)
-    out.pop("mlp_output_dimension", None)
-    return out
+    coefficient_old = torch.rsqrt(residual_update_coeff.square() + 1)
+    coefficient_new = residual_update_coeff * coefficient_old
+    return coefficient_old * latents + coefficient_new * new_latents
 
 
 def build_tps_irreps_list(
@@ -134,19 +105,16 @@ class InteractionLayerConfig:
     equiv_latent_irreps: o3.Irreps
     last_layer_equiv_latent_irreps: o3.Irreps
     node_invariant_field: str
-    combined_edge_inv_dim: int
     edge_conditioning_dim: int
     is_last_layer: bool
     irreps_in: dict
     attention_logit_clip: float
-    residual_update_max: float
     use_equivariant_residual: bool
 
 
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
     conditioning_fields: List[str]
-    __constants__ = ["use_fixed_point_recycling", "fp_use_static_context"]
 
     def __init__(
         self,
@@ -162,29 +130,16 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_radial_emb_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
         out_field=AtomicDataDict.EDGE_FEATURES_KEY,
         latent_module=ScalarMLPFunction,
-        latent_module_kwargs={'mlp_latent_dimensions': [128, 128], 'mlp_nonlinearity': 'silu'},
+        latent_module_kwargs: Optional[dict] = None,
         latent_dim: int = 256,
         eq_latent_multiplicity: int = 16,
         use_attention: bool = False,
-        attention_head_dim: int = 32,
+        attention_head_dim: int = 64,
         attention_logit_clip: float = 0.0,
         use_mace_product: bool = False,
         product_correlation: int = 2,
         residual_update_max: float = 1.0,
         use_equivariant_residual: bool = True,
-        use_fixed_point_recycling: bool = False,
-        fp_max_iter: int = 16,
-        fp_tol: float = 1e-3,
-        fp_alpha: float = 0.5,
-        fp_grad_steps: int = 16,
-        fp_adaptive_damping: bool = False,
-        fp_alpha_min: float = 0.05,
-        fp_residual_growth_tol: float = 1.0,
-        fp_first_layer_update_coeff: float = 0.0,
-        fp_state_clip_value: float = 0.0,
-        fp_enforce_inverse_quadratic: bool = False,
-        fp_use_static_context: bool = True,
-        fp_static_context_strength: float = 1.0,
         conditioning_fields: Optional[List[str]] = None,
         irreps_in = None,
     ):
@@ -197,6 +152,8 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_spharm_emb_field  = edge_spharm_emb_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
+        if latent_module_kwargs is None:
+            latent_module_kwargs = {"mlp_latent_dimensions": [128, 128], "mlp_nonlinearity": "silu"}
         
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         if residual_update_max <= 0.0:
@@ -206,38 +163,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.residual_update_max = float(residual_update_max)
         self.attention_logit_clip = float(attention_logit_clip)
         self.use_equivariant_residual = bool(use_equivariant_residual)
-        self.use_fixed_point_recycling = bool(use_fixed_point_recycling)
-        self.fp_max_iter = int(fp_max_iter)
-        self.fp_tol = float(fp_tol)
-        self.fp_alpha = float(fp_alpha)
-        self.fp_grad_steps = int(fp_grad_steps)
-        self.fp_adaptive_damping = bool(fp_adaptive_damping)
-        self.fp_alpha_min = float(fp_alpha_min)
-        self.fp_residual_growth_tol = float(fp_residual_growth_tol)
-        self.fp_first_layer_update_coeff = float(fp_first_layer_update_coeff)
-        self.fp_state_clip_value = float(fp_state_clip_value)
-        self.fp_enforce_inverse_quadratic = bool(fp_enforce_inverse_quadratic)
-        self.fp_use_static_context = bool(fp_use_static_context)
-        self.fp_static_context_strength = float(fp_static_context_strength)
-        if self.use_fixed_point_recycling:
-            if self.fp_max_iter <= 0:
-                raise ValueError("`fp_max_iter` must be > 0 when fixed-point recycling is enabled.")
-            if self.fp_tol < 0.0:
-                raise ValueError("`fp_tol` must be >= 0.")
-            if not (0.0 < self.fp_alpha <= 1.0):
-                raise ValueError("`fp_alpha` must be in (0, 1].")
-            if self.fp_grad_steps < 0:
-                raise ValueError("`fp_grad_steps` must be >= 0.")
-            if not (0.0 < self.fp_alpha_min <= self.fp_alpha):
-                raise ValueError("`fp_alpha_min` must be in (0, fp_alpha].")
-            if self.fp_residual_growth_tol <= 0.0:
-                raise ValueError("`fp_residual_growth_tol` must be > 0.")
-            if self.fp_first_layer_update_coeff < 0.0:
-                raise ValueError("`fp_first_layer_update_coeff` must be >= 0.")
-            if self.fp_state_clip_value < 0.0:
-                raise ValueError("`fp_state_clip_value` must be >= 0.")
-            if not (0.0 < self.fp_static_context_strength <= 1.0):
-                raise ValueError("`fp_static_context_strength` must be in (0, 1].")
         
         # --- Irreps Initialization and Validation ---
         required_irreps = [
@@ -260,12 +185,10 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self._init_input_field('edge_spharm_emb_field', 'equivariant')
 
         # --- Conditioning Tensor Dimension Calculation ---
-        self.node_conditioning_dim = 0
         self.edge_conditioning_dim = 0
         for field in self.conditioning_fields:
             dim = self.irreps_in[field].dim
             if field in _NODE_FIELDS:
-                self.node_conditioning_dim += dim
                 self.edge_conditioning_dim += 2 * dim
             elif field in _EDGE_FIELDS:
                 self.edge_conditioning_dim += dim
@@ -306,8 +229,6 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         tp_out_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in final_out_irreps])
         # On last layer, the equiv_latent should be of only equivariant features, as scalar ones are not used and would be discarded
         _, last_layer_equiv_latent_irreps = split_irreps(o3.Irreps([(mul, ir) for mul, ir in equiv_latent_irreps if ir in tp_out_irreps]))
-        projection_in_equiv_irreps = equiv_latent_irreps if self.use_fixed_point_recycling else last_layer_equiv_latent_irreps
-        self._final_equiv_flattener = inverse_reshape_irreps(projection_in_equiv_irreps) if self.use_fixed_point_recycling else None
 
         tps_irreps_in, tps_irreps_out = build_tps_irreps_list(num_layers, tp_recurrent_irreps, tp_out_irreps, tp_recurrent_irreps)
 
@@ -322,27 +243,12 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             equiv_linear_module=SO3_Linear,
             output_shape_spec="channel_wise",
         )
-        static_fuser_kwargs = _clean_mlp_kwargs(latent_module_kwargs)
-        self.fp_scalar_static_fuser = latent_module(
-            mlp_input_dimension=2 * latent_dim,
-            mlp_output_dimension=latent_dim,
-            **static_fuser_kwargs,
-        )
-        self.fp_equiv_static_fuser = SO3_Linear(
-            in_irreps=equiv_latent_irreps + equiv_latent_irreps,
-            out_irreps=equiv_latent_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            pad_to_alignment=1,
-        )
-        self.fp_equiv_flatten = inverse_reshape_irreps(equiv_latent_irreps)
-        self.fp_equiv_reshape = reshape_irreps(equiv_latent_irreps)
 
         self._latent_resnet_update_params = torch.nn.Parameter(torch.full((self.num_layers - 1,), -4.0))
         self.interaction_layers = torch.nn.ModuleList()
         
         for i in range(self.num_layers):
-            is_last_layer = (i == self.num_layers - 1) and (not self.use_fixed_point_recycling)
+            is_last_layer = (i == self.num_layers - 1)
 
             layer_config = InteractionLayerConfig(
                 latent_module = latent_module,
@@ -361,9 +267,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 node_invariant_field = self.node_invariant_field,
                 is_last_layer = is_last_layer,
                 edge_conditioning_dim = self.edge_conditioning_dim,
-                combined_edge_inv_dim = initial_scalar_latent_dim,
                 attention_logit_clip = self.attention_logit_clip,
-                residual_update_max = self.residual_update_max,
                 use_equivariant_residual = self.use_equivariant_residual,
             )
 
@@ -371,7 +275,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # Final projection to the desired output irreps
         self.final_projection = EquivariantScalarMLP(
-            in_irreps=(latent_dim, projection_in_equiv_irreps), # Input from the recurrent latent state
+            in_irreps=(latent_dim, last_layer_equiv_latent_irreps), # Input from the recurrent latent state
             out_irreps=final_out_irreps, # Desired final output irreps
             latent_module=latent_module,
             latent_kwargs=latent_module_kwargs,
@@ -412,33 +316,32 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         setattr(self, irreps_attr, o3.Irreps(""))
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        active_edges = torch.arange(data[self.edge_radial_emb_field].shape[0], device=data[AtomicDataDict.EDGE_INDEX_KEY].device)
         layer_update_coefficients = self._latent_resnet_update_params.sigmoid() * self.residual_update_max
 
         # === 1. Prepare Initial Scalar and Equivariant Latents ===
-        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        edge_dst = data[AtomicDataDict.EDGE_INDEX_KEY][1]
 
         # Build initial scalar latent
-        scalar_latents_to_cat = [data[self.edge_radial_emb_field]]
+        scalar_input_parts = [data[self.edge_radial_emb_field]]
         if self.has_edge_invariant_field_input:
-            scalar_latents_to_cat.append(data[self.edge_invariant_field])
+            scalar_input_parts.append(data[self.edge_invariant_field])
         if self.has_node_invariant_field_input:
             node_invariants = data[self.node_invariant_field]
-            scalar_latents_to_cat.append(node_invariants[edge_center])
-            scalar_latents_to_cat.append(node_invariants[edge_neigh])
-        initial_scalar_latent = torch.cat(scalar_latents_to_cat, dim=-1)
+            scalar_input_parts.append(node_invariants[edge_src])
+            scalar_input_parts.append(node_invariants[edge_dst])
+        initial_scalar_latent = torch.cat(scalar_input_parts, dim=-1)
 
         # Build initial equivariant latent
-        eq_latents_to_cat = [data[self.edge_spharm_emb_field]]
+        equiv_input_parts = [data[self.edge_spharm_emb_field]]
         if self.has_edge_equivariant_field_input:
-            eq_latents_to_cat.append(data[self.edge_equivariant_field])
+            equiv_input_parts.append(data[self.edge_equivariant_field])
         if self.has_node_equivariant_field_input:
             node_equivariants = data[self.node_equivariant_field]
-            eq_latents_to_cat.append(node_equivariants[edge_center])
-            eq_latents_to_cat.append(node_equivariants[edge_neigh])
+            equiv_input_parts.append(node_equivariants[edge_src])
+            equiv_input_parts.append(node_equivariants[edge_dst])
         
-        initial_equiv_latent = torch.cat(eq_latents_to_cat, dim=-1)
+        initial_equiv_latent = torch.cat(equiv_input_parts, dim=-1)
         if self.eq_concat_permutation is not None:
             initial_equiv_latent = initial_equiv_latent[:, self.eq_concat_permutation]
 
@@ -447,51 +350,25 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             (initial_scalar_latent, initial_equiv_latent),
         )
         if torch.jit.isinstance(init_out, Tuple[torch.Tensor, torch.Tensor]):
-            scalar_latent, equiv_latent = init_out
+            scalar_state, equiv_state = init_out
         else:
             raise RuntimeError("initial_latent_generator must return scalar and equivariant tensors.")
-        static_scalar_latent = scalar_latent
-        static_equiv_latent = equiv_latent
 
         # Prepare conditioning tensors for interaction layers
-        node_conditioning, edge_conditioning = prepare_conditioning_tensors(
+        _, edge_conditioning = prepare_conditioning_tensors(
             data=data,
             conditioning_fields=self.conditioning_fields,
         )
 
-        if self.use_fixed_point_recycling:
-            scalar_latent, equiv_latent, _, _ = self._fixed_point_refine(
-                data=data,
-                scalar_latent=scalar_latent,
-                equiv_latent=equiv_latent,
-                active_edges=active_edges,
-                node_conditioning=node_conditioning,
-                edge_conditioning=edge_conditioning,
-                layer_update_coefficients=layer_update_coefficients,
-                static_scalar_latent=static_scalar_latent,
-                static_equiv_latent=static_equiv_latent,
-            )
-        else:
-            scalar_latent, equiv_latent = self._run_interaction_stack(
-                data=data,
-                scalar_latent=scalar_latent,
-                equiv_latent=equiv_latent,
-                active_edges=active_edges,
-                node_conditioning=node_conditioning,
-                edge_conditioning=edge_conditioning,
-                layer_update_coefficients=layer_update_coefficients,
-            )
-        equiv_for_final = equiv_latent
-        if (
-            self.use_fixed_point_recycling
-            and equiv_for_final is not None
-            and equiv_for_final.ndim == 3
-        ):
-            if self._final_equiv_flattener is None:
-                raise RuntimeError("Fixed-point recycling expects an equivariant flattener for final projection.")
-            equiv_for_final = self._final_equiv_flattener(equiv_for_final)
+        scalar_state, equiv_state = self._run_interaction_stack(
+            data=data,
+            scalar_state=scalar_state,
+            equiv_state=equiv_state,
+            edge_conditioning=edge_conditioning,
+            layer_update_coefficients=layer_update_coefficients,
+        )
 
-        final_out = self.final_projection((scalar_latent, equiv_for_final))
+        final_out = self.final_projection((scalar_state, equiv_state))
         if torch.jit.isinstance(final_out, torch.Tensor):
             data[self.out_field] = final_out
         else:
@@ -501,227 +378,23 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
     def _run_interaction_stack(
         self,
         data: AtomicDataDict.Type,
-        scalar_latent: torch.Tensor,
-        equiv_latent: Optional[torch.Tensor],
-        active_edges: torch.Tensor,
-        node_conditioning: Optional[torch.Tensor],
+        scalar_state: torch.Tensor,
+        equiv_state: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
         layer_update_coefficients: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        s = scalar_latent
-        e = equiv_latent
+        s = scalar_state
+        e = equiv_state
         for i, layer in enumerate(self.interaction_layers):
-            coeff = layer_update_coefficients[i - 1] if i > 0 else None
-            if (
-                self.use_fixed_point_recycling
-                and i == 0
-                and self.fp_first_layer_update_coeff > 0.0
-            ):
-                coeff = torch.as_tensor(
-                    self.fp_first_layer_update_coeff,
-                    dtype=s.dtype,
-                    device=s.device,
-                )
+            residual_update_coeff = layer_update_coefficients[i - 1] if i > 0 else None
             s, e = layer(
                 data=data,
-                scalar_latent=s,
-                equiv_latent=e,
-                active_edges=active_edges,
-                node_conditioning=node_conditioning,
+                scalar_state=s,
+                equiv_state=e,
                 edge_conditioning=edge_conditioning,
-                this_layer_update_coeff=coeff,
+                residual_update_coeff=residual_update_coeff,
             )
         return s, e
-
-    def _fuse_fixed_point_inputs(
-        self,
-        dynamic_scalar_latent: torch.Tensor,
-        dynamic_equiv_latent: Optional[torch.Tensor],
-        static_scalar_latent: torch.Tensor,
-        static_equiv_latent: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if not self.fp_use_static_context:
-            return dynamic_scalar_latent, dynamic_equiv_latent
-
-        blend = torch.as_tensor(
-            self.fp_static_context_strength,
-            dtype=dynamic_scalar_latent.dtype,
-            device=dynamic_scalar_latent.device,
-        )
-        scalar_concat = torch.cat([dynamic_scalar_latent, static_scalar_latent], dim=-1)
-        scalar_fused = self.fp_scalar_static_fuser(scalar_concat)
-        scalar_input = (1.0 - blend) * dynamic_scalar_latent + blend * scalar_fused
-
-        equiv_input = dynamic_equiv_latent
-        if dynamic_equiv_latent is not None and static_equiv_latent is not None:
-            dynamic_equiv_flat = self.fp_equiv_flatten(dynamic_equiv_latent)
-            static_equiv_flat = self.fp_equiv_flatten(static_equiv_latent)
-            equiv_concat = torch.cat([dynamic_equiv_flat, static_equiv_flat], dim=-1)
-            equiv_fused_flat = self.fp_equiv_static_fuser(equiv_concat)
-            equiv_fused = self.fp_equiv_reshape(equiv_fused_flat)
-            equiv_input = (1.0 - blend) * dynamic_equiv_latent + blend * equiv_fused
-
-        return scalar_input, equiv_input
-
-    def _fixed_point_refine(
-        self,
-        data: AtomicDataDict.Type,
-        scalar_latent: torch.Tensor,
-        equiv_latent: Optional[torch.Tensor],
-        active_edges: torch.Tensor,
-        node_conditioning: Optional[torch.Tensor],
-        edge_conditioning: Optional[torch.Tensor],
-        layer_update_coefficients: torch.Tensor,
-        static_scalar_latent: Optional[torch.Tensor] = None,
-        static_equiv_latent: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], int, torch.Tensor]:
-        # 1) No-grad solve to approach a fixed point.
-        with torch.no_grad():
-            s_state = scalar_latent
-            e_state = equiv_latent
-            s_static = s_state if static_scalar_latent is None else static_scalar_latent
-            e_static = e_state if static_equiv_latent is None else static_equiv_latent
-            prev_residual = torch.as_tensor(-1.0, dtype=s_state.dtype, device=s_state.device)
-            inv_quad_base = torch.as_tensor(-1.0, dtype=s_state.dtype, device=s_state.device)
-            iters_used = 0
-            last_residual = torch.as_tensor(float("inf"), dtype=s_state.dtype, device=s_state.device)
-            for it in range(self.fp_max_iter):
-                s_input, e_input = self._fuse_fixed_point_inputs(
-                    dynamic_scalar_latent=s_state,
-                    dynamic_equiv_latent=e_state,
-                    static_scalar_latent=s_static,
-                    static_equiv_latent=e_static,
-                )
-                s_prop, e_prop = self._run_interaction_stack(
-                    data=data,
-                    scalar_latent=s_input,
-                    equiv_latent=e_input,
-                    active_edges=active_edges,
-                    node_conditioning=node_conditioning,
-                    edge_conditioning=edge_conditioning,
-                    layer_update_coefficients=layer_update_coefficients,
-                )
-                s_step = s_prop - s_state
-                s_raw_rms = torch.sqrt(torch.mean(s_step.square()))
-                if e_prop is not None and e_state is not None:
-                    e_step = e_prop - e_state
-                    e_raw_rms = torch.sqrt(torch.mean(e_step.square()))
-                    raw_residual = torch.maximum(s_raw_rms, e_raw_rms)
-                else:
-                    e_step = None
-                    raw_residual = s_raw_rms
-
-                alpha = torch.as_tensor(self.fp_alpha, dtype=s_state.dtype, device=s_state.device)
-                if self.fp_adaptive_damping and prev_residual >= 0.0:
-                    target = prev_residual * self.fp_residual_growth_tol
-                    proposed = raw_residual * alpha
-                    if proposed > target:
-                        alpha = torch.clamp(
-                            target / (raw_residual + 1e-12),
-                            min=self.fp_alpha_min,
-                            max=self.fp_alpha,
-                        )
-                if self.fp_enforce_inverse_quadratic:
-                    if inv_quad_base < 0.0:
-                        inv_quad_base = raw_residual * alpha
-                    alpha, _ = _inverse_quadratic_alpha_cap(
-                        raw_residual=raw_residual,
-                        alpha=alpha,
-                        base_residual=inv_quad_base,
-                        it=it,
-                        alpha_max=self.fp_alpha,
-                    )
-
-                s_next = s_state + alpha * s_step
-                if e_step is not None and e_state is not None:
-                    e_next = e_state + alpha * e_step
-                else:
-                    e_next = e_prop
-
-                if self.fp_state_clip_value > 0.0:
-                    s_next = torch.clamp(s_next, min=-self.fp_state_clip_value, max=self.fp_state_clip_value)
-                    if e_next is not None:
-                        e_next = torch.clamp(e_next, min=-self.fp_state_clip_value, max=self.fp_state_clip_value)
-
-                residual = raw_residual * alpha
-                last_residual = residual
-
-                s_state = s_next
-                e_state = e_next
-                prev_residual = residual
-                iters_used = it + 1
-                if self.fp_tol > 0.0 and residual < self.fp_tol:
-                    break
-
-        # 2) Short gradient-enabled refinement from detached fixed point.
-        s_state = s_state.detach()
-        if e_state is not None:
-            e_state = e_state.detach()
-        s_static = s_state if static_scalar_latent is None else static_scalar_latent
-        e_static = e_state if static_equiv_latent is None else static_equiv_latent
-        prev_residual = torch.as_tensor(-1.0, dtype=s_state.dtype, device=s_state.device)
-        for _ in range(self.fp_grad_steps):
-            s_input, e_input = self._fuse_fixed_point_inputs(
-                dynamic_scalar_latent=s_state,
-                dynamic_equiv_latent=e_state,
-                static_scalar_latent=s_static,
-                static_equiv_latent=e_static,
-            )
-            s_prop, e_prop = self._run_interaction_stack(
-                data=data,
-                scalar_latent=s_input,
-                equiv_latent=e_input,
-                active_edges=active_edges,
-                node_conditioning=node_conditioning,
-                edge_conditioning=edge_conditioning,
-                layer_update_coefficients=layer_update_coefficients,
-            )
-            s_step = s_prop - s_state
-            s_raw_rms = torch.sqrt(torch.mean(s_step.square()))
-            if e_prop is not None and e_state is not None:
-                e_step = e_prop - e_state
-                e_raw_rms = torch.sqrt(torch.mean(e_step.square()))
-                raw_residual = torch.maximum(s_raw_rms, e_raw_rms)
-            else:
-                e_step = None
-                raw_residual = s_raw_rms
-
-            alpha = torch.as_tensor(self.fp_alpha, dtype=s_state.dtype, device=s_state.device)
-            if self.fp_adaptive_damping and prev_residual >= 0.0:
-                target = prev_residual * self.fp_residual_growth_tol
-                proposed = raw_residual * alpha
-                if proposed > target:
-                    alpha = torch.clamp(
-                        target / (raw_residual + 1e-12),
-                        min=self.fp_alpha_min,
-                        max=self.fp_alpha,
-                    )
-            if self.fp_enforce_inverse_quadratic and last_residual > 0.0:
-                proposed = raw_residual * alpha
-                if proposed > last_residual:
-                    alpha = torch.clamp(
-                        last_residual / (raw_residual + 1e-12),
-                        min=0.0,
-                        max=self.fp_alpha,
-                    )
-
-            s_state = s_state + alpha * s_step
-            if e_step is not None and e_state is not None:
-                e_state = e_state + alpha * e_step
-            else:
-                e_state = e_prop
-
-            if self.fp_state_clip_value > 0.0:
-                s_state = torch.clamp(s_state, min=-self.fp_state_clip_value, max=self.fp_state_clip_value)
-                if e_state is not None:
-                    e_state = torch.clamp(e_state, min=-self.fp_state_clip_value, max=self.fp_state_clip_value)
-
-            prev_residual = raw_residual * alpha
-            last_residual = prev_residual
-            if self.fp_tol > 0.0 and prev_residual < self.fp_tol:
-                break
-
-        return s_state, e_state, int(iters_used), last_residual
 
 
 @compile_mode("script")
@@ -818,24 +491,22 @@ class InteractionLayer(torch.nn.Module):
     def forward(
         self,
         data: AtomicDataDict.Type,
-        scalar_latent: torch.Tensor,
-        equiv_latent: Optional[torch.Tensor],
-        active_edges: torch.Tensor,
-        node_conditioning: Optional[torch.Tensor],
+        scalar_state: torch.Tensor,
+        equiv_state: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
-        this_layer_update_coeff: Optional[torch.Tensor],
+        residual_update_coeff: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         
         # === Prepare inputs ===
-        node_invariants = data[self.node_invariant_field]
-        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        num_nodes = node_invariants.shape[0]
-        if equiv_latent is None:
+        node_attrs = data[self.node_invariant_field]
+        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        num_nodes = node_attrs.shape[0]
+        if equiv_state is None:
             raise RuntimeError("InteractionLayer expected an equivariant latent tensor but received None.")
-        equiv_latent_tensor = equiv_latent
+        equiv_state_tensor = equiv_state
 
         # === 1. Build local environment embedding ===
-        env_edges_raw = self.env_embed_mlp((scalar_latent, equiv_latent_tensor))
+        env_edges_raw = self.env_embed_mlp((scalar_state, equiv_state_tensor))
         if torch.jit.isinstance(env_edges_raw, torch.Tensor):
             env_edges = env_edges_raw
         else:
@@ -843,294 +514,44 @@ class InteractionLayer(torch.nn.Module):
         
         if self.use_attention:
             assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
-            Q = self.rearrange_qk(self.node_attr_to_query(node_invariants[edge_center]))
-            K = self.rearrange_qk(self.latent_to_key(scalar_latent))
+            Q = self.rearrange_qk(self.node_attr_to_query(node_attrs[edge_src]))
+            K = self.rearrange_qk(self.latent_to_key(scalar_state))
             W = torch.einsum('emd,emd -> em', Q, K) * self.inv_sqrtd
             if self.attention_logit_clip > 0.0:
                 W = torch.clamp(W, min=-self.attention_logit_clip, max=self.attention_logit_clip)
-            attn_softmax = scatter_softmax(W, edge_center, dim=0)
+            attn_softmax = scatter_softmax(W, edge_src, dim=0)
             env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
         
-        env_nodes = scatter_sum(env_edges, edge_center, dim=0, dim_size=num_nodes)
+        env_nodes = scatter_sum(env_edges, edge_src, dim=0, dim_size=num_nodes)
         if self.use_mace_product:
             assert self.node_inv_to_product_mlp is not None
             assert self.reshape_in_module is not None
-            env_nodes = self.reshape_in_module(self.product(node_feats=env_nodes, node_attrs=node_invariants, sc=None))
+            env_nodes = self.reshape_in_module(self.product(node_feats=env_nodes, node_attrs=node_attrs, sc=None))
         env_nodes = self.node_env_norm(env_nodes)
 
-        local_env_per_edge = env_nodes[edge_center]
+        edge_local_env = env_nodes[edge_src]
         
         # === 3. Interact via Tensor Product ===
-        tp_out = self.tp(equiv_latent_tensor, local_env_per_edge)
+        tp_out = self.tp(equiv_state_tensor, edge_local_env)
         tp_out = self.tp_norm(tp_out)
 
         # === 4. Extract new features ===
         proj_out = self.projection(tp_out, edge_conditioning)
-        new_equiv_latent = torch.jit.annotate(Optional[torch.Tensor], None)
+        new_equiv_state = torch.jit.annotate(Optional[torch.Tensor], None)
         if torch.jit.isinstance(proj_out, Tuple[torch.Tensor, Optional[torch.Tensor]]):
-            new_scalar_latent, new_equiv_latent = proj_out
+            new_scalar_state, new_equiv_state = proj_out
         else:
             raise RuntimeError("Projection must return scalar and equivariant tensors.")
-        scalar_latent = apply_residual_stream(scalar_latent, new_scalar_latent, this_layer_update_coeff, active_edges)
+        scalar_state = apply_residual_stream(scalar_state, new_scalar_state, residual_update_coeff)
         if (
             self.use_equivariant_residual
-            and new_equiv_latent is not None
-            and new_equiv_latent.shape == equiv_latent_tensor.shape
+            and new_equiv_state is not None
+            and new_equiv_state.shape == equiv_state_tensor.shape
         ):
-            equiv_latent_out = apply_residual_stream(
-                equiv_latent_tensor, new_equiv_latent, this_layer_update_coeff, active_edges
+            equiv_state_out = apply_residual_stream(
+                equiv_state_tensor, new_equiv_state, residual_update_coeff
             )
         else:
-            equiv_latent_out = new_equiv_latent
+            equiv_state_out = new_equiv_state
 
-        return scalar_latent, equiv_latent_out
-
-
-def _scalar_slices_from_irreps(irreps: o3.Irreps) -> List[Tuple[int, int]]:
-    """Return slices for parity-even scalars (0e) in a flattened irrep tensor."""
-    out: List[Tuple[int, int]] = []
-    off = 0
-    for mul, ir in irreps:
-        dim = mul * ir.dim
-        if ir.l == 0 and ir.p == 1:
-            out.append((off, off + dim))
-        off += dim
-    return out
-
-def _extract_tp_scalars(tp_out: torch.Tensor, tp_scalar_slices_flat, mul: int) -> torch.Tensor:
-    """
-    Returns tp scalars as (E, mul * n_scalar_blocks) regardless of tp_out format.
-    tp_scalar_slices_flat are slices in flat (E, irreps.dim) indexing.
-    """
-    if len(tp_scalar_slices_flat) == 0:
-        return tp_out.new_zeros((tp_out.shape[0], 0))
-
-    E = tp_out.shape[0]
-
-    if tp_out.ndim == 2:
-        # flat: (E, irreps.dim)
-        return torch.cat([tp_out[:, s:e] for (s, e) in tp_scalar_slices_flat], dim=-1)
-
-    if tp_out.ndim == 3:
-        # channel: (E, mul, feat_per_mul)
-        parts = []
-        for (s, e) in tp_scalar_slices_flat:
-            # convert flat slice [s:e] into per-mul feature slice
-            if (s % mul) != 0 or (e % mul) != 0:
-                raise ValueError(f"Scalar slice ({s},{e}) not divisible by mul={mul}; slices are inconsistent.")
-            s_per = s // mul
-            e_per = e // mul
-            parts.append(tp_out[:, :, s_per:e_per])   # (E, mul, 1) for scalars
-        scal_ch = torch.cat(parts, dim=-1)           # (E, mul, n_scalars)
-        return scal_ch.reshape(E, -1)                # (E, mul * n_scalars)
-
-    raise ValueError(f"Unexpected tp_out.ndim={tp_out.ndim}")
-
-
-@compile_mode("script")
-class InteractionLayerV0(torch.nn.Module):
-    """
-    Baseline interaction layer:
-      - NO hypernetwork weights (all equivariant linears use internal weights)
-      - Optional, *correctly scaled* attention (off by default)
-      - Residual stream updates for BOTH scalar and equivariant latents
-      - Still uses your TP backbone (Contracter) so it stays comparable
-    """
-    __constants__ = ["node_invariant_field", "use_attention", "is_last_layer"]
-
-    def __init__(self, config):
-        super().__init__()
-        self.node_invariant_field = config.node_invariant_field
-        self.is_last_layer = config.is_last_layer
-
-        # ---- Attention (optional) ----
-        self.use_attention = bool(config.use_attention)
-        self.attn_head_dim = int(config.attention_head_dim)
-        self.scale = 1.0 / math.sqrt(float(self.attn_head_dim))  # correct scaling
-
-        # NOTE: to keep V0 clean, we only implement a very simple attention:
-        # Q comes from node invariants at edge centers, K comes from scalar_latent.
-        # If you don't want it, keep use_attention=False.
-        self.node_attr_to_q = None
-        self.edge_scalar_to_k = None
-        if self.use_attention:
-            # we assume node invariants are plain scalars; if they are irreps-packed, adapt before enabling attention
-            # input dims:
-            # - node invariants: inferred at runtime in forward (so we build small linears lazily not possible in script)
-            # For simplicity in torchscript, you can disable attention or hardcode dims.
-            raise RuntimeError(
-                "InteractionLayerV0 attention is intentionally off-by-default. "
-                "If you want it, wire fixed dims here (node_inv_dim, latent_dim) and remove this guard."
-            )
-
-        # ---- (1) Local env embedding: equiv_latent -> env_edges (internal weights) ----
-        # This replaces env_embed_mlp((scalar, equiv)) that triggers hypernetwork weights.
-        self.env_eq = SO3_Linear(
-            config.equiv_latent_irreps,  # equiv latent irreps
-            config.equiv_latent_irreps,  # same irreps for env messages
-            internal_weights=True,
-            shared_weights=True,
-            pad_to_alignment=1,
-        )
-
-        # A tiny scalar gate so scalar_latent can still influence env aggregation
-        # gate = 1 + 0.1 * tanh(MLP(scalar_latent, cond))
-        gate_in_dim = int(config.latent_dim) + int(config.edge_conditioning_dim)
-        self.env_gate = config.latent_module(
-            mlp_input_dimension=gate_in_dim,
-            mlp_latent_dimensions=[],
-            mlp_output_dimension=1,
-            has_bias=True,
-        )
-        with torch.no_grad():
-            # start at exactly gate=1 (since tanh(0)=0)
-            if hasattr(self.env_gate, "sequential"):
-                self.env_gate.sequential[-1].weight.zero_()
-                if self.env_gate.sequential[-1].bias is not None:
-                    self.env_gate.sequential[-1].bias.zero_()
-
-        # Norms (use your existing layernorms if available in this file)
-        self.node_env_norm = SO3_LayerNorm(config.equiv_latent_irreps)
-
-        # ---- (2) Tensor product backbone ----
-        instr = []
-        out_irreps_list: List[Tuple[int, o3.Irrep]] = []
-        i_out = 0
-        for _, ir_out in config.tp_irreps_out:
-            for i1, (_, ir1) in enumerate(config.tp_irreps_in):
-                for i2, (mul2, ir2) in enumerate(config.equiv_latent_irreps):
-                    if ir_out in ir1 * ir2:
-                        instr.append((i1, i2, i_out))
-                        out_irreps_list.append((mul2, ir_out))
-                        i_out += 1
-        tp_out_irreps = o3.Irreps(out_irreps_list)
-
-        self.tp = Contracter(
-            irreps_in1=config.tp_irreps_in,
-            irreps_in2=config.equiv_latent_irreps,
-            irreps_out=tp_out_irreps,
-            instructions=instr,
-            connection_mode="uuu",
-            shared_weights=False,
-            has_weight=False,
-            normalization="component",
-        )
-        self.tp_norm = SO3_LayerNorm(tp_out_irreps)
-
-        # ---- (3) Projection head without hypernetwork weights ----
-        out_equiv_irreps = config.last_layer_equiv_latent_irreps if config.is_last_layer else config.equiv_latent_irreps
-
-        # Scalar update reads only scalar blocks from TP output (+ conditioning)
-        self.tp_scalar_slices = _scalar_slices_from_irreps(tp_out_irreps)
-        tp_scalar_dim = 0
-        for s, e in self.tp_scalar_slices:
-            tp_scalar_dim += (e - s)
-
-        scalar_in_dim = int(tp_scalar_dim) + int(config.edge_conditioning_dim)
-        # Use your latent_module_kwargs if provided
-        latent_kwargs = dict(config.latent_module_kwargs) if hasattr(config, "latent_module_kwargs") else {}
-        if "mlp_input_dimension" in latent_kwargs:
-            latent_kwargs.pop("mlp_input_dimension")
-        if "mlp_output_dimension" in latent_kwargs:
-            latent_kwargs.pop("mlp_output_dimension")
-
-        self.scalar_update = config.latent_module(
-            mlp_input_dimension=scalar_in_dim,
-            mlp_output_dimension=int(config.latent_dim),
-            **latent_kwargs,
-        )
-
-        # Equivariant update: plain internal-weight SO3 linear from TP output -> out equiv irreps
-        self.equiv_update = SO3_Linear(
-            tp_out_irreps,
-            out_equiv_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            pad_to_alignment=1,
-        )
-
-        # Optional scale on equiv update, initialized to identity
-        equiv_gate_in_dim = int(config.latent_dim) + int(config.edge_conditioning_dim)
-        self.equiv_gate = config.latent_module(
-            mlp_input_dimension=equiv_gate_in_dim,
-            mlp_latent_dimensions=[],
-            mlp_output_dimension=1,
-            has_bias=True,
-        )
-        with torch.no_grad():
-            if hasattr(self.equiv_gate, "sequential"):
-                self.equiv_gate.sequential[-1].weight.zero_()
-                if self.equiv_gate.sequential[-1].bias is not None:
-                    self.equiv_gate.sequential[-1].bias.zero_()
-
-    def forward(
-        self,
-        data: AtomicDataDict.Type,
-        scalar_latent: torch.Tensor,                 # [E, latent_dim]
-        equiv_latent: Optional[torch.Tensor],         # [E, equiv_dim]
-        active_edges: torch.Tensor,                   # indices into E
-        node_conditioning: Optional[torch.Tensor],    # unused in V0 (kept for signature compatibility)
-        edge_conditioning: Optional[torch.Tensor],    # [E, cond_dim] or None
-        this_layer_update_coeff: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-
-        if equiv_latent is None:
-            raise RuntimeError("InteractionLayerV0 expected equiv_latent but got None.")
-
-        edge_center = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        num_nodes = int(data[self.node_invariant_field].shape[0])
-
-        # ---- local env per edge ----
-        env_edges = self.env_eq(equiv_latent)  # [E, env_equiv_dim]
-
-        if edge_conditioning is None:
-            gate_in = scalar_latent
-        else:
-            gate_in = torch.cat([scalar_latent, edge_conditioning], dim=-1)
-
-        env_gate = 1.0 + 0.1 * torch.tanh(self.env_gate(gate_in))  # [E, 1]
-        env_edges = env_edges * env_gate.unsqueeze(-1)
-
-        env_nodes = scatter_sum(env_edges, edge_center, dim=0, dim_size=num_nodes)
-        env_nodes = self.node_env_norm(env_nodes)
-        local_env_per_edge = env_nodes[edge_center]
-
-        # ---- TP ----
-        tp_out = self.tp(equiv_latent, local_env_per_edge)
-        tp_out = self.tp_norm(tp_out)
-
-        # ---- scalar projection ----
-        if len(self.tp_scalar_slices) > 0:
-            mul = self.tp_norm.mul   # or self.node_env_norm.mul; any common-mul layernorm object
-            tp_scalars = _extract_tp_scalars(tp_out, self.tp_scalar_slices, mul)
-        else:
-            tp_scalars = tp_out.new_zeros((tp_out.shape[0], 0))
-
-        if edge_conditioning is None:
-            scalar_in = tp_scalars
-        else:
-            scalar_in = torch.cat([tp_scalars, edge_conditioning], dim=-1)
-
-        new_scalar = self.scalar_update(scalar_in)
-
-        # ---- equiv projection ----
-        new_equiv = self.equiv_update(tp_out)
-
-        # mild gate (identity at init)
-        if edge_conditioning is None:
-            eg_in = scalar_latent
-        else:
-            eg_in = torch.cat([scalar_latent, edge_conditioning], dim=-1)
-        equiv_gate = 1.0 + 0.1 * torch.tanh(self.equiv_gate(eg_in))
-        new_equiv = new_equiv * equiv_gate.unsqueeze(-1)
-
-        # ---- residual streams ----
-        scalar_latent = apply_residual_stream(scalar_latent, new_scalar, this_layer_update_coeff, active_edges)
-
-        if self.is_last_layer:
-            # last layer may change irreps: don't residual-mix unless you guarantee same shape
-            equiv_latent_out = new_equiv
-        else:
-            equiv_latent_out = apply_residual_stream(equiv_latent, new_equiv, this_layer_update_coeff, active_edges)
-
-        return scalar_latent, equiv_latent_out
+        return scalar_state, equiv_state_out

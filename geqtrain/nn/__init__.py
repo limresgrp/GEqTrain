@@ -2,9 +2,16 @@ from .kan import KAN
 from ._fc import ScalarMLPFunction, select_nonlinearity, select_nonlinearity_module
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
-from ._embedding_attrs import EmbeddingInputAttrs, EmbeddingAttrs
+from .embeddings import (
+    EmbeddingInputAttrs,
+    EmbeddingAttrs,
+    BaseNodeEmbedding,
+    BaseNodeEqEmbedding,
+    BaseEdgeEmbedding,
+    BaseEdgeEqEmbedding,
+)
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, BaseEdgeEmbedding, BaseEdgeEqEmbedding
+from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
@@ -20,12 +27,15 @@ from ._ddp import DDP
 from ._gradient import EnableGradients, ComputeGradient
 from .mace import MACEModule
 from ._equivariant_scalar_mlp import EquivariantScalarMLP
+from .recycling import RecyclingModule
 
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
     EmbeddingInputAttrs,
     EmbeddingAttrs,
+    BaseNodeEmbedding,
+    BaseNodeEqEmbedding,
     BesselBasis,
     BesselBasisVec,
     PolyBasisVec,
@@ -57,6 +67,7 @@ __all__ = [
     GotenInteractionModule,
     MACEModule,
     EquivariantScalarMLP,
+    RecyclingModule,
     select_nonlinearity,
     select_nonlinearity_module,
 ]

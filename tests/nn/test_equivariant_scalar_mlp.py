@@ -30,6 +30,13 @@ TEST_CONFIGS = [ # batch_size = 10
         "expected_output_shape": (10, 8 + 3 * 3),
         "output_mode": "single",
     },
+    {
+        "name": "Single In/Out, Mixed Multiplicity, Flat",
+        "params": {"in_irreps": "32x0e+8x1o+4x2e", "out_irreps": "64x0e+16x1o+8x2e", "output_shape_spec": "flat"},
+        "expected_output_shape": (10, 64 + 16 * 3 + 8 * 5),
+        "output_mode": "single",
+        "expects_so3_fallback": True,
+    },
     # --- Split Output Cases ---
     {
         "name": "Single In, Split Out, Mixed, Flat",
@@ -120,6 +127,8 @@ def test_equivariant_scalar_mlp_behavior(config, float_tolerance):
         model = EquivariantScalarMLP(**params)
     except Exception as e:
         pytest.fail(f"Failed to instantiate model for config '{config['name']}': {e}") # type: ignore
+    if config.get("expects_so3_fallback", False):
+        assert model.use_so3_linear, f"Expected SO3 fallback for config '{config['name']}'."
 
     # == 2. Define Wrapper, Irreps, and Input Tensors ==
     # We need to define a function for assert_equivariant
@@ -278,3 +287,13 @@ def test_equivariant_scalar_mlp_deployable(tmp_path, float_tolerance):
     conditioning = torch.randn(4, 16, dtype=torch.get_default_dtype())
 
     assert_module_deployable(model, (features, conditioning), tmp_path=tmp_path)
+
+
+def test_equivariant_scalar_mlp_rejects_channel_wise_for_mixed_multiplicity_single_output():
+    with pytest.raises(ValueError, match="common multiplicity"):
+        EquivariantScalarMLP(
+            in_irreps="32x0e+8x1o",
+            out_irreps="64x0e+16x1o",
+            output_shape_spec="channel_wise",
+            latent_kwargs=BASE_PARAMS["latent_kwargs"],
+        )

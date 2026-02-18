@@ -245,3 +245,17 @@ def test_embedding_input_attrs_graph_attrs_equivariant():
     graph_eq = out[AtomicDataDict.GRAPH_EQ_ATTRS_KEY]
     assert graph_attrs.shape == (1, 6)
     assert graph_eq.shape == (1, 3)
+
+
+def test_embedding_input_attrs_empty_config_is_noop():
+    module = EmbeddingInputAttrs(
+        attributes={},
+        eq_attributes={},
+        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
+        irreps_in=_make_irreps_in(),
+    )
+    data = {AtomicDataDict.POSITIONS_KEY: torch.randn(3, 3)}
+    out = module(data)
+    assert AtomicDataDict.NODE_INPUT_ATTRS_KEY not in out
+    assert AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY not in out
