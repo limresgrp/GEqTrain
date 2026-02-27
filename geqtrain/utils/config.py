@@ -240,6 +240,7 @@ class Config(object):
         c.update(dictionary)
         c.parse_node_types()
         c.parse_attributes()
+        c.parse_normalization()
         return c
 
     # =====================================================================
@@ -371,3 +372,64 @@ class Config(object):
                 self[attr][key].update({
                     "actual_num_types": num_types + int(can_be_undefined)
                 })
+
+    def parse_normalization(self):
+        """Build a canonical `normalization` map."""
+        from geqtrain.utils.normalization import resolve_normalization_map
+
+        legacy_keys = [k for k in ("standardize_fields", "destandardize_fields", "standardize", "destandardize") if k in self]
+        if legacy_keys:
+            raise ValueError(
+                f"Legacy normalization keys are no longer supported: {legacy_keys}. "
+                "Use `normalization` only."
+            )
+
+        normalization_map = resolve_normalization_map(self.as_dict())
+        if normalization_map:
+            self["normalization"] = normalization_map
+
+    def _infer_stack_attr_sources(self, layer: dict):
+        name = str(layer.get("name", "")).lower()
+        out_field = str(layer.get("out_field", "")).lower()
+        if "node" in name or out_field == "node_input_attrs":
+            return ["node_attributes"]
+        if "edge" in name or out_field == "edge_input_attrs":
+            return ["edge_attributes"]
+        if "graph" in name or out_field == "graph_attrs":
+            return ["graph_attributes"]
+        return ["node_attributes", "edge_attributes", "graph_attributes", "extra_attributes"]
+
+    def _sync_stack_embedding_input_attrs(self):
+        model_cfg = self.get("model")
+        if not isinstance(model_cfg, dict):
+            return
+        stack = model_cfg.get("stack")
+        if not isinstance(stack, list):
+            return
+
+        for layer in stack:
+            if not isinstance(layer, dict):
+                continue
+            attrs = layer.get("attributes")
+            if not isinstance(attrs, dict):
+                continue
+
+            sources = self._infer_stack_attr_sources(layer)
+            for field_name, field_values in attrs.items():
+                if not isinstance(field_values, dict):
+                    continue
+                source_values = None
+                for source_key in sources:
+                    source_attrs = self.get(source_key, {})
+                    if not isinstance(source_attrs, dict):
+                        continue
+                    maybe_values = source_attrs.get(field_name)
+                    if isinstance(maybe_values, dict):
+                        source_values = maybe_values
+                        break
+                if source_values is None:
+                    continue
+
+                for key in ("num_types", "actual_num_types"):
+                    if key not in field_values and key in source_values:
+                        field_values[key] = deepcopy(source_values[key])

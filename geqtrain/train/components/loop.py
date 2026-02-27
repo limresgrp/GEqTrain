@@ -39,8 +39,10 @@ class TrainingLoop:
             with ema_cm:
                 self.run_phase(VALIDATION, summary)
 
-        # Step the LR scheduler after the epoch summary is built
-        self._lr_sched_step(summary=summary, batch_lvl=False)
+        # Step epoch-level schedulers only after an epoch that performed training
+        # to avoid decaying LR during the initial validation-only pass.
+        if train_phase:
+            self._lr_sched_step(summary=summary, batch_lvl=False)
 
     def run_phase(self, phase: str, summary: EpochSummary):
         """Runs a single phase (training or validation)."""
@@ -132,6 +134,7 @@ class TrainingLoop:
             config=self.trainer.config.as_dict(),
             already_computed_nodes=already_computed_nodes,
             is_train=is_train,
+            current_epoch=max(0, int(self.trainer.iepoch)),
         )
         loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 

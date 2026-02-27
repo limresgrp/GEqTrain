@@ -13,6 +13,7 @@ from geqtrain.train._key import VALIDATION, TRAIN
 from geqtrain.train.loss import Loss, LossStat
 from geqtrain.train.metrics import Metrics
 from geqtrain.train.components.early_stopping import EarlyStopping
+from geqtrain.utils.normalization import resolve_normalization_map
 from torch_ema import ExponentialMovingAverage
 
 def set_seed(seed):
@@ -35,16 +36,16 @@ def setup_loss(config):
     return loss
 
 def setup_metrics(config):
-    destandardize_fields = config.get('destandardize_fields')
-    if destandardize_fields is None:
-        destandardize_fields = config.get('standardize_fields', {})
+    normalization_fields = resolve_normalization_map(
+        config.as_dict() if hasattr(config, "as_dict") else config,
+    )
 
     metrics, _ = instantiate(
         builder=Metrics,
         prefix="metrics",
         positional_args=dict(
             components=config.get('metrics_components'),
-            destandardize_fields=destandardize_fields,
+            normalization_fields=normalization_fields,
         ),
         all_args=config,
     )

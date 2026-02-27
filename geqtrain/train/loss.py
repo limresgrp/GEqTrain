@@ -38,14 +38,23 @@ class Loss:
         # The Loss class owns its own statistics tracker.
         self.loss_stat = LossStat(self)
 
-    def __call__(self, pred: dict, ref: dict, destandardize_fields: dict = {}, **kwargs):
+    def __call__(self, pred: dict, ref: dict, normalization_fields: dict = None, **kwargs):
         """Computes the total weighted loss and contributions from each component."""
+        if normalization_fields is None:
+            normalization_fields = {}
         total_loss = 0.0
         contributions = {}
         for key in self.keys:
             clean_key = self.remove_suffix(key)
             try:
-                loss_val = self.funcs[key](pred=pred, ref=ref, key=clean_key, mean=True, destandardize_fields=destandardize_fields, **kwargs)
+                loss_val = self.funcs[key](
+                    pred=pred,
+                    ref=ref,
+                    key=clean_key,
+                    mean=True,
+                    normalization_fields=normalization_fields,
+                    **kwargs,
+                )
                 contributions[key] = loss_val.detach()
                 total_loss += self.coeffs[key].to(loss_val.device) * loss_val
             except Exception as e:

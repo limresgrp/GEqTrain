@@ -6,6 +6,7 @@ from e3nn.o3 import Irreps
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.dataset import parse_attrs
 from geqtrain.nn._embedding_attrs import EmbeddingInputAttrs
+from geqtrain.utils.config import Config
 
 
 def _make_irreps_in(extra=None):
@@ -259,3 +260,41 @@ def test_embedding_input_attrs_empty_config_is_noop():
     out = module(data)
     assert AtomicDataDict.NODE_INPUT_ATTRS_KEY not in out
     assert AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY not in out
+
+
+def test_hydra_stack_attrs_inherit_num_types_from_top_level_config():
+    config = Config.from_dict(
+        {
+            "num_types": 3,
+            "node_attributes": {
+                "node_types": {"embedding_mode": "one_hot"},
+            },
+            "model": {
+                "stack": [
+                    {
+                        "_target_": "geqtrain.nn.EmbeddingInputAttrs",
+                        "name": "node_input_attrs",
+                        "attributes": {
+                            "node_types": {"embedding_mode": "one_hot"},
+                        },
+                        "eq_attributes": {},
+                        "out_field": AtomicDataDict.NODE_INPUT_ATTRS_KEY,
+                        "eq_out_field": AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
+                    }
+                ]
+            },
+        }
+    )
+    config._sync_stack_embedding_input_attrs()
+
+    stack_node_types = config["model"]["stack"][0]["attributes"]["node_types"]
+    assert stack_node_types["num_types"] == 3
+    assert stack_node_types["actual_num_types"] == 3
+
+    module = EmbeddingInputAttrs(
+        attributes=config["model"]["stack"][0]["attributes"],
+        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
+        eq_out_field=AtomicDataDict.NODE_EQ_INPUT_ATTRS_KEY,
+        irreps_in=_make_irreps_in({"node_types": None}),
+    )
+    assert "node_types" in module._categorical_attrs_modules

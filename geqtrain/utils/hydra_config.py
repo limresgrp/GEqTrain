@@ -34,6 +34,9 @@ def load_hydra_config(config_path: str, overrides: Optional[Iterable[str]] = Non
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     cfg_dict["_hydra_config"] = True
     config = Config.from_dict(cfg_dict)
+    # In resolved Hydra stacks, `${node_attributes}` is copied into `model.stack`;
+    # propagate parsed categorical metadata (e.g., num_types) into stack copies.
+    config._sync_stack_embedding_input_attrs()
     config.filepath = str(path)
     return config
 

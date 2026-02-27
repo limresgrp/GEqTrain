@@ -1,5 +1,6 @@
 from ._loss import (
     LossWrapper,
+    LogCoshLoss,
     RMSDMetric,
     FocalLossBinaryAccuracy,
     BinaryAUROCMetric,
@@ -8,6 +9,7 @@ from ._loss import (
 
 __all__ = [
     "LossWrapper",
+    "LogCoshLoss",
     "RMSDMetric",
     "FocalLossBinaryAccuracy",
     "BinaryAUROCMetric",

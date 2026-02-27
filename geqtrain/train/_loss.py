@@ -1,12 +1,14 @@
 # geqtrain/train/_loss.py
 
-from typing import Tuple
+from typing import Dict, Tuple
 import logging
-from e3nn.o3 import Irreps
+import math
 import torch
+import torch.nn.functional as F
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_mean, scatter_max
+from geqtrain.utils.normalization import denormalize_tensor
 
 def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
     ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''
@@ -163,10 +165,25 @@ class LossWrapper:
                 loss = loss.sum(dim=-1)
             return loss.mean() if mean else loss
 
-    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, destandardize_fields: dict = {}, **kwargs):
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        normalization_fields: Dict[str, Dict] = None,
+        **kwargs,
+    ):
         # 1. Determine prediction key and prepare tensors
         pred_key_name = self._get_pred_key_name(key)
-        pred_key, ref_key = self._prepare_tensors(pred, ref, pred_key_name, key, mean, destandardize_fields)
+        pred_key, ref_key = self._prepare_tensors(
+            pred=pred,
+            ref=ref,
+            pred_key_name=pred_key_name,
+            ref_key_name=key,
+            mean=mean,
+            normalization_fields=normalization_fields,
+        )
 
         # 2. Initialize supervision weights if needed
         self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
@@ -180,7 +197,15 @@ class LossWrapper:
         # 5. Calculate and return the loss
         return self._calculate_loss(pred_key, ref_key, mean)
 
-    def _prepare_tensors(self, pred: dict, ref: dict, pred_key_name: str, ref_key_name: str, mean: bool, destandardize_fields: dict = {}):
+    def _prepare_tensors(
+        self,
+        pred: dict,
+        ref: dict,
+        pred_key_name: str,
+        ref_key_name: str,
+        mean: bool,
+        normalization_fields: Dict[str, Dict] = None,
+    ):
         pred_key = pred.get(pred_key_name)
         assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
         ref_key = ref.get(ref_key_name)
@@ -188,92 +213,63 @@ class LossWrapper:
 
         # De-standardization for metrics (when mean=False)
         if not mean:
-            # Define prefixes for standardization keys
-            MEAN_KEY_PREFIX = "_mean_"
-            STD_KEY_PREFIX = "_std_"
-            PER_TYPE_PREFIX = "per_type"
-            GLOBAL_PREFIX = "global"
+            normalization_fields = normalization_fields or {}
 
-            # Check for per-type standardization stats
-            per_type_mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{ref_key_name}"
-            per_type_std_key = f"{STD_KEY_PREFIX}.{PER_TYPE_PREFIX}.{ref_key_name}"
-            
-            # Check for global standardization stats
-            global_mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
-            global_std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{ref_key_name}"
-
-            irreps = None
-            if ref_key_name in destandardize_fields:
-                mode_str = destandardize_fields[ref_key_name]
-                parts = mode_str.split(':', 1)
-                irreps_str = parts[1] if len(parts) > 1 else None
-                if irreps_str:
-                    irreps = Irreps(irreps_str)
-
-            if per_type_mean_key in ref and per_type_std_key in ref:
-                means = ref[per_type_mean_key].to(pred_key.device)
-                stds = ref[per_type_std_key].to(pred_key.device)
-                node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-
-                means_expanded = means[node_types]
-                stds_expanded = stds[node_types]
-
-                if irreps:
-                    i = 0
-                    for (mul, ir), slice in zip(irreps, irreps.slices()):
-                        mean_bc = means_expanded[:, i:i+1]
-                        std_bc = stds_expanded[:, i:i+1]
-                        if ir.l == 0:
-                            pred_key[:, slice] = pred_key[:, slice] * std_bc + mean_bc
-                            ref_key[:, slice] = ref_key[:, slice] * std_bc + mean_bc
-                        else: # l > 0, inverse of std-only scaling
-                            pred_key[:, slice] = pred_key[:, slice] * std_bc
-                            ref_key[:, slice] = ref_key[:, slice] * std_bc
-                        i += 1
-                else:
-                    # Fallback for scalar fields without irreps info
-                    mean_bc = means_expanded.view(-1, *([1] * (pred_key.dim() - 1)))
-                    std_bc = stds_expanded.view(-1, *([1] * (pred_key.dim() - 1)))
-                    pred_key = pred_key * std_bc + mean_bc
-
-                    mean_bc_ref = means_expanded.view(-1, *([1] * (ref_key.dim() - 1)))
-                    std_bc_ref = stds_expanded.view(-1, *([1] * (ref_key.dim() - 1)))
-                    ref_key = ref_key * std_bc_ref + mean_bc_ref
-                
-            elif global_mean_key in ref and global_std_key in ref:
-                if irreps:
-                    # This case is ambiguous for global stats with multiple irreps.
-                    # The per-type logic is preferred for equivariant fields.
-                    logging.warning(
-                        f"Global de-standardization for equivariant field '{ref_key_name}' is not fully supported and may be incorrect. "
-                        "Consider using per-type standardization."
-                    )
-                global_mean = ref[global_mean_key]
-                global_std = ref[global_std_key]
-
-                if not torch.is_tensor(global_mean):
-                    global_mean = torch.as_tensor(global_mean, device=pred_key.device, dtype=pred_key.dtype)
-                else:
-                    global_mean = global_mean.to(device=pred_key.device, dtype=pred_key.dtype)
-
-                if not torch.is_tensor(global_std):
-                    global_std = torch.as_tensor(global_std, device=pred_key.device, dtype=pred_key.dtype)
-                else:
-                    global_std = global_std.to(device=pred_key.device, dtype=pred_key.dtype)
-
-                if global_mean.numel() != 1:
-                    global_mean = global_mean.reshape(-1).mean()
-                if global_std.numel() != 1:
-                    global_std = global_std.reshape(-1).mean()
-
-                if global_std.item() > 1e-8:
-                    pred_key = pred_key * global_std + global_mean
-                    ref_key = ref_key * global_std + global_mean
+            spec = normalization_fields.get(ref_key_name, {})
+            pred_key = denormalize_tensor(pred_key.clone(), ref, ref_key_name, spec)
+            ref_key = denormalize_tensor(ref_key.clone(), ref, ref_key_name, spec)
 
         return pred_key, ref_key
 
     def __str__(self):
         return self.func_name
+
+
+class LogCoshLoss(LossWrapper):
+    """
+    Numerically stable Log-Cosh regression loss.
+    Behaves like MSE for small errors and like L1 for large errors.
+    """
+    def __init__(self, beta: float = 1.0, **params):
+        if beta <= 0:
+            raise ValueError("`beta` must be > 0 for LogCoshLoss.")
+        self.beta = float(beta)
+        super().__init__(func_name="L1Loss", params=params)
+        self.func_name = "LogCoshLoss"
+
+    def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
+        diff = (pred_key - ref_key) / self.beta
+        abs_diff = torch.abs(diff)
+        log_cosh = self.beta * self.beta * (
+            abs_diff + F.softplus(-2.0 * abs_diff) - math.log(2.0)
+        )
+
+        if self.ignore_nan:
+            not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
+            loss = torch.where(not_nan_mask, log_cosh, torch.zeros_like(log_cosh))
+
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
+                not_nan_mask_sum = not_nan_mask.sum(dim=-1)
+                if mean:
+                    return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
+                loss[not_nan_mask_sum == 0] = torch.nan
+                return loss
+
+            if mean:
+                return loss.sum() / not_nan_mask.sum().clamp(min=1)
+            loss = loss.clone()
+            loss[~not_nan_mask] = torch.nan
+            return loss
+
+        if self.supervision_output_dim is not None:
+            log_cosh = log_cosh * self._supervision_weights_tensor
+            log_cosh = log_cosh.sum(dim=-1)
+        return log_cosh.mean() if mean else log_cosh
+
+    def __str__(self):
+        return "LogCoshLoss"
 
 
 class RMSDMetric:

@@ -17,6 +17,7 @@ import yaml
 import hashlib
 import torch
 import copy
+import os
 from os.path import dirname, basename, abspath
 from e3nn.o3 import Irreps
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
@@ -41,6 +42,14 @@ from geqtrain.data import (
     _FIXED_FIELDS,
 )
 from geqtrain.utils.savenload import atomic_write
+from geqtrain.utils.normalization import (
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+    apply_forward_transform,
+    fit_transform_parameters,
+    resolve_normalization_map,
+    serialize_transform_params,
+)
 from .AtomicData import _process_dict
 
 
@@ -436,9 +445,9 @@ class AtomicDataset(Dataset):
             return params
 
         params = filter_attributes(self, pnames, IGNORE_KEYS)
-        if hasattr(self, "standardize_fields") and len(getattr(self, "standardize_fields", {})) > 0:
+        if hasattr(self, "_normalization_specs") and len(getattr(self, "_normalization_specs", {})) > 0:
             # Bump cache key when standardization math changes.
-            params["standardization_impl_version"] = 2
+            params["standardization_impl_version"] = 3
         # Add other relevant metadata:
         params["dtype"] = str(torch.float32)
         params["geqtrain_version"] = geqtrain.__version__
@@ -498,7 +507,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
-        standardize_fields: Optional[Dict[str, str]] = None,
+        normalization: Optional[Dict[str, Any]] = None,
         transforms: Optional[List[Callable]] = None,
     ):
         self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
@@ -518,7 +527,15 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.edge_attributes = edge_attributes
         self.graph_attributes = graph_attributes
         self.extra_attributes = extra_attributes
-        self.standardize_fields = standardize_fields or {}
+        self.normalization = normalization or {}
+        self._normalization_specs = resolve_normalization_map(
+            {"normalization": self.normalization},
+        )
+        self._normalization_specs = {
+            field: spec
+            for field, spec in self._normalization_specs.items()
+            if bool(spec.get("apply_on_dataset", True))
+        }
         self.means = {}
         self.stds = {}
 
@@ -609,6 +626,140 @@ class AtomicInMemoryDataset(AtomicDataset):
             yaml.dump(self._get_parameters(), f)
         logging.info(f"Saved filtered processed data to disk at {self.processed_paths[0]}")
 
+    def _is_distribution_candidate(self, field: str, values: torch.Tensor) -> bool:
+        if not torch.is_tensor(values):
+            return False
+        if not torch.is_floating_point(values):
+            return False
+        if field.endswith("__mask__") or field.startswith("_"):
+            return False
+        excluded = {
+            AtomicDataDict.POSITIONS_KEY,
+            AtomicDataDict.EDGE_INDEX_KEY,
+            AtomicDataDict.NODE_TYPE_KEY,
+            AtomicDataDict.BATCH_KEY,
+            "ptr",
+            AtomicDataDict.CELL_KEY,
+            AtomicDataDict.PBC_KEY,
+            AtomicDataDict.R_MAX_KEY,
+            AtomicDataDict.DATASET_RAW_FILE_NAME,
+            AtomicDataDict.ENSEMBLE_INDEX_KEY,
+        }
+        return field not in excluded
+
+    def _select_distribution_fields(self, data_list: List[AtomicData], normalization_specs: Dict[str, Dict]) -> List[str]:
+        fields = set()
+        if len(data_list) == 0:
+            return []
+
+        # Always prioritize explicitly normalized targets.
+        for field in normalization_specs:
+            if field in data_list[0]:
+                fields.add(field)
+
+        # Include other floating non-structural fields as likely training targets.
+        for field in data_list[0].keys:
+            values = data_list[0][field]
+            if self._is_distribution_candidate(field, values):
+                fields.add(field)
+
+        return sorted(fields)
+
+    def _sample_flattened_tensor(self, values: torch.Tensor, max_points: int = 200000) -> torch.Tensor:
+        flat = values.reshape(-1).detach().to(dtype=torch.float32, device="cpu")
+        flat = flat[torch.isfinite(flat)]
+        if flat.numel() <= max_points:
+            return flat
+        step = max(1, flat.numel() // max_points)
+        return flat[::step][:max_points]
+
+    def _collect_data_list_distribution_samples(
+        self,
+        data_list: List[AtomicData],
+        fields: List[str],
+        max_points: int = 200000,
+    ) -> Dict[str, torch.Tensor]:
+        out = {}
+        for field in fields:
+            chunks = []
+            for entry in data_list:
+                if field not in entry:
+                    continue
+                values = entry[field]
+                if self._is_distribution_candidate(field, values):
+                    chunks.append(values)
+            if len(chunks) == 0:
+                continue
+            cat = torch.cat([c.reshape(-1) for c in chunks], dim=0)
+            sample = self._sample_flattened_tensor(cat, max_points=max_points)
+            if sample.numel() > 0:
+                out[field] = sample
+        return out
+
+    def _collect_batch_distribution_samples(
+        self,
+        data: Batch,
+        fields: List[str],
+        max_points: int = 200000,
+    ) -> Dict[str, torch.Tensor]:
+        out = {}
+        for field in fields:
+            if field not in data:
+                continue
+            values = data[field]
+            if not self._is_distribution_candidate(field, values):
+                continue
+            sample = self._sample_flattened_tensor(values, max_points=max_points)
+            if sample.numel() > 0:
+                out[field] = sample
+        return out
+
+    def _save_distribution_plots(
+        self,
+        raw_samples: Dict[str, torch.Tensor],
+        normalized_samples: Dict[str, torch.Tensor],
+    ) -> None:
+        if len(raw_samples) == 0 and len(normalized_samples) == 0:
+            return
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            logging.warning(f"Could not save target distribution plots (matplotlib unavailable): {exc}")
+            return
+
+        os.makedirs(self.processed_dir, exist_ok=True)
+
+        def _safe_name(name: str) -> str:
+            return name.replace("/", "_").replace(":", "_")
+
+        def _plot(values: torch.Tensor, title: str, out_path: str):
+            arr = values.numpy()
+            if arr.size == 0:
+                return
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(arr, bins=100)
+            ax.set_title(title)
+            ax.set_xlabel("value")
+            ax.set_ylabel("count")
+            fig.tight_layout()
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+
+        for field, values in raw_samples.items():
+            _plot(
+                values,
+                title=f"{field} distribution (raw)",
+                out_path=os.path.join(self.processed_dir, f"target_dist_{_safe_name(field)}_raw.png"),
+            )
+        for field, values in normalized_samples.items():
+            _plot(
+                values,
+                title=f"{field} distribution (normalized)",
+                out_path=os.path.join(self.processed_dir, f"target_dist_{_safe_name(field)}_normalized.png"),
+            )
+
     def process(self):
         data = self.get_data()
         if len(data) == 5:
@@ -692,6 +843,36 @@ class AtomicInMemoryDataset(AtomicDataset):
         else:
             raise ValueError("Invalid return from `self.get_data()`")
 
+        normalization_specs = copy.deepcopy(self._normalization_specs)
+        distribution_fields = self._select_distribution_fields(data_list, normalization_specs)
+        raw_distribution_samples = self._collect_data_list_distribution_samples(
+            data_list,
+            distribution_fields,
+        )
+        for field, spec in normalization_specs.items():
+            if field not in data_list[0]:
+                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+
+            transform_cfg = fit_transform_parameters(
+                values=torch.cat([entry[field] for entry in data_list], dim=0),
+                transform_cfg=spec.get("transform", {"name": "none"}),
+            )
+            spec["transform"] = transform_cfg
+
+            if transform_cfg.get("name", "none") != "none":
+                irreps_str = spec.get("irreps")
+                if irreps_str is not None:
+                    irreps = Irreps(irreps_str)
+                    if any(ir.l > 0 for _, ir in irreps):
+                        raise ValueError(
+                            f"Field '{field}' uses transform='{transform_cfg['name']}' with irreps={irreps_str}. "
+                            "Target transforms are only supported for scalar irreps (l=0)."
+                        )
+                for entry in data_list:
+                    entry[field] = apply_forward_transform(entry[field], transform_cfg).to(entry[field].dtype)
+
+            fixed_fields.update(serialize_transform_params(field, transform_cfg))
+
         # Batch it for efficient saving
         # This limits an AtomicInMemoryDataset to a maximum of LONG_MAX atoms _overall_, but that is a very big number and any dataset that large is probably not "InMemory" anyway
         data = Batch.from_data_list(data_list, exclude_keys=fixed_fields.keys())
@@ -702,19 +883,21 @@ class AtomicInMemoryDataset(AtomicDataset):
         PER_TYPE_PREFIX = "per_type"
         GLOBAL_PREFIX = "global"
 
-        for field, mode_str in self.standardize_fields.items():
+        for field, spec in normalization_specs.items():
             if field not in data:
-                raise ValueError(f"Cannot standardize: field `{field}` not in data.")
-            
-            parts = mode_str.split(':', 1)
-            mode = parts[0]
-            irreps_str = parts[1] if len(parts) > 1 else None
+                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+
+            mode = spec.get("mode")
+            irreps_str = spec.get("irreps")
             irreps = Irreps(irreps_str) if irreps_str else None
 
-            if mode not in ['per_type', 'global']:
-                raise ValueError(f"Invalid standardization mode '{mode}' for field '{field}'. Must be 'per_type' or 'global'.")
+            if mode not in [PER_TYPE_MODE, GLOBAL_MODE]:
+                raise ValueError(
+                    f"Invalid normalization mode '{mode}' for field '{field}'. "
+                    f"Must be one of: '{PER_TYPE_MODE}', '{GLOBAL_MODE}'."
+                )
 
-            if mode == 'per_type':
+            if mode == PER_TYPE_MODE:
                 if len(data_list) == 0 or AtomicDataDict.NODE_TYPE_KEY not in data_list[0]:
                     raise ValueError("`standardize_per_type` is True, but node types are not available in the data.")
                 num_types = self.node_attributes.get(AtomicDataDict.NODE_TYPE_KEY, {}).get('num_types')
@@ -771,7 +954,7 @@ class AtomicInMemoryDataset(AtomicDataset):
                 fixed_fields[std_key] = std_vals
                 logging.info(f"Standardized field '{field}' per type.")
 
-            elif mode == 'global':
+            elif mode == GLOBAL_MODE:
                 mean_val, std_val = compute_global_statistics(data_list, field, irreps=irreps)
                 self.means[field] = mean_val
                 self.stds[field] = std_val
@@ -792,6 +975,13 @@ class AtomicInMemoryDataset(AtomicDataset):
                 else:
                     logging.warning(f"Standard deviation of field '{field}' is very small ({std_val:.4f}), skipping standardization.")
 
+        normalized_distribution_samples = {}
+        if len(normalization_specs) > 0:
+            normalized_distribution_samples = self._collect_batch_distribution_samples(
+                data,
+                [f for f in distribution_fields if f in normalization_specs],
+            )
+        self._save_distribution_plots(raw_distribution_samples, normalized_distribution_samples)
 
         del data_list
         del node_fields
@@ -884,7 +1074,7 @@ class NpzDataset(AtomicInMemoryDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
-        standardize_fields: Optional[Dict[str, str]] = None,
+        normalization: Optional[Dict[str, Any]] = None,
         transforms: Optional[List[str]] = None,
     ):
         self.key_mapping = key_mapping
@@ -904,7 +1094,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 edge_attributes=edge_attributes,
                 graph_attributes=graph_attributes,
                 extra_attributes=extra_attributes,
-                standardize_fields=standardize_fields,
+                normalization=normalization,
                 transforms=transforms,
             )
         except Exception as e:

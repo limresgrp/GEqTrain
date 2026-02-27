@@ -12,6 +12,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
+from geqtrain.utils.normalization import resolve_normalization_map
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
 from geqtrain.utils.wandb import init_n_update_wandb, resume_wandb_run
 from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
@@ -171,7 +172,7 @@ class ValidationBatchPredictionLogger(Callback):
         self._capture_active = False
         self._pred_cache = {}
         self._ref_cache = {}
-        self._destandardize_fields = {}
+        self._normalization_fields = {}
 
     def on_trainer_begin(self, **kwargs):
         if not self.trainer.dist.is_master:
@@ -193,9 +194,9 @@ class ValidationBatchPredictionLogger(Callback):
             self._log_files[clean_key] = log_path
             self._header_written[clean_key] = False
 
-        self._destandardize_fields = self.trainer.config.get('destandardize_fields')
-        if self._destandardize_fields is None:
-            self._destandardize_fields = self.trainer.config.get('standardize_fields', {})
+        self._normalization_fields = resolve_normalization_map(
+            self.trainer.config.as_dict() if hasattr(self.trainer.config, "as_dict") else self.trainer.config,
+        )
 
     def on_validation_begin(self, **kwargs):
         if not self.trainer.dist.is_master:
@@ -255,7 +256,7 @@ class ValidationBatchPredictionLogger(Callback):
                 pred_key_name,
                 key,
                 mean=False,
-                destandardize_fields=self._destandardize_fields,
+                normalization_fields=self._normalization_fields,
             )
 
         if loss_func is not None and hasattr(loss_func, "_handle_supervision_shapes"):

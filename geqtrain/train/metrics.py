@@ -24,14 +24,20 @@ class _Metric:
         if isinstance(self.func, StatefulMetric):
             self.accumulator = self.func
 
-    def accumulate(self, pred: dict, ref: dict, key: str, destandardize_fields: dict) -> torch.Tensor:
+    def accumulate(self, pred: dict, ref: dict, key: str, normalization_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
         if isinstance(self.accumulator, StatefulMetric):
             self.accumulator.update(pred, ref, key)
             return self.accumulator.compute()  # Return partial result for batch logs
         
         # --- Logic for stateless (RunningStats) metrics ---
-        error = self.func(pred=pred, ref=ref, key=key, mean=False, destandardize_fields=destandardize_fields)
+        error = self.func(
+            pred=pred,
+            ref=ref,
+            key=key,
+            mean=False,
+            normalization_fields=normalization_fields,
+        )
         
         # If per-target metrics are not requested, average over the feature dimension
         if error.dim() > 1 and not self.params.get("PerTarget"):
@@ -84,9 +90,13 @@ class _Metric:
 
 
 class Metrics(Loss):
-    def __init__(self, components: Union[str, List[str], List[dict]], destandardize_fields: dict = {}):
+    def __init__(
+        self,
+        components: Union[str, List[str], List[dict]],
+        normalization_fields: dict = None,
+    ):
         super().__init__(components)
-        self.destandardize_fields = destandardize_fields
+        self.normalization_fields = {} if normalization_fields is None else normalization_fields
         self.metrics: Dict[str, _Metric] = {}
         
         for key in self.keys:
@@ -109,7 +119,12 @@ class Metrics(Loss):
         batch_metrics = {}
         for key, metric_handler in self.metrics.items():
             clean_key = self.remove_suffix(key)
-            batch_metrics[key] = metric_handler.accumulate(pred, ref, clean_key, self.destandardize_fields)
+            batch_metrics[key] = metric_handler.accumulate(
+                pred,
+                ref,
+                clean_key,
+                self.normalization_fields,
+            )
         return batch_metrics
 
     def reset(self):

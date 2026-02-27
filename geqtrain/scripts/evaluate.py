@@ -17,6 +17,7 @@ from geqtrain.train.components.inference import run_inference
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train.components.checkpointing import CheckpointHandler
 from geqtrain.utils._global_options import apply_global_config
+from geqtrain.utils.normalization import denormalize_tensor, resolve_normalization_map
 
 
 class Evaluator:
@@ -32,6 +33,9 @@ class Evaluator:
         self.config = config
         self.logger, self.csv_loggers = loggers
         self.model.eval()
+        self.normalization_fields = resolve_normalization_map(
+            self.config.as_dict() if hasattr(self.config, "as_dict") else self.config,
+        )
 
         # Determine the final set of keys to log
         keys = set()
@@ -108,6 +112,11 @@ class Evaluator:
             if not logger: continue
 
             p, r, l = pred.get(clean_key), ref.get(clean_key), loss_contrib.get(key)
+            spec = self.normalization_fields.get(clean_key, {})
+            if isinstance(p, torch.Tensor):
+                p = denormalize_tensor(p, ref, clean_key, spec)
+            if isinstance(r, torch.Tensor):
+                r = denormalize_tensor(r, ref, clean_key, spec)
             
             for i in range(num_graphs):
                 graph_idx = self.graph_idx_offset + i
