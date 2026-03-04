@@ -272,19 +272,35 @@ def _estimate_yeo_johnson_lambda(values: torch.Tensor, transform_cfg: Dict[str, 
     return best_lam
 
 
-def fit_transform_parameters(values: torch.Tensor, transform_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = _normalize_transform_spec(transform_cfg)
-    if cfg["name"] == "yeo_johnson":
-        lam = cfg.get("lambda", "auto")
-        if lam == "auto":
-            cfg["lambda"] = _estimate_yeo_johnson_lambda(values, cfg)
+def _has_non_scalar_irreps(irreps: Optional[Irreps]) -> bool:
+    return irreps is not None and any(ir.l > 0 for _, ir in irreps)
+
+
+def _validate_irreps_compatible_shape(values: torch.Tensor, irreps: Irreps) -> None:
+    if values.dim() == 0 or values.shape[-1] != irreps.dim:
+        raise ValueError(
+            f"Expected tensor with last dimension {irreps.dim} for irreps={irreps}, got shape {tuple(values.shape)}."
+        )
+
+
+def _collect_transform_fit_values(values: torch.Tensor, irreps: Irreps) -> torch.Tensor:
+    _validate_irreps_compatible_shape(values, irreps)
+    flat = values.reshape(-1, values.shape[-1])
+    fit_values = []
+    for (mul, ir), slc in zip(irreps, irreps.slices()):
+        block = flat[:, slc]
+        if ir.l == 0:
+            fit_values.append(block.reshape(-1))
         else:
-            cfg["lambda"] = float(lam)
-    return cfg
+            block = block.reshape(flat.shape[0], mul, ir.dim)
+            norms = torch.linalg.norm(block, dim=-1)
+            fit_values.append(norms.reshape(-1))
+    if len(fit_values) == 0:
+        return flat.reshape(-1)
+    return torch.cat(fit_values, dim=0)
 
 
-def apply_forward_transform(values: torch.Tensor, transform_cfg: Dict[str, Any]) -> torch.Tensor:
-    cfg = _normalize_transform_spec(transform_cfg)
+def _apply_forward_scalar_transform(values: torch.Tensor, cfg: Dict[str, Any]) -> torch.Tensor:
     name = cfg["name"]
     if name == "none":
         return values
@@ -309,8 +325,7 @@ def apply_forward_transform(values: torch.Tensor, transform_cfg: Dict[str, Any])
     raise ValueError(f"Unsupported transform '{name}'")
 
 
-def apply_inverse_transform(values: torch.Tensor, transform_cfg: Dict[str, Any]) -> torch.Tensor:
-    cfg = _normalize_transform_spec(transform_cfg)
+def _apply_inverse_scalar_transform(values: torch.Tensor, cfg: Dict[str, Any]) -> torch.Tensor:
     name = cfg["name"]
     if name == "none":
         return values
@@ -334,6 +349,88 @@ def apply_inverse_transform(values: torch.Tensor, transform_cfg: Dict[str, Any])
                 out[neg] = 1.0 - base.pow(1.0 / (2.0 - lam))
         return out
     raise ValueError(f"Unsupported transform '{name}'")
+
+
+def fit_transform_parameters(
+    values: torch.Tensor,
+    transform_cfg: Dict[str, Any],
+    irreps: Optional[Irreps] = None,
+) -> Dict[str, Any]:
+    cfg = _normalize_transform_spec(transform_cfg)
+    if cfg["name"] == "yeo_johnson":
+        lam = cfg.get("lambda", "auto")
+        if lam == "auto":
+            fit_values = values
+            if _has_non_scalar_irreps(irreps):
+                fit_values = _collect_transform_fit_values(values, irreps)
+            cfg["lambda"] = _estimate_yeo_johnson_lambda(fit_values, cfg)
+        else:
+            cfg["lambda"] = float(lam)
+    return cfg
+
+
+def apply_forward_transform(
+    values: torch.Tensor,
+    transform_cfg: Dict[str, Any],
+    irreps: Optional[Irreps] = None,
+) -> torch.Tensor:
+    cfg = _normalize_transform_spec(transform_cfg)
+    if not _has_non_scalar_irreps(irreps):
+        return _apply_forward_scalar_transform(values, cfg)
+
+    assert irreps is not None
+    _validate_irreps_compatible_shape(values, irreps)
+    flat = values.reshape(-1, values.shape[-1])
+    out = flat.clone()
+    eps = torch.finfo(flat.dtype).eps
+
+    for (mul, ir), slc in zip(irreps, irreps.slices()):
+        if ir.l == 0:
+            out[:, slc] = _apply_forward_scalar_transform(flat[:, slc], cfg)
+            continue
+
+        block = flat[:, slc].reshape(flat.shape[0], mul, ir.dim)
+        norms = torch.linalg.norm(block, dim=-1, keepdim=True)
+        transformed_norms = _apply_forward_scalar_transform(norms, cfg)
+        scale = torch.where(
+            norms > 0.0,
+            transformed_norms / norms.clamp_min(eps),
+            torch.zeros_like(norms),
+        )
+        out[:, slc] = (block * scale).reshape(flat.shape[0], mul * ir.dim)
+    return out.reshape(values.shape)
+
+
+def apply_inverse_transform(
+    values: torch.Tensor,
+    transform_cfg: Dict[str, Any],
+    irreps: Optional[Irreps] = None,
+) -> torch.Tensor:
+    cfg = _normalize_transform_spec(transform_cfg)
+    if not _has_non_scalar_irreps(irreps):
+        return _apply_inverse_scalar_transform(values, cfg)
+
+    assert irreps is not None
+    _validate_irreps_compatible_shape(values, irreps)
+    flat = values.reshape(-1, values.shape[-1])
+    out = flat.clone()
+    eps = torch.finfo(flat.dtype).eps
+
+    for (mul, ir), slc in zip(irreps, irreps.slices()):
+        if ir.l == 0:
+            out[:, slc] = _apply_inverse_scalar_transform(flat[:, slc], cfg)
+            continue
+
+        block = flat[:, slc].reshape(flat.shape[0], mul, ir.dim)
+        transformed_norms = torch.linalg.norm(block, dim=-1, keepdim=True)
+        norms = _apply_inverse_scalar_transform(transformed_norms, cfg)
+        scale = torch.where(
+            transformed_norms > 0.0,
+            norms / transformed_norms.clamp_min(eps),
+            torch.zeros_like(transformed_norms),
+        )
+        out[:, slc] = (block * scale).reshape(flat.shape[0], mul * ir.dim)
+    return out.reshape(values.shape)
 
 
 def serialize_transform_params(field: str, transform_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -485,7 +582,7 @@ def denormalize_tensor(
             break
 
     transform_cfg = _resolve_runtime_transform(field, ref_data, spec)
-    out = apply_inverse_transform(out, transform_cfg)
+    out = apply_inverse_transform(out, transform_cfg, irreps=irreps)
     return out
 
 

@@ -853,23 +853,22 @@ class AtomicInMemoryDataset(AtomicDataset):
             if field not in data_list[0]:
                 raise ValueError(f"Cannot normalize: field `{field}` not in data.")
 
+            irreps_str = spec.get("irreps")
+            irreps = Irreps(irreps_str) if irreps_str else None
             transform_cfg = fit_transform_parameters(
                 values=torch.cat([entry[field] for entry in data_list], dim=0),
                 transform_cfg=spec.get("transform", {"name": "none"}),
+                irreps=irreps,
             )
             spec["transform"] = transform_cfg
 
             if transform_cfg.get("name", "none") != "none":
-                irreps_str = spec.get("irreps")
-                if irreps_str is not None:
-                    irreps = Irreps(irreps_str)
-                    if any(ir.l > 0 for _, ir in irreps):
-                        raise ValueError(
-                            f"Field '{field}' uses transform='{transform_cfg['name']}' with irreps={irreps_str}. "
-                            "Target transforms are only supported for scalar irreps (l=0)."
-                        )
                 for entry in data_list:
-                    entry[field] = apply_forward_transform(entry[field], transform_cfg).to(entry[field].dtype)
+                    entry[field] = apply_forward_transform(
+                        entry[field],
+                        transform_cfg,
+                        irreps=irreps,
+                    ).to(entry[field].dtype)
 
             fixed_fields.update(serialize_transform_params(field, transform_cfg))
 

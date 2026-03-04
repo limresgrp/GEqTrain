@@ -94,7 +94,16 @@ class _StepCounter(torch.optim.SGD):
         return super().step(closure=closure)
 
 
-def _fake_run_inference(model, data, device, config, loss_fn=None, already_computed_nodes=None, is_train=False):
+def _fake_run_inference(
+    model,
+    data,
+    device,
+    config,
+    loss_fn=None,
+    already_computed_nodes=None,
+    is_train=False,
+    current_epoch=0,
+):
     x = data.to(device)
     out = {"y": model(x)}
     ref = {"y": torch.zeros_like(out["y"])}
@@ -119,6 +128,7 @@ def test_accumulation_flush_steps(monkeypatch):
         dl_train=[torch.ones(4, 1) for _ in range(3)],
         dl_val=[],
         metrics_metadata={},
+        iepoch=0,
         _dispatch_callbacks=lambda *args, **kwargs: None,
     )
 

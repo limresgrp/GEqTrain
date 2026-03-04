@@ -72,6 +72,56 @@ def _build_toy_dataset(
     return dataset, energy, forces
 
 
+def _build_toy_tensor_dataset(tmp_path, *, transform):
+    register_fields(node_fields=["cs_tensor"], fixed_fields=["node_types"])
+
+    npz_path = tmp_path / "toy_tensor.npz"
+    pos = np.array(
+        [
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.2, 0.0, 0.0], [1.2, 0.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    cs_tensor = np.array(
+        [
+            [[-1.5, 0.2, -0.1, 0.3, -0.4, 0.5], [0.8, -0.6, 0.2, -0.3, 0.1, -0.2]],
+            [[-0.9, 0.4, -0.2, 0.7, -0.5, 0.1], [1.3, -0.8, 0.5, -0.6, 0.2, -0.1]],
+        ],
+        dtype=np.float32,
+    )
+    node_types = np.array([0, 1], dtype=np.int64)
+    np.savez(npz_path, coords=pos, cs_tensor=cs_tensor, atom_types=node_types)
+
+    normalization = {
+        "cs_tensor": {
+            "mode": "per_type:1x0e+1x2e",
+            "transform": transform,
+        }
+    }
+
+    dataset = NpzDataset(
+        root=str(tmp_path),
+        ensemble_index=0,
+        file_name=str(npz_path),
+        key_mapping={
+            "coords": "pos",
+            "cs_tensor": "cs_tensor",
+            "atom_types": "node_types",
+        },
+        extra_fixed_fields={AtomicDataDict.R_MAX_KEY: 3.0},
+        node_attributes={
+            AtomicDataDict.NODE_TYPE_KEY: {
+                "embedding_mode": "one_hot",
+                "num_types": 2,
+                "fixed": True,
+            }
+        },
+        normalization=normalization,
+    )
+    return dataset, cs_tensor, normalization
+
+
 def test_normalize_and_denormalize_roundtrip(tmp_path):
     dataset, raw_energy, raw_forces = _build_toy_dataset(tmp_path)
 
@@ -206,6 +256,41 @@ def test_yeo_johnson_normalization_roundtrip(tmp_path):
     )
     expected_energy = torch.from_numpy(raw_energy).to(energy_denorm.dtype).reshape(-1, 1)
     assert torch.allclose(energy_denorm, expected_energy, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "transform_spec, expect_lambda",
+    [
+        ("signed_log1p", False),
+        ({"name": "yeo_johnson", "lambda": "auto"}, True),
+    ],
+)
+def test_equivariant_transform_roundtrip(tmp_path, transform_spec, expect_lambda):
+    dataset, raw_tensor, normalization = _build_toy_tensor_dataset(
+        tmp_path,
+        transform=transform_spec,
+    )
+    batch = Batch.from_data_list([dataset.get(0), dataset.get(1)])
+    if expect_lambda:
+        lambda_key = get_transform_param_key("cs_tensor", "lambda")
+        assert lambda_key in batch
+
+    loss = LossWrapper("L1Loss")
+    normalization_fields = resolve_normalization_map(
+        {"normalization": normalization},
+    )
+    pred_tensor = {"cs_tensor": batch["cs_tensor"].clone()}
+    ref_tensor = batch.to_dict()
+    tensor_denorm, _ = loss._prepare_tensors(
+        pred=pred_tensor,
+        ref=ref_tensor,
+        pred_key_name="cs_tensor",
+        ref_key_name="cs_tensor",
+        mean=False,
+        normalization_fields=normalization_fields,
+    )
+    expected_tensor = torch.from_numpy(raw_tensor.reshape(-1, 6)).to(tensor_denorm.dtype)
+    assert torch.allclose(tensor_denorm, expected_tensor, atol=1e-5)
 
 
 class _InferenceEchoEnergy(torch.nn.Module):
