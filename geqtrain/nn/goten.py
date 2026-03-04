@@ -92,20 +92,47 @@ class GotenEdgeEmbedding(BaseEmbedding):
     """
     Initializes scalar edge features (`t_ij`) based on node features and radial embeddings.
     This version implements the original GotenNet EdgeInit logic: (h_i + h_j) * W_erp(phi_ij).
+    Optionally, scalar edge attributes can be concatenated with radial embeddings
+    before the projection.
     Inherits from BaseEmbedding to be compatible with the EmbeddingAttrs class.
     """
     def __init__(
         self,
+        include_edge_field: bool = True,
+        include_edge_radial: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        # We expect self.node_field to be populated by node embedding
-        # and EDGE_SPHARMS_EMB_KEY to be populated by BasisEdgeRadialAttrs
-        node_irreps = self.irreps_in[self.node_field]
-        input_edge_irreps = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        
-        # Linear layer to project radial basis functions, similar to W_erp in the paper.
-        self.W_erp = torch.nn.Linear(input_edge_irreps.dim, node_irreps.dim)
+        self.include_edge_field = bool(include_edge_field)
+        self.include_edge_radial = bool(include_edge_radial)
+        self._use_edge_field = False
+        self._use_edge_radial = False
+
+        node_field = torch.jit._unwrap_optional(self.node_field)
+        node_irreps = self.irreps_in[node_field]
+
+        edge_in_dim = 0
+        if self.include_edge_radial and AtomicDataDict.EDGE_RADIAL_EMB_KEY in self.irreps_in:
+            self._use_edge_radial = True
+            edge_in_dim += self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
+
+        if (
+            self.include_edge_field
+            and self.edge_field is not None
+            and self.edge_field in self.irreps_in
+            and self.irreps_in[self.edge_field] is not None
+        ):
+            self._use_edge_field = True
+            edge_in_dim += self.irreps_in[self.edge_field].dim
+
+        if edge_in_dim <= 0:
+            raise ValueError(
+                "GotenEdgeEmbedding needs at least one scalar edge input. "
+                "Enable `include_edge_radial` and/or provide `edge_field` with `include_edge_field=True`."
+            )
+
+        # Linear layer to project edge scalar inputs, similar to W_erp in the paper.
+        self.W_erp = torch.nn.Linear(edge_in_dim, node_irreps.dim)
         
         self.out_irreps = node_irreps
         
@@ -117,15 +144,27 @@ class GotenEdgeEmbedding(BaseEmbedding):
     def forward(self, data: AtomicDataDict.Type) -> torch.Tensor:
         edge_center   = data[AtomicDataDict.EDGE_INDEX_KEY][0]
         edge_neighbor = data[AtomicDataDict.EDGE_INDEX_KEY][1]
-        phi_ij        = data[AtomicDataDict.EDGE_RADIAL_EMB_KEY]
-        h             = data[AtomicDataDict.NODE_ATTRS_KEY]
+        node_field = torch.jit._unwrap_optional(self.node_field)
+        h = data[node_field]
 
         # Gather features from center and neighbor nodes
         h_i = h[edge_center]
         h_j = h[edge_neighbor]
-        
-        # Project the radial basis functions
-        radial_proj = self.W_erp(phi_ij)
+
+        edge_scalar_inputs = []
+        if self._use_edge_radial:
+            edge_scalar_inputs.append(data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
+        if self._use_edge_field:
+            edge_field = torch.jit._unwrap_optional(self.edge_field)
+            edge_scalar_inputs.append(data[edge_field])
+
+        if len(edge_scalar_inputs) == 1:
+            edge_input = edge_scalar_inputs[0]
+        else:
+            edge_input = torch.cat(edge_scalar_inputs, dim=-1)
+
+        # Project edge scalar inputs.
+        radial_proj = self.W_erp(edge_input)
         
         # Compute t_ij by combining node and edge features
         t_ij = (h_i + h_j) * radial_proj
