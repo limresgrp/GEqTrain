@@ -327,61 +327,73 @@ class _GATA_Official(torch.nn.Module):
         self.cutoff_fn = _CosineCutoff(cutoff)
 
         # ---- edge update config parsing (matches official behavior) ----
-        update_info = {"gated": False, "rej": True, "mlp": False, "mlpa": False, "lin_w": 0, "lin_ln": 0}
+        update_gated = ""
+        update_rej = True
+        update_mlp = False
+        update_mlpa = False
+        update_lin_w = 0
+        update_lin_ln = 0
         if isinstance(edge_updates, str):
             parts = edge_updates.split("_")
             allowed = ["gated","gatedt","norej","norm","mlp","mlpa","act","linw","linwa","ln","postln"]
             if not all([p in allowed for p in parts]):
                 raise ValueError(f"Invalid edge_updates='{edge_updates}'. Allowed parts: {allowed}")
-            if "gated" in parts:  update_info["gated"] = "gated"
-            if "gatedt" in parts: update_info["gated"] = "gatedt"
-            if "act" in parts:    update_info["gated"] = "act"
-            if "norej" in parts:  update_info["rej"] = False
-            if "mlp" in parts:    update_info["mlp"] = True
-            if "mlpa" in parts:   update_info["mlpa"] = True
-            if "linw" in parts:   update_info["lin_w"] = 1
-            if "linwa" in parts:  update_info["lin_w"] = 2
-            if "ln" in parts:     update_info["lin_ln"] = 1
-            if "postln" in parts: update_info["lin_ln"] = 2
+            if "gated" in parts:  update_gated = "gated"
+            if "gatedt" in parts: update_gated = "gatedt"
+            if "act" in parts:    update_gated = "act"
+            if "norej" in parts:  update_rej = False
+            if "mlp" in parts:    update_mlp = True
+            if "mlpa" in parts:   update_mlpa = True
+            if "linw" in parts:   update_lin_w = 1
+            if "linwa" in parts:  update_lin_w = 2
+            if "ln" in parts:     update_lin_ln = 1
+            if "postln" in parts: update_lin_ln = 2
             self.edge_updates = True
         else:
             self.edge_updates = bool(edge_updates)
-        self.update_info = update_info
+        self.update_gated = update_gated
+        self.update_rej = update_rej
+        self.update_mlp = update_mlp
+        self.update_mlpa = update_mlpa
+        self.update_lin_w = update_lin_w
+        self.update_lin_ln = update_lin_ln
 
         # edge update modules
         self.edge_vec_dim = self.n_atom_basis if evec_dim is None else int(evec_dim)
         self.edge_mlp_dim = self.n_atom_basis if emlp_dim is None else int(emlp_dim)
+        self.edge_updates_active = (not self.last_layer) and self.edge_updates
 
-        if (not self.last_layer) and self.edge_updates:
-            # gamma_t: apply on t_ij
-            # official uses an MLP; here: 2-layer, with optional hidden emlp_dim if mlp/mlpa
-            if self.update_info["mlp"] or self.update_info["mlpa"]:
-                self.gamma_t_1 = torch.nn.Linear(self.n_atom_basis, self.edge_mlp_dim)
-                self.gamma_t_2 = torch.nn.Linear(self.edge_mlp_dim, self.n_atom_basis)
-                torch.nn.init.xavier_uniform_(self.gamma_t_1.weight); torch.nn.init.zeros_(self.gamma_t_1.bias)
-                torch.nn.init.xavier_uniform_(self.gamma_t_2.weight); torch.nn.init.zeros_(self.gamma_t_2.bias)
-            else:
-                self.gamma_t_1 = torch.nn.Linear(self.n_atom_basis, self.n_atom_basis)
-                self.gamma_t_2 = None
-                torch.nn.init.xavier_uniform_(self.gamma_t_1.weight); torch.nn.init.zeros_(self.gamma_t_1.bias)
+        # gamma_t: always define modules; gate usage with flags for TorchScript stability.
+        self.use_gamma_t_2 = False
+        self.gamma_t_1 = torch.nn.Linear(self.n_atom_basis, self.n_atom_basis)
+        self.gamma_t_2 = torch.nn.Linear(self.n_atom_basis, self.n_atom_basis)
+        if self.edge_updates_active and (self.update_mlp or self.update_mlpa):
+            self.gamma_t_1 = torch.nn.Linear(self.n_atom_basis, self.edge_mlp_dim)
+            self.gamma_t_2 = torch.nn.Linear(self.edge_mlp_dim, self.n_atom_basis)
+            self.use_gamma_t_2 = True
+        torch.nn.init.xavier_uniform_(self.gamma_t_1.weight); torch.nn.init.zeros_(self.gamma_t_1.bias)
+        torch.nn.init.xavier_uniform_(self.gamma_t_2.weight); torch.nn.init.zeros_(self.gamma_t_2.bias)
 
-            # W_vq / W_vk: apply on X (last dim)
-            self.W_vq = torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False)
-            torch.nn.init.xavier_uniform_(self.W_vq.weight)
-            if self.sep_htr:
-                self.W_vk = torch.nn.ModuleList([torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False) for _ in range(self.lmax)])
-                for w in self.W_vk:
-                    torch.nn.init.xavier_uniform_(w.weight)
-            else:
-                self.W_vk = torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False)
-                torch.nn.init.xavier_uniform_(self.W_vk.weight)
+        # W_vq / W_vk: always define modules.
+        self.W_vq = torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False)
+        torch.nn.init.xavier_uniform_(self.W_vq.weight)
+        if self.sep_htr:
+            self.W_vk = torch.nn.ModuleList(
+                [torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False) for _ in range(self.lmax)]
+            )
+        else:
+            self.W_vk = torch.nn.ModuleList(
+                [torch.nn.Linear(self.n_atom_basis, self.edge_vec_dim, bias=False)]
+            )
+        for w in self.W_vk:
+            torch.nn.init.xavier_uniform_(w.weight)
 
-            # gamma_w: optional linear map to H + gating
-            self._gamma_w_ln = torch.nn.LayerNorm(self.edge_vec_dim) if self.update_info["lin_ln"] == 1 else None
-            self.W_edp = None
-            if self.update_info["lin_w"] > 0:
-                self.W_edp = torch.nn.Linear(self.edge_vec_dim, self.n_atom_basis, bias=True)
-                torch.nn.init.xavier_uniform_(self.W_edp.weight); torch.nn.init.zeros_(self.W_edp.bias)
+        # gamma_w: always define modules; gate usage with flags.
+        self.use_gamma_w_ln = self.edge_updates_active and self.update_lin_ln == 1
+        self._gamma_w_ln = torch.nn.LayerNorm(self.edge_vec_dim)
+        self.use_w_edp = self.edge_updates_active and self.update_lin_w > 0
+        self.W_edp = torch.nn.Linear(self.edge_vec_dim, self.n_atom_basis, bias=True)
+        torch.nn.init.xavier_uniform_(self.W_edp.weight); torch.nn.init.zeros_(self.W_edp.bias)
 
     @staticmethod
     def _vector_rejection(rep: torch.Tensor, rl_ij: torch.Tensor) -> torch.Tensor:
@@ -398,26 +410,26 @@ class _GATA_Official(torch.nn.Module):
 
     def _gamma_t(self, t_ij: torch.Tensor) -> torch.Tensor:
         # t_ij: [E, 1, H]
-        if self.gamma_t_2 is None:
+        if not self.use_gamma_t_2:
             return self.gamma_t_1(t_ij)
         return self.gamma_t_2(F.silu(self.gamma_t_1(t_ij)))
 
     def _gamma_w(self, w_ij: torch.Tensor) -> torch.Tensor:
         # w_ij: [E, edge_vec_dim]
         x = w_ij
-        if self._gamma_w_ln is not None:
+        if self.use_gamma_w_ln:
             x = self._gamma_w_ln(x)
-        if self.update_info["lin_w"] % 10 == 2:
+        if self.update_lin_w % 10 == 2:
             x = F.silu(x)
-        if self.W_edp is not None:
+        if self.use_w_edp:
             x = self.W_edp(x)  # -> [E, H]
 
         # gated variants
-        if self.update_info["gated"] == "gatedt":
+        if self.update_gated == "gatedt":
             x = torch.tanh(x)
-        elif self.update_info["gated"] == "gated":
+        elif self.update_gated == "gated":
             x = torch.sigmoid(x)
-        elif self.update_info["gated"] == "act":
+        elif self.update_gated == "act":
             x = F.silu(x)
         return x  # [E, H] (or [E, edge_vec_dim] if lin_w==0)
 
@@ -437,7 +449,7 @@ class _GATA_Official(torch.nn.Module):
         if self.scale_edge:
             norm = torch.sqrt(n_edges) / math.sqrt(self.n_atom_basis)  # [E, 1]
         else:
-            norm = 1.0 / math.sqrt(self.n_atom_basis)
+            norm = torch.ones_like(n_edges) * (1.0 / math.sqrt(self.n_atom_basis))
         attn = attn * norm  # broadcasts: [E, heads] * [E, 1]
         attn = F.dropout(attn, p=self.dropout, training=self.training)  # [E, heads]
 
@@ -480,29 +492,30 @@ class _GATA_Official(torch.nn.Module):
 
     def _edge_update(self, EQ_i, EK_j, rl_ij, t_ij) -> torch.Tensor:
         # EQ_i, EK_j: [E, equi_dim, edge_vec_dim], rl_ij: [E, equi_dim, 1], t_ij: [E,1,H]
+        pairs = torch.jit.annotate(List[Tuple[torch.Tensor, torch.Tensor]], [])
         if self.sep_htr:
             EQ_split = _split_to_components(EQ_i, self.lmax, dim=1)
             EK_split = _split_to_components(EK_j, self.lmax, dim=1)
             rl_split = _split_to_components(rl_ij, self.lmax, dim=1)
-            pairs = []
             for l in range(len(EQ_split)):
-                if self.update_info["rej"]:
+                if self.update_rej:
                     EQ_l = self._vector_rejection(EQ_split[l], rl_split[l])
                     EK_l = self._vector_rejection(EK_split[l], -rl_split[l])
                 else:
                     EQ_l, EK_l = EQ_split[l], EK_split[l]
                 pairs.append((EQ_l, EK_l))
-        elif not self.update_info["rej"]:
-            pairs = [(EQ_i, EK_j)]
+        elif not self.update_rej:
+            pairs.append((EQ_i, EK_j))
         else:
             EQr = self._vector_rejection(EQ_i, rl_ij)
             EKr = self._vector_rejection(EK_j, -rl_ij)
-            pairs = [(EQr, EKr)]
+            pairs.append((EQr, EKr))
 
-        w_ij = None
-        for EQ_l, EK_l in pairs:
-            w_l = (EQ_l * EK_l).sum(dim=1)  # sum over geom dim -> [E, edge_vec_dim]
-            w_ij = w_l if w_ij is None else (w_ij + w_l)
+        eq0, ek0 = pairs[0]
+        w_ij = (eq0 * ek0).sum(dim=1)  # [E, edge_vec_dim]
+        for idx in range(1, len(pairs)):
+            EQ_l, EK_l = pairs[idx]
+            w_ij = w_ij + (EQ_l * EK_l).sum(dim=1)
 
         gw = self._gamma_w(w_ij)  # [E, H] (if lin_w>0) else [E, edge_vec_dim]
         if gw.shape[-1] != self.n_atom_basis:
@@ -546,9 +559,12 @@ class _GATA_Official(torch.nn.Module):
             EQ = self.W_vq(X)  # [N, equi_dim, edge_vec_dim]
             if self.sep_htr:
                 X_split = torch.split(X, _get_split_sizes_from_lmax(self.lmax, start=1), dim=1)
-                EK = torch.cat([self.W_vk[i](X_split[i]) for i in range(self.lmax)], dim=1)
+                ek_parts = torch.jit.annotate(List[torch.Tensor], [])
+                for idx, w_vk in enumerate(self.W_vk):
+                    ek_parts.append(w_vk(X_split[idx]))
+                EK = torch.cat(ek_parts, dim=1)
             else:
-                EK = self.W_vk(X)
+                EK = self.W_vk[0](X)
 
             EQ_i = EQ[edge_center]
             EK_j = EK[edge_neighbor]
@@ -725,9 +741,20 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         node_scalars = h.squeeze(1)  # [N, H]
         node_equiv_flat = X.permute(0, 2, 1).reshape(num_nodes, -1)  # [N, H*equi_dim]
         if self.has_equivariant_output:
-            data[self.out_field_node] = self.node_output_projection((node_scalars, node_equiv_flat))
+            projected = self.node_output_projection((node_scalars, node_equiv_flat))
         else:
-            data[self.out_field_node] = self.node_output_projection((node_scalars, None))
+            projected = self.node_output_projection((node_scalars, None))
+        if isinstance(projected, tuple):
+            scalar_part, equiv_part = projected
+            if scalar_part is None:
+                projected_tensor = torch.jit._unwrap_optional(equiv_part)
+            elif equiv_part is None:
+                projected_tensor = torch.jit._unwrap_optional(scalar_part)
+            else:
+                projected_tensor = torch.cat([scalar_part, equiv_part], dim=-1)
+        else:
+            projected_tensor = projected
+        data[self.out_field_node] = projected_tensor
         data[self.out_field_edge] = t_ij.squeeze(1)  # [E, H]
         if self.out_field_node_eq is not None:
             data[self.out_field_node_eq] = node_equiv_flat
