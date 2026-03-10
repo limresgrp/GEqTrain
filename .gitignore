@@ -1,3 +1,12 @@
+old_config/
+CSCS.info.md
+dev_notes.md
+NOTES.md
+*.ipynb
+*.tex
+*.npz
+
+
 config/
 results/
 deployed/
