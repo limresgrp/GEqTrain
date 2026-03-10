@@ -25,6 +25,7 @@ def instantiate_from_cls_name(
     optional_args: Optional[dict] = None,
     all_args: Optional[dict] = None,
     remove_kwargs: bool = True,
+    _dry_run_mode: bool = False,
     return_args_only: bool = False,
 ):
     """Initialize a class based on a string class name. (Delegates to `instantiate`)"""
@@ -161,6 +162,12 @@ def instantiate(
 
     if len(parent_builders) > 0:
         positional_args = {k: v for k, v in positional_args.items() if k in config.allow_list()}
+    
+    # Get the dry run mode from the global config
+    _dry_run_mode = all_args.get("_dry_run_mode", False) if all_args is not None else False
+
+    if "irreps_in" in positional_args and positional_args["irreps_in"] is not None:
+        positional_args["irreps_in"]["_dry_run_mode"] = _dry_run_mode
 
 
     init_args = final_optional_args.copy()

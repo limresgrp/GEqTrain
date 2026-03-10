@@ -36,76 +36,6 @@ class FFBlock(torch.nn.Module):
         return out
 
 
-# class GVPGeqTrain(GraphModuleMixin, nn.Module):
-#     '''https://github.com/lucidrains/geometric-vector-perceptron'''
-#     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
-#         super().__init__()
-#         self.field = field
-#         self.out_field = out_field
-#         in_irreps = irreps_in[field]
-#         self._init_irreps(
-#             irreps_in=irreps_in,
-#             irreps_out={self.out_field: in_irreps}, # TODO FIX not real
-#         )
-
-#         self.dropout = GVPDropout(0.2)
-
-#         self.norm1 = GVPLayerNorm(256)
-#         self.layer1 = GVP(
-#             dim_vectors_in = 256, # env_embed_multiplicity
-#             dim_feats_in = 256, # l0 dim (i.e. latent_dim)
-
-#             dim_vectors_out = 128, # out_multiplicity
-#             dim_feats_out = 128, # new latent_dim
-
-#             vector_gating = True
-#         )
-
-#         self.norm2 = GVPLayerNorm(128)
-#         self.layer2 = GVP(
-#             dim_vectors_in = 128, # env_embed_multiplicity
-#             dim_feats_in = 128, # l0 dim (i.e. latent_dim)
-
-#             dim_vectors_out = 256, # out_multiplicity
-#             dim_feats_out = 256, # new latent_dim
-#             vector_gating = True
-#         )
-
-#         # for scalar property
-#         self.norm3 = GVPLayerNorm(256)
-#         self.final_layer = GVP(
-#             dim_vectors_in = 256, # env_embed_multiplicity # 64x1o
-#             dim_feats_in = 256, # l0 dim (i.e. latent_dim) # 512x0e
-
-#             dim_vectors_out = 64, # out_multiplicity
-#             dim_feats_out = 1, # new latent_dim
-
-#             vector_gating = True
-#         )
-#         self.l0_size = self.irreps_in[self.field][0].dim
-#         self.l1_size = self.irreps_in[self.field][1].dim
-
-#     def forward(self, data):
-#         features = data[self.field]
-
-#         feats, vectors = torch.split(features, [self.l0_size, self.l1_size], dim=-1)
-#         vectors = rearrange(vectors, "b (v c) -> b v c ", c=3)
-
-#         feats, vectors = self.norm1(feats, vectors)
-#         feats, vectors = self.layer1((feats, vectors))
-#         feats, vectors = self.dropout(feats, vectors)
-
-#         feats, vectors = self.norm2(feats, vectors)
-#         feats, vectors = self.layer2((feats, vectors))
-#         feats, vectors = self.dropout(feats, vectors)
-
-#         feats, vectors = self.norm3(feats, vectors)
-#         feats, vectors = self.final_layer((feats, vectors))
-
-#         data[self.out_field] = feats
-#         return data
-
-
 class WeightedTP(GraphModuleMixin, nn.Module):
     def __init__(self, irreps_in, field: str, out_field: Optional[str] = None):
         '''
@@ -233,10 +163,13 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         self.kqv_proj = nn.Linear(self.n_inpt_scalars, 3*self.n_inpt_scalars, bias=False)
         self.out_proj = nn.Linear(self.n_inpt_scalars, self.n_inpt_scalars)
 
-        self.head_dim =  self.n_inpt_scalars//self.n_heads
-        self.scale = math.sqrt(self.head_dim)
+        self.attention_head_dim =  self.n_inpt_scalars//self.n_heads
+        self.scale = math.sqrt(self.attention_head_dim)
 
-        self.use_radial_bias = field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY
+        self.use_radial_bias = (
+            (field == AtomicDataDict.NODE_FEATURES_KEY or field == AtomicDataDict.NODE_ATTRS_KEY)
+            and (AtomicDataDict.EDGE_RADIAL_EMB_KEY in irreps_in)
+        )
         if self.use_radial_bias:
             rbf_emb_dim = irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].dim
             self.bias_norm = nn.LayerNorm(rbf_emb_dim)
@@ -312,10 +245,14 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         padded_edge_attrs = self.rearrange(padded_edge_attrs)
         return padded_edge_attrs
 
-    #! ----------- COMMENT TO JIT COMPILE --------------- #
-    @torch.amp.autocast('cuda', enabled=False) # attention always kept to high precision, regardless of AMP
     # --------------------------------------------------- #
-    def forward(self, features, data: AtomicDataDict.Type):
+    def forward(self, features: torch.Tensor, data: AtomicDataDict.Type) -> torch.Tensor:
+        if not torch.jit.is_scripting():
+            with torch.amp.autocast('cuda', enabled=False): # attention always kept to high precision, regardless of AMP
+                return self._forward_impl(features, data)
+        return self._forward_impl(features, data)
+
+    def _forward_impl(self, features: torch.Tensor, data: AtomicDataDict.Type) -> torch.Tensor:
         '''forward logic: https://rbcborealis.com/wp-content/uploads/2021/08/T17_7.png'''
         attention_idxs = data[self.idx_key] # either batch or idx_key = 'ensemble_index'
         assert attention_idxs.shape[0] == features.shape[0], f"attention_idxs ({attention_idxs.shape[0]}) and input ({features.shape[0]}) shapes do not match, cannot apply attention on {self.field}, only on node or ensemble idx"
@@ -345,11 +282,11 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         q[mask] = _q
         v[mask] = _v
 
-        k = k.view(num_uniques, max_count, self.n_heads, self.head_dim)
-        q = q.view(num_uniques, max_count, self.n_heads, self.head_dim)
-        v = v.view(num_uniques, max_count, self.n_heads, self.head_dim)
+        k = k.view(num_uniques, max_count, self.n_heads, self.attention_head_dim)
+        q = q.view(num_uniques, max_count, self.n_heads, self.attention_head_dim)
+        v = v.view(num_uniques, max_count, self.n_heads, self.attention_head_dim)
 
-        k = k.transpose(1,2) # num_uniques, self.n_heads, max_count, self.head_dim
+        k = k.transpose(1,2) # num_uniques, self.n_heads, max_count, self.attention_head_dim
         q = q.transpose(1,2)
         v = v.transpose(1,2)
 
@@ -377,7 +314,7 @@ class L0IndexedAttention(GraphModuleMixin, nn.Module):
         temp_out_to_be_cat = attnt_coeffs @ v # so new we get back to shape: (bs, h, t, hdim)
         # goal shape: (bs, nh*t, c)
         temp_out_to_be_cat = temp_out_to_be_cat.transpose(1, 2) # bs t h hdim; such that we have the same input dimensions positions, safe reshaping
-        tmp_out = temp_out_to_be_cat.reshape(num_uniques, max_count, self.n_heads*self.head_dim) # revert to input_shape
+        tmp_out = temp_out_to_be_cat.reshape(num_uniques, max_count, self.n_heads*self.attention_head_dim) # revert to input_shape
         tmp_out = tmp_out[mask]
 
         out = self.out_proj(tmp_out)

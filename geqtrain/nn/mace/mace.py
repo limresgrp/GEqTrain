@@ -14,7 +14,7 @@ from geqtrain.nn import (
 )
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
-from geqtrain.utils.tp_utils import complete_parities
+from geqtrain.utils.so3 import complete_parities
 
 
 @compile_mode("script")
@@ -35,10 +35,11 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         out_field              = AtomicDataDict.NODE_FEATURES_KEY,
         # hyperparams:
         latent_dim:                 int  = 64,
+        eq_latent_multiplicity: Optional[int]  = None,
         mlp_latent_dimensions: List[int] = [64, 64, 64],
         avg_num_neighbors:         float = 10.0,
         # optional params
-        out_irreps: Optional[Union[o3.Irreps, str]] = None, #! out_irreps: if None: (yaml.latent_dim x lmax), else yaml.out_irreps
+        out_irreps: Optional[Union[o3.Irreps, str]] = None,
         output_ls : Optional[List[int]]             = None,
         # Other:
         irreps_in = None,
@@ -54,7 +55,9 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         self.edge_invariant_field   = edge_invariant_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
-        self.latent_dim             = latent_dim
+
+        eq_latent_multiplicity = eq_latent_multiplicity or latent_dim
+        
 
         # init irreps
         self._init_irreps(irreps_in=irreps_in, required_irreps_in=[self.node_invariant_field, self.edge_invariant_field, self.edge_equivariant_field])
@@ -62,9 +65,20 @@ class MACEModule(GraphModuleMixin, torch.nn.Module):
         # compute irreps
         edge_attrs_irreps  = self.irreps_in[self.edge_equivariant_field]
         edge_attrs_irreps  = self.include_eq_input_irreps(edge_attrs_irreps)
-        hidden_irreps      = o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]) # complete_parities(o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]))
+        hidden_irreps      = o3.Irreps([(latent_dim, ir) for _, ir in edge_attrs_irreps]) # complete_parities(o3.Irreps([(self.latent_dim, ir) for _, ir in edge_attrs_irreps]))
         
-        out_irreps, _, _ = process_out_irreps(
+
+        default_irreps =o3.Irreps([
+            (latent_dim, ir) if ir.l == 0 else (eq_latent_multiplicity, ir)
+            for _, ir in edge_attrs_irreps]
+        )
+        out_irreps = process_out_irreps(
+            out_irreps=out_irreps,
+            output_ls=output_ls,
+            default_irreps=default_irreps,
+        )
+
+        out_irreps = process_out_irreps(
             out_irreps=out_irreps,
             output_ls=output_ls,
             latent_dim=latent_dim,

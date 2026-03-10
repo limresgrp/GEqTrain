@@ -25,12 +25,17 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         super().__init__()
         self.sc = sc
 
-        self.symmetric_contractions = SymmetricContraction(
-            irreps_in=node_feats_irreps,
-            irreps_out=target_irreps,
-            correlation=correlation,
-            num_elements=num_elements,
-        )
+        # The symmetric contraction requires scalar features. If none are provided,
+        # this block cannot produce any output, so we should handle this case.
+        if node_feats_irreps.dim > 0 and any(ir.l == 0 for _, ir in node_feats_irreps):
+            self.symmetric_contractions = SymmetricContraction(
+                irreps_in=node_feats_irreps,
+                irreps_out=target_irreps,
+                correlation=correlation,
+                num_elements=num_elements,
+            )
+        else:
+            self.symmetric_contractions = None
 
         # Update linear
         self.linear = o3.Linear(
@@ -46,7 +51,12 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         node_attrs: torch.Tensor,
         sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        node_feats = self.symmetric_contractions(node_feats, node_attrs)
+        if self.symmetric_contractions is None:
+            # If there are no scalar features to contract, the result of the contraction is zero.
+            node_feats = torch.zeros(node_feats.shape[0], self.linear.irreps_in.dim, device=node_feats.device, dtype=node_feats.dtype)
+        else:
+            node_feats = self.symmetric_contractions(node_feats, node_attrs)
+
         if self.sc and sc is not None:
             return self.linear(node_feats) + sc
         return self.linear(node_feats)

@@ -1,16 +1,22 @@
 from .kan import KAN
-from ._fc import ScalarMLPFunction, select_nonlinearity
+from ._fc import ScalarMLPFunction, select_nonlinearity, select_nonlinearity_module
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
-from ._embedding_attrs import EmbeddingInputAttrs, EmbeddingAttrs
+from .embeddings import (
+    EmbeddingInputAttrs,
+    EmbeddingAttrs,
+    BaseNodeEmbedding,
+    BaseNodeEqEmbedding,
+    BaseEdgeEmbedding,
+    BaseEdgeEqEmbedding,
+)
 from .radial_basis import BesselBasis, BesselBasisVec, PolyBasisVec
-from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs, BaseEdgeEmbedding, BaseEdgeEqEmbedding
-from ._graph import EmbeddingGraphAttrs
+from ._edge import SphericalHarmonicEdgeAngularAttrs, BasisEdgeRadialAttrs
 from ._edgewise import EdgewiseReduce  # noqa: F401,
 from .interaction import InteractionModule
 from .goten import GotenInteractionModule
 from .readout import ReadoutModule, AttentionReadoutModule
-from ._scale import PerNodeAttrsScaleModule, PerTypeScaleModule
+from ._scale import PerNodeAttrsScaleModule, PerTypeUnscaleModule, PerTypeScaleModule
 from ._nodewise import NodewiseReduce
 from ._film import FiLMFunction
 from ._heads import WeightedTP, TransformerBlock
@@ -20,12 +26,16 @@ from ._combine import CombineModule
 from ._ddp import DDP
 from ._gradient import EnableGradients, ComputeGradient
 from .mace import MACEModule
+from ._equivariant_scalar_mlp import EquivariantScalarMLP
+from .recycling import RecyclingModule
 
 __all__ = [
     GraphModuleMixin,
     SequentialGraphNetwork,
     EmbeddingInputAttrs,
     EmbeddingAttrs,
+    BaseNodeEmbedding,
+    BaseNodeEqEmbedding,
     BesselBasis,
     BesselBasisVec,
     PolyBasisVec,
@@ -33,12 +43,12 @@ __all__ = [
     BasisEdgeRadialAttrs,
     BaseEdgeEmbedding,
     BaseEdgeEqEmbedding,
-    EmbeddingGraphAttrs,
     EdgewiseReduce,
     InteractionModule,
     ReadoutModule,
     AttentionReadoutModule,
     PerNodeAttrsScaleModule,
+    PerTypeUnscaleModule,
     PerTypeScaleModule,
     NodewiseReduce,
     FiLMFunction,
@@ -56,5 +66,8 @@ __all__ = [
     ComputeGradient,
     GotenInteractionModule,
     MACEModule,
+    EquivariantScalarMLP,
+    RecyclingModule,
     select_nonlinearity,
+    select_nonlinearity_module,
 ]

@@ -1,9 +1,14 @@
 # geqtrain/train/_loss.py
 
+from typing import Dict, Tuple
+import logging
+import math
 import torch
+import torch.nn.functional as F
 from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_mean, scatter_max
+from geqtrain.utils.normalization import denormalize_tensor
 
 def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
     ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''
@@ -37,70 +42,234 @@ class LossWrapper:
     """
     def __init__(self, func_name: str, params: dict = {}):
         self.func_name = func_name
-        self.params = params
-        self.ignore_nan = params.get("ignore_nan", False)
-        self.node_level_filter = params.get("node_level_filter", "auto") # node filtering mode: 'auto', True, or False
+        self.params = {} if params is None else dict(params)
 
-        torch_params = {
-            k: v for k, v in params.items() if k not in ["ignore_nan", "node_level_filter"]
-        }
+        self.ignore_nan = self.params.pop("ignore_nan", False)
+        self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
 
+        # New: Handle deep supervision parameters
+        self.supervision_weights = self.params.pop("supervision_weights", None)
+
+        if self.supervision_weights is not None:
+            if not isinstance(self.supervision_weights, list) or not all(isinstance(w, (int, float)) for w in self.supervision_weights):
+                raise ValueError(
+                    f"Invalid 'supervision_weights': {self.supervision_weights}. "
+                    "Must be a list of numbers (floats or ints)."
+                )
+            # Will be initialized as a tensor on the correct device in __call__
+            self._supervision_weights_tensor = None
+            self.supervision_output_dim = len(self.supervision_weights)
+        else:
+            self._supervision_weights_tensor = None
+            self.supervision_output_dim = None
+
+        torch_params = self.params  # Remaining params are for the torch loss function
+
+        # Instantiate the underlying torch loss function
         self.func, _ = instantiate_from_cls_name(
             torch.nn, class_name=func_name, prefix="",
             positional_args=dict(reduction="none"), optional_args=torch_params, all_args={},
         )
+    
+    def _get_pred_key_name(self, base_key: str) -> str:
+        """Determines the correct prediction key based on whether deep supervision is used."""
+        if self.supervision_weights is not None:
+            return base_key + AtomicDataDict.DEEP_SUPERVISION_SUFFIX
+        return base_key
 
-    def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
-        pred_key, ref_key = self._prepare_tensors(pred, ref, key)
+    def _initialize_supervision_weights(self, device, dtype):
+        """Initializes the supervision weights tensor on the correct device, if not already done."""
+        if self.supervision_output_dim is not None and self._supervision_weights_tensor is None:
+            self._supervision_weights_tensor = torch.tensor(
+                self.supervision_weights,
+                device=device,
+                dtype=dtype
+            )
 
-        # 1. Determine if node-level filtering should be applied
+    def _handle_supervision_shapes(self, pred_key: torch.Tensor, ref_key: torch.Tensor, pred_key_name: str, ref_key_name: str) -> torch.Tensor:
+        """Ensures reference tensor shape is compatible with the prediction tensor, especially for deep supervision."""
+        if self.supervision_output_dim is not None:
+            if pred_key.dim() < 1 or pred_key.shape[-1] != self.supervision_output_dim:
+                raise ValueError(
+                    f"Prediction for key '{pred_key_name}' has shape {pred_key.shape}, "
+                    f"but the number of supervision weights is {self.supervision_output_dim}. "
+                    "The last dimension of the prediction must match the number of weights."
+                )
+            if ref_key.dim() == pred_key.dim() - 1:
+                ref_key = ref_key.unsqueeze(-1).expand_as(pred_key)
+            elif ref_key.dim() == pred_key.dim():
+                if ref_key.shape[-1] == 1:
+                    ref_key = ref_key.expand_as(pred_key)
+                elif ref_key.shape[-1] != self.supervision_output_dim:
+                    raise ValueError(
+                        f"Reference for key '{ref_key_name}' has shape {ref_key.shape}, "
+                        f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
+                        f"and prediction shape {pred_key.shape}."
+                    )
+            else:
+                raise ValueError(
+                    f"Reference for key '{ref_key_name}' has shape {ref_key.shape}, "
+                    f"which is incompatible with the number of supervision weights ({self.supervision_output_dim}) "
+                    f"and prediction shape {pred_key.shape}."
+                )
+        else:
+            if ref_key.shape != pred_key.shape:
+                try:
+                    ref_key = ref_key.reshape(pred_key.shape)
+                except: pass
+        return ref_key
+
+    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Filters tensors to include only center nodes if the key is a node-level property."""
         apply_filter = False
         if self.node_level_filter is True:
             apply_filter = True
         elif self.node_level_filter == 'auto' and key in _NODE_FIELDS:
             apply_filter = True
 
-        # 2. Apply the filter if required
         if apply_filter:
-            num_atoms = pred.get(AtomicDataDict.POSITIONS_KEY).shape[0]
-            # Get the unique indices of nodes that are the center of an edge
-            center_nodes_idx = pred[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-            # Safety check: only filter tensors that are per-atom
+            num_atoms = data.get(AtomicDataDict.POSITIONS_KEY).shape[0]
+            center_nodes_idx = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
             if pred_key.shape[0] == num_atoms:
                 pred_key = pred_key[center_nodes_idx]
             if ref_key.shape[0] == num_atoms:
                 ref_key = ref_key[center_nodes_idx]
+        return pred_key, ref_key
 
-        if ref_key.shape != pred_key.shape:
-            ref_key = ref_key.reshape(pred_key.shape)
-
-        # 3. Handle NaNs (on the potentially filtered tensors)
+    def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
+        """Computes the loss, handling NaNs and applying supervision weights."""
         if self.ignore_nan:
             not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
             pred_key = torch.nan_to_num(pred_key, nan=0.0)
             ref_key = torch.nan_to_num(ref_key, nan=0.0)
-
             loss = self.func(pred_key, ref_key)
             loss = loss * not_nan_mask
 
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
+                not_nan_mask_sum = not_nan_mask.sum(dim=-1)
+                if mean:
+                    return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
+                loss[not_nan_mask_sum == 0] = torch.nan
+                return loss
+
             if mean:
                 return loss.sum() / not_nan_mask.sum().clamp(min=1)
-
             loss[~not_nan_mask] = torch.nan
             return loss
         else:
             loss = self.func(pred_key, ref_key)
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
             return loss.mean() if mean else loss
 
-    def _prepare_tensors(self, pred: dict, ref: dict, key: str):
-        pred_key = pred.get(key)
-        assert isinstance(pred_key, torch.Tensor), f"Prediction for '{key}' not a tensor."
-        ref_key = ref.get(key)
-        assert isinstance(ref_key, torch.Tensor), f"Reference for '{key}' not a tensor."
+    def __call__(
+        self,
+        pred: dict,
+        ref: dict,
+        key: str,
+        mean: bool = True,
+        normalization_fields: Dict[str, Dict] = None,
+        **kwargs,
+    ):
+        # 1. Determine prediction key and prepare tensors
+        pred_key_name = self._get_pred_key_name(key)
+        pred_key, ref_key = self._prepare_tensors(
+            pred=pred,
+            ref=ref,
+            pred_key_name=pred_key_name,
+            ref_key_name=key,
+            mean=mean,
+            normalization_fields=normalization_fields,
+        )
+
+        # 2. Initialize supervision weights if needed
+        self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
+
+        # 3. Ensure reference and prediction shapes are compatible
+        ref_key = self._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
+
+        # 4. Apply node-level filtering if necessary
+        pred_key, ref_key = self._apply_node_filter(pred_key, ref_key, pred, key)
+
+        # 5. Calculate and return the loss
+        return self._calculate_loss(pred_key, ref_key, mean)
+
+    def _prepare_tensors(
+        self,
+        pred: dict,
+        ref: dict,
+        pred_key_name: str,
+        ref_key_name: str,
+        mean: bool,
+        normalization_fields: Dict[str, Dict] = None,
+    ):
+        pred_key = pred.get(pred_key_name)
+        assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
+        ref_key = ref.get(ref_key_name)
+        assert isinstance(ref_key, torch.Tensor), f"Reference for '{ref_key_name}' not a tensor."
+
+        # De-standardization for metrics (when mean=False)
+        if not mean:
+            normalization_fields = normalization_fields or {}
+
+            spec = normalization_fields.get(ref_key_name, {})
+            pred_key = denormalize_tensor(pred_key.clone(), ref, ref_key_name, spec)
+            ref_key = denormalize_tensor(ref_key.clone(), ref, ref_key_name, spec)
+
         return pred_key, ref_key
 
     def __str__(self):
         return self.func_name
+
+
+class LogCoshLoss(LossWrapper):
+    """
+    Numerically stable Log-Cosh regression loss.
+    Behaves like MSE for small errors and like L1 for large errors.
+    """
+    def __init__(self, beta: float = 1.0, **params):
+        if beta <= 0:
+            raise ValueError("`beta` must be > 0 for LogCoshLoss.")
+        self.beta = float(beta)
+        super().__init__(func_name="L1Loss", params=params)
+        self.func_name = "LogCoshLoss"
+
+    def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
+        diff = (pred_key - ref_key) / self.beta
+        abs_diff = torch.abs(diff)
+        log_cosh = self.beta * self.beta * (
+            abs_diff + F.softplus(-2.0 * abs_diff) - math.log(2.0)
+        )
+
+        if self.ignore_nan:
+            not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
+            loss = torch.where(not_nan_mask, log_cosh, torch.zeros_like(log_cosh))
+
+            if self.supervision_output_dim is not None:
+                loss = loss * self._supervision_weights_tensor
+                loss = loss.sum(dim=-1)
+                not_nan_mask_sum = not_nan_mask.sum(dim=-1)
+                if mean:
+                    return loss.sum() / not_nan_mask_sum.clamp(min=1).sum()
+                loss[not_nan_mask_sum == 0] = torch.nan
+                return loss
+
+            if mean:
+                return loss.sum() / not_nan_mask.sum().clamp(min=1)
+            loss = loss.clone()
+            loss[~not_nan_mask] = torch.nan
+            return loss
+
+        if self.supervision_output_dim is not None:
+            log_cosh = log_cosh * self._supervision_weights_tensor
+            log_cosh = log_cosh.sum(dim=-1)
+        return log_cosh.mean() if mean else log_cosh
+
+    def __str__(self):
+        return "LogCoshLoss"
 
 
 class RMSDMetric:
@@ -194,29 +363,35 @@ class BinaryAUROCMetric(StatefulMetric):
     """
     def __init__(self, **params):
         super().__init__()
+        self.ensemble_mode = params.pop("ensemble_mode", "auto")
+        if self.ensemble_mode not in ("auto", "always", "never"):
+            raise ValueError("ensemble_mode must be one of: auto, always, never")
+        self.ensemble_reduce = params.pop("ensemble_reduce", "mean")
+        if self.ensemble_reduce not in ("mean", "sum"):
+            raise ValueError("ensemble_reduce must be one of: mean, sum")
         try:
             from torcheval.metrics import BinaryAUROC
         except ImportError:
             raise ImportError("Please `pip install torcheval` to use BinaryAUROCMetric.")
         self.metric = BinaryAUROC(**params)
         self.device = 'cpu'
+        self._warned_about_target = False
+        self._warned_about_ensemble = False
 
     def update(self, pred: dict, ref: dict, key: str):
         logits = pred[key].detach().squeeze()
         target = ref[key].detach().squeeze()
+        ensemble_indices = None
 
         if AtomicDataDict.ENSEMBLE_INDEX_KEY in pred:
             assert AtomicDataDict.ENSEMBLE_INDEX_KEY in ref
-            logits, target = ensemble_predictions_and_targets(logits, target, pred[AtomicDataDict.ENSEMBLE_INDEX_KEY])
-            n_ens = pred[AtomicDataDict.ENSEMBLE_INDEX_KEY].shape[0]/torch.unique(pred[AtomicDataDict.ENSEMBLE_INDEX_KEY]).shape[0]
-            target /= n_ens
-            not_nan_filter = (scatter_sum(ref[key].squeeze(), pred[AtomicDataDict.ENSEMBLE_INDEX_KEY])+1)
-            not_nan_filter = torch.nan_to_num(not_nan_filter, nan=0.0)
-            not_nan_filter = torch.where((not_nan_filter != 0) & (not_nan_filter != 1), torch.ones_like(not_nan_filter), not_nan_filter)
+            ensemble_indices = pred[AtomicDataDict.ENSEMBLE_INDEX_KEY].detach().squeeze()
 
         if target.dim() == 0: # if batch_size = 1
             target = target.unsqueeze(0)
             logits = logits.unsqueeze(0)
+            if ensemble_indices is not None and ensemble_indices.dim() == 0:
+                ensemble_indices = ensemble_indices.unsqueeze(0)
 
         # Create a mask to filter out rows with NaNs in either logits or target
         valid_mask = torch.isfinite(logits) & torch.isfinite(target)
@@ -224,6 +399,58 @@ class BinaryAUROCMetric(StatefulMetric):
         if not torch.all(valid_mask):
             logits = logits[valid_mask]
             target = target[valid_mask]
+            if ensemble_indices is not None and valid_mask.dim() == 1:
+                ensemble_indices = ensemble_indices[valid_mask]
+
+        if logits.numel() == 0 or target.numel() == 0:
+            return
+
+        if ensemble_indices is not None and self.ensemble_mode != "never":
+            ensemble_indices = ensemble_indices.to(dtype=torch.long, device=logits.device)
+            num_unique = torch.unique(ensemble_indices).numel()
+            has_duplicates = num_unique < ensemble_indices.numel()
+            should_ensemble = (
+                self.ensemble_mode == "always"
+                or (self.ensemble_mode == "auto" and has_duplicates and num_unique > 1)
+            )
+            if should_ensemble:
+                if logits.dim() > 1:
+                    if logits.shape[0] == ensemble_indices.shape[0]:
+                        sample_dim = 0
+                    elif logits.shape[-1] == ensemble_indices.shape[0]:
+                        sample_dim = logits.dim() - 1
+                    else:
+                        raise ValueError(
+                            "Ensemble indices shape does not align with logits; "
+                            f"logits shape={logits.shape}, ensemble_indices shape={ensemble_indices.shape}."
+                        )
+                else:
+                    sample_dim = 0
+                reduce_fn = scatter_mean if self.ensemble_reduce == "mean" else scatter_sum
+                logits = reduce_fn(logits, ensemble_indices, dim=sample_dim)
+                target = reduce_fn(target, ensemble_indices, dim=sample_dim)
+            elif self.ensemble_mode == "auto" and num_unique == 1 and not self._warned_about_ensemble:
+                logging.warning(
+                    "BinaryAUROCMetric: ensemble_index has a single unique value; "
+                    "skipping ensemble aggregation. Set ensemble_mode='always' to force it."
+                )
+                self._warned_about_ensemble = True
+
+        target = target.float()
+        is_binary = torch.all((target == 0) | (target == 1)).item()
+        if not is_binary:
+            threshold = 0.0 if target.min().item() < 0.0 else 0.5
+            target = (target > threshold).int()
+            if not self._warned_about_target:
+                logging.warning(
+                    "BinaryAUROCMetric expects targets in {0,1}. "
+                    "Auto-binarizing using threshold %.3f for key '%s'.",
+                    threshold,
+                    key,
+                )
+                self._warned_about_target = True
+        else:
+            target = target.int()
 
         # Ensure metric is on the correct device
         if self.device != logits.device:
@@ -232,7 +459,7 @@ class BinaryAUROCMetric(StatefulMetric):
 
         # Update with cleaned data, ensuring target is int
         if logits.numel() > 0 and target.numel() > 0:  # Only update if there is valid data
-            self.metric.update(logits, target.int())
+            self.metric.update(logits, target)
 
     def compute(self):
         return self.metric.compute().clone()

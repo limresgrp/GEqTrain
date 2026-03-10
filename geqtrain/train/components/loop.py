@@ -25,21 +25,24 @@ class TrainingLoop:
         self.lr_sched = trainer.lr_sched
         self.warmup_sched = trainer.warmup_sched
 
-    def run_epoch(self, summary: EpochSummary, validation_only=False):
+    def run_epoch(self, summary: EpochSummary, run_validation: bool, train_phase: bool):
         """
         Runs a full training and validation epoch, populating the provided summary object.
         """
-        if not validation_only:
+        if train_phase:
             if self.trainer.train_sampler is not None:
                 self.trainer.train_sampler.set_epoch(self.trainer.iepoch + 1)
             self.run_phase(TRAIN, summary)
 
-        ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
-        with ema_cm:
-            self.run_phase(VALIDATION, summary)
+        if run_validation:
+            ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
+            with ema_cm:
+                self.run_phase(VALIDATION, summary)
 
-        # Step the LR scheduler after the epoch summary is built
-        self._lr_sched_step(summary=summary, batch_lvl=False)
+        # Step epoch-level schedulers only after an epoch that performed training
+        # to avoid decaying LR during the initial validation-only pass.
+        if train_phase:
+            self._lr_sched_step(summary=summary, batch_lvl=False)
 
     def run_phase(self, phase: str, summary: EpochSummary):
         """Runs a single phase (training or validation)."""
@@ -68,9 +71,25 @@ class TrainingLoop:
             self._run_batch(batch, is_train=is_train, summary=summary)
             self.trainer._dispatch_callbacks('on_batch_end')
 
+        if is_train and self.trainer.accumulation_counter > 0:
+            accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
+            if self.trainer.accumulation_counter != accumulation_steps:
+                scale = accumulation_steps / self.trainer.accumulation_counter
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad.mul_(scale)
+
+            self.trainer._dispatch_callbacks('on_before_step', summary=summary)
+            self.optim.step()
+            if self.ema:
+                self.ema.update()
+            self._lr_sched_step(summary=summary, batch_lvl=True)
+            self.optim.zero_grad(set_to_none=True)
+            self.trainer.accumulation_counter = 0
+
         # Get final results and record them in the summary object
         loss_results    = self.loss_fn.current_result()
-        metrics_results = self.metrics.current_result()
+        metrics_results = self.metrics.current_result(dist_manager=self.dist)
         summary.set_phase_results(phase, loss_results, metrics_results)
 
         self.trainer._dispatch_callbacks(f'on_{phase}_end')
@@ -115,6 +134,7 @@ class TrainingLoop:
             config=self.trainer.config.as_dict(),
             already_computed_nodes=already_computed_nodes,
             is_train=is_train,
+            current_epoch=max(0, int(self.trainer.iepoch)),
         )
         loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
 
@@ -146,7 +166,7 @@ class TrainingLoop:
             self.trainer.batch_metrics = syncd_batch_metrics
 
         # Dispatch the per-step hook for callbacks
-        self.trainer._dispatch_callbacks('on_step_end', batch_output=out, summary=summary)
+        self.trainer._dispatch_callbacks('on_step_end', batch_output=out, ref_data=ref_data, summary=summary)
         
         # Return values needed by the chunking controller
         return batch_chunk_center_nodes
@@ -188,3 +208,5 @@ class TrainingLoop:
             metric = summary.get_target_metric(self.trainer.metrics_key)
             if metric is not None:
                 self.lr_sched.step(metrics=metric)
+        elif scheduler_name == "ExponentialLR":
+            self.lr_sched.step()

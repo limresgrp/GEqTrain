@@ -1,281 +1,475 @@
 import math
-import torch
+from typing import Optional, NamedTuple, List, Tuple
 
+import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
-from einops.layers.torch import Rearrange
+
+
+class _LinearInstruction(NamedTuple):
+    # Flat (Irreps) slice indices
+    in_start: int
+    in_stop: int
+    out_start: int
+    out_stop: int
+
+    # Mixing dimensions for this irrep block
+    mul_in: int
+    mul_out: int
+    dim: int  # = (2*l + 1)
+
+    # Weight packing indices into the flattened `weights` tensor (external weights)
+    weight_start: int
+    weight_stop: int
+
+    # Index into self.paths if using internal weights; -1 otherwise
+    path_idx: int
+
+
+class _BiasInstruction(NamedTuple):
+    out_start: int
+    out_stop: int
+    bias_start: int
+    bias_stop: int
+
+
+class _NormGroup(NamedTuple):
+    # Indices in "per-multiplicity feature space":
+    # x_ch has shape (B, mul, feat_per_mul) and we slice last axis with [start:stop]
+    start: int
+    stop: int
+    l_dim: int
+    n_blocks: int
+    is_scalar: bool  # l == 0
+
+
+def _has_common_mul(irreps: o3.Irreps) -> Tuple[bool, int]:
+    if len(irreps) == 0:
+        return True, 0
+    m0 = irreps[0].mul
+    ok = all(mul == m0 for (mul, _) in irreps)
+    return ok, int(m0)
 
 
 @compile_mode("script")
 class SO3_Linear(torch.nn.Module):
+    """
+    Fully-connected SO(3)/O(3)-equivariant linear layer that mixes *only* multiplicities
+    within matching irrep types (same l and parity).
+
+    Supported input formats:
+      - flat:      (B, in_irreps.dim)
+      - channel:   (B, mul, in_irreps.dim // mul)  only if in_irreps has a common multiplicity
+
+    Output format:
+      - If input is flat:      returns flat (B, out_irreps.dim)
+      - If input is channel:  returns channel (B, mul_out, out_irreps.dim // mul_out) if out_irreps has common mul,
+                              otherwise returns flat (B, out_irreps.dim)
+
+    Notes:
+      - `internal_weights=False` expects a `weights` tensor whose last dimension equals `self.weight_numel`.
+        The weights are packed in the same order as `self.instructions`.
+    """
+    __constants__ = [
+        "out_dim",
+        "internal_weights",
+        "in_has_common_mul",
+        "in_mul_common",
+        "out_has_common_mul",
+        "out_mul_common",
+    ]
+
+    instructions: List[_LinearInstruction]
+    bias_instructions: List[_BiasInstruction]
+
     def __init__(
         self,
         in_irreps: o3.Irreps,
         out_irreps: o3.Irreps,
         bias: bool = True,
+        internal_weights: bool = True,
+        **kwargs,
     ):
-        '''
-        Initializes a fully-connected SO(3)-equivariant linear layer that
-        correctly handles varied multiplicities.
-
-        Args:
-            in_irreps (o3.Irreps): Input irreducible representations.
-            out_irreps (o3.Irreps): Output irreducible representations.
-            bias (bool): Whether to include a bias term for the scalar (l=0) outputs.
-        '''
         super().__init__()
-        self.in_irreps = in_irreps #o3.Irreps(in_irreps).simplify()
-        self.out_irreps = out_irreps # o3.Irreps(out_irreps).simplify()
+        self.in_irreps = o3.Irreps(in_irreps)
+        self.out_irreps = o3.Irreps(out_irreps)
+        self.internal_weights = bool(internal_weights)
+
+        self.out_dim = int(self.out_irreps.dim)
+
+        # Channel format support flags
+        self.in_has_common_mul, self.in_mul_common = _has_common_mul(self.in_irreps)
+        self.out_has_common_mul, self.out_mul_common = _has_common_mul(self.out_irreps)
+
+        # Build instructions in *list order* (never via dict)
+        in_slices = list(self.in_irreps.slices())
+        out_slices = list(self.out_irreps.slices())
 
         self.paths = torch.nn.ModuleList()
-        self.instructions = []
+        self.instructions = torch.jit.annotate(List[_LinearInstruction], [])
+        self.weight_numel = 0
 
-        # Get convenient slicing information for our input and output tensors
-        in_slices = {ir: s for ir, s in zip(self.in_irreps, self.in_irreps.slices())}
-        out_slices = {ir: s for ir, s in zip(self.out_irreps, self.out_irreps.slices())}
+        path_idx = 0
+        w_cursor = 0
+        for (mul_out, ir_out), s_out in zip(self.out_irreps, out_slices):
+            for (mul_in, ir_in), s_in in zip(self.in_irreps, in_slices):
+                if ir_in == ir_out:
+                    dim = int(ir_in.dim)  # = 2*l+1
 
-        for ir_out, s_out in out_slices.items():
-            for ir_in, s_in in in_slices.items():
-                # A path is valid only if the irrep type is the same
-                if ir_in.ir == ir_out.ir:
-                    # Create a standard linear layer that will mix the multiplicities
-                    path = torch.nn.Linear(ir_in.mul, ir_out.mul, bias=False)
-                    self.init_path_weights(path) # Optional: Kaiming init
+                    # Sanity: slice sizes match
+                    if (s_in.stop - s_in.start) != int(mul_in * dim):
+                        raise ValueError(
+                            "SO3_Linear: input slice size mismatch vs irreps; check irreps/tensor layout."
+                        )
+                    if (s_out.stop - s_out.start) != int(mul_out * dim):
+                        raise ValueError(
+                            "SO3_Linear: output slice size mismatch vs irreps; check irreps/tensor layout."
+                        )
 
-                    path_idx = len(self.paths)
-                    self.paths.append(path)
+                    w_len = int(mul_in * mul_out)
+                    w_start = w_cursor
+                    w_stop = w_cursor + w_len
+                    w_cursor = w_stop
+                    self.weight_numel += w_len
 
-                    # Store instructions for the forward pass
-                    self.instructions.append({
-                        "in_slice": s_in,
-                        "out_slice": s_out,
-                        "path_idx": path_idx,
-                        "dim": ir_in.ir.dim,
-                    })
-        
+                    if self.internal_weights:
+                        # Mix multiplicities only
+                        lin = torch.nn.Linear(int(mul_in), int(mul_out), bias=False)
+                        torch.nn.init.kaiming_uniform_(lin.weight, a=math.sqrt(5))
+                        self.paths.append(lin)
+                        use_path_idx = path_idx
+                        path_idx += 1
+                    else:
+                        use_path_idx = -1
+
+                    self.instructions.append(
+                        _LinearInstruction(
+                            in_start=int(s_in.start),
+                            in_stop=int(s_in.stop),
+                            out_start=int(s_out.start),
+                            out_stop=int(s_out.stop),
+                            mul_in=int(mul_in),
+                            mul_out=int(mul_out),
+                            dim=dim,
+                            weight_start=w_start,
+                            weight_stop=w_stop,
+                            path_idx=use_path_idx,
+                        )
+                    )
+
+        if w_cursor != self.weight_numel:
+            raise RuntimeError("SO3_Linear: internal error building weight packing.")
+
+        # Bias: only for scalar outputs (l=0). We add bias on those flat slices.
         self.bias = None
-        self.bias_slice = None
+        self.bias_instructions = torch.jit.annotate(List[_BiasInstruction], [])
         if bias:
-            # The bias is a learnable parameter for each scalar output channel
-            scalar_out_irreps = o3.Irreps([ir for ir in self.out_irreps if ir.ir.l == 0])
-            if scalar_out_irreps.dim > 0:
-                self.bias_slice = self.out_irreps.slices()[0]
-                self.bias = torch.nn.Parameter(torch.zeros(scalar_out_irreps.dim))
+            b_cursor = 0
+            for (mul_out, ir_out), s_out in zip(self.out_irreps, out_slices):
+                if ir_out.l == 0:
+                    seg_len = int(s_out.stop - s_out.start)  # = mul_out * 1
+                    self.bias_instructions.append(
+                        _BiasInstruction(
+                            out_start=int(s_out.start),
+                            out_stop=int(s_out.stop),
+                            bias_start=b_cursor,
+                            bias_stop=b_cursor + seg_len,
+                        )
+                    )
+                    b_cursor += seg_len
+            if b_cursor > 0:
+                self.bias = torch.nn.Parameter(torch.zeros(b_cursor, dtype=torch.float32))
 
-    def init_path_weights(self, path: torch.nn.Linear):
-        # A simple but effective initialization
-        torch.nn.init.kaiming_uniform_(path.weight, a=math.sqrt(5))
+    def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if (not self.internal_weights) and (weights is None):
+            raise ValueError("SO3_Linear: internal_weights=False but no `weights` were provided.")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        '''
-        Forward pass for the SO3_Linear layer.
+        # Input format detection
+        x_is_flat = (x.ndim == 2)
+        if not x_is_flat:
+            if x.ndim != 3:
+                raise ValueError(f"SO3_Linear expects x.ndim in {{2,3}}, got {x.ndim}.")
+            if not self.in_has_common_mul:
+                raise ValueError(
+                    "SO3_Linear received channel-format input, but in_irreps does not have a common multiplicity."
+                )
+            if x.shape[1] != self.in_mul_common:
+                raise ValueError(f"SO3_Linear channel input has mul={x.shape[1]} but expected {self.in_mul_common}.")
 
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, in_irreps.dim).
+        B = int(x.shape[0])
+        out = x.new_zeros((B, self.out_dim))
 
-        Returns:
-            torch.Tensor: Output tensor of shape (batch_size, out_irreps.dim).
-        '''
-        # Create an output tensor of the correct shape, filled with zeros.
-        # We will add the results of each path to this tensor.
-        output = torch.zeros(x.shape[0], self.out_irreps.dim, device=x.device, dtype=x.dtype)
+        if self.internal_weights:
+            # One path per instruction
+            for i, path in enumerate(self.paths):
+                ins = self.instructions[i]
+                # Slice input
+                if x_is_flat:
+                    xin = x[:, ins.in_start:ins.in_stop].reshape(B, ins.mul_in, ins.dim)  # (B, mul_in, dim)
+                else:
+                    # Convert flat indices to per-mul feature indices
+                    start_per = ins.in_start // self.in_mul_common
+                    stop_per = ins.in_stop // self.in_mul_common
+                    xin = x[:, :, start_per:stop_per]  # (B, mul_in, dim)
 
-        for ins in self.instructions:
-            # 1. Slice the input to get the features for one irrep type
-            input_chunk = x[:, ins["in_slice"]]
+                # Apply multiplicity mixing
+                y = path(xin.transpose(1, 2)).transpose(1, 2)  # (B, mul_out, dim)
+                out[:, ins.out_start:ins.out_stop] += y.reshape(B, -1)
 
-            # 2. Reshape to separate multiplicity and irrep dimensions
-            # from (batch, mul_in * dim) -> (batch, mul_in, dim)
-            input_chunk = input_chunk.reshape(x.shape[0], -1, ins["dim"])
-            
-            # 3. Transpose for torch.nn.Linear, which expects features in the last dim
-            # from (batch, mul_in, dim) -> (batch, dim, mul_in)
-            input_chunk = input_chunk.transpose(1, 2)
+        else:
+            # External packed weights
+            w = weights
+            if w is None:
+                raise RuntimeError("SO3_Linear: unreachable weights is None in external branch.")
 
-            # 4. Apply the linear layer to the multiplicity channel
-            path = self.paths[ins["path_idx"]]
-            processed_chunk = path(input_chunk) # output: (batch, dim, mul_out)
+            if w.shape[-1] != self.weight_numel:
+                raise ValueError(f"SO3_Linear: expected weights[..., {self.weight_numel}], got {w.shape}.")
 
-            # 5. Transpose back
-            # from (batch, dim, mul_out) -> (batch, mul_out, dim)
-            processed_chunk = processed_chunk.transpose(1, 2)
+            for ins in self.instructions:
+                # Slice input
+                if x_is_flat:
+                    xin = x[:, ins.in_start:ins.in_stop].reshape(B, ins.mul_in, ins.dim)  # (B, mul_in, dim)
+                else:
+                    start_per = ins.in_start // self.in_mul_common
+                    stop_per = ins.in_stop // self.in_mul_common
+                    xin = x[:, :, start_per:stop_per]  # (B, mul_in, dim)
 
-            # 6. Reshape back to a flat feature vector
-            # from (batch, mul_out, dim) -> (batch, mul_out * dim)
-            processed_chunk = processed_chunk.reshape(x.shape[0], -1)
+                # Slice and reshape weights to (..., mul_out, mul_in)
+                w_chunk = w[..., ins.weight_start:ins.weight_stop].reshape(w.shape[:-1] + (ins.mul_out, ins.mul_in))
 
-            # 7. Add the result to the correct slice of the output tensor
-            output[:, ins["out_slice"]] += processed_chunk
-        
+                # Multiply: (B, dim, mul_in) @ (..., mul_in, mul_out) -> (B, dim, mul_out)
+                xin_t = xin.transpose(1, 2)  # (B, dim, mul_in)
+                y_t = torch.matmul(xin_t, w_chunk.transpose(-1, -2))  # broadcast over leading dims
+                y = y_t.transpose(1, 2)  # (B, mul_out, dim)
+
+                out[:, ins.out_start:ins.out_stop] += y.reshape(B, -1)
+
+        # Add scalar bias (flat)
         if self.bias is not None:
-            output[:, self.bias_slice] += self.bias
+            for bi in self.bias_instructions:
+                out[:, bi.out_start:bi.out_stop] += self.bias[bi.bias_start:bi.bias_stop]
 
-        return output
+        # Return in the most intuitive format: match input if possible.
+        if (not x_is_flat) and self.out_has_common_mul and self.out_mul_common > 0:
+            if self.out_dim % self.out_mul_common != 0:
+                return out
+            return out.reshape(B, self.out_mul_common, self.out_dim // self.out_mul_common)
 
-    def __repr__(self):
+        return out
+
+    def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(\n"
             f"  in_irreps='{self.in_irreps}',\n"
             f"  out_irreps='{self.out_irreps}',\n"
             f"  bias={self.bias is not None},\n"
+            f"  internal_weights={self.internal_weights},\n"
+            f"  weight_numel={self.weight_numel},\n"
             f"  num_paths={len(self.paths)}\n)"
         )
 
 
 @compile_mode("script")
 class SO3_LayerNorm(torch.nn.Module):
+    """
+    SO(3)/O(3)-aware layer normalization for an Irreps tensor with a **common multiplicity**.
+
+    Supported input formats:
+      - flat:    (B, irreps.dim)
+      - channel: (B, mul, irreps.dim // mul)
+
+    Output format matches input format (flat-in -> flat-out, channel-in -> channel-out).
+
+    Normalization options:
+      - 'norm':      uses sum over m of squared components (||·||^2) per l
+      - 'component': uses mean over m of squared components (component-wise)
+      - 'std':       like 'component' but additionally scales by 1/sqrt(#unique l) to stabilize depth
+
+    Bias:
+      - If bias=True, a learnable bias is added only to scalar (l=0) channels, per multiplicity and per scalar block.
+    """
+    __constants__ = ["mul", "feat_per_mul", "normalization", "n_unique_l", "irreps_dim"]
+
+    groups: List[_NormGroup]
+    scalar_bias_instructions: List[_BiasInstruction]
+
     def __init__(
-            self,
-            irreps: o3.Irreps,
-            bias: bool = True,
-            normalization: str = 'std',
-            eps: float = 1e-5,
-        ):
-        '''
-        Initializes the SO3_Linear layer.
+        self,
+        irreps: o3.Irreps,
+        bias: bool = True,
+        normalization: str = "std",
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        self.irreps = o3.Irreps(irreps)
+        self.irreps_dim = int(self.irreps.dim)
+        ok, mul = _has_common_mul(self.irreps)
+        if not ok:
+            raise ValueError(
+                "SO3_LayerNorm requires irreps with a common multiplicity (e.g. '16x0e+16x1o+...')."
+            )
+        self.mul = int(mul)
+        self.eps = float(eps)
 
-        Args:
-            irreps (o3.Irreps): Input irreducible representations.
-            bias (bool): Whether to include a bias term. Default is True.
-            normalization (Optional[str]): Normalization method, either 'norm', 'component' or 'std'. Default is std.
-            eps (float): A small value to avoid division by zero in normalization. Default is 1e-5.
+        if normalization not in ("norm", "component", "std"):
+            raise ValueError("normalization must be one of {'norm','component','std'}")
+        self.normalization = normalization
 
-        Attributes:
-            irreps (o3.Irreps): Stored input irreducible representations.
-            mul (int): Multiplicity of the irreducible representations.
-            bias (torch.nn.Parameter or None): Bias term if `bias` is True, else None.
-            params (torch.nn.ParameterDict): Dictionary of weight parameters for different l values.
-            l_dims_in (list): List of input dimensions for each l value.
-            l_dims_out (list): List of output dimensions for each l value.
+        if self.mul == 0:
+            self.feat_per_mul = 0
+            self.groups = torch.jit.annotate(List[_NormGroup], [])
+            self.scalar_bias_instructions = torch.jit.annotate(List[_BiasInstruction], [])
+            self.bias = None
+            self.n_unique_l = 0
+            return
 
-        Example Usage:
-            in_irreps = o3.Irreps('8x0e+8x0e+8x1o')
-            out_irreps = o3.Irreps('8x0e+8x1o+8x1o')
+        self.feat_per_mul = int(self.irreps_dim // self.mul)
+        if self.irreps_dim % self.mul != 0:
+            raise ValueError("Irreps dim is not divisible by multiplicity; cannot use channel format.")
 
-            so3_linear = SO3_Linear(
-                in_irreps=in_irreps,
-                out_irreps=out_irreps,
-                bias=True,
-                normalization='component'
+        # Build contiguous groups in the *given irreps order*.
+        slices = list(self.irreps.slices())
+        self.groups = torch.jit.annotate(List[_NormGroup], [])
+
+        # Determine unique l values (for std stabilization)
+        unique_ls = set([ir.ir.l for ir in self.irreps])
+        self.n_unique_l = int(len(unique_ls))
+
+        cur_l = -999
+        cur_start = 0
+        cur_stop = 0
+        cur_l_dim = 0
+        cur_n_blocks = 0
+
+        for (mul_i, ir_i), sl in zip(self.irreps, slices):
+            if int(mul_i) != self.mul:
+                raise ValueError("SO3_LayerNorm: expected common multiplicity across irreps entries.")
+            l = int(ir_i.l)
+            l_dim = int(ir_i.dim)
+            start_per = int(sl.start // self.mul)
+            stop_per = int(sl.stop // self.mul)
+            if (stop_per - start_per) != l_dim:
+                raise ValueError("SO3_LayerNorm: unexpected slice length; check irreps vs tensor layout.")
+
+            if cur_n_blocks == 0:
+                cur_l = l
+                cur_start = start_per
+                cur_stop = stop_per
+                cur_l_dim = l_dim
+                cur_n_blocks = 1
+            else:
+                # merge only if consecutive in layout and same l
+                if (l == cur_l) and (l_dim == cur_l_dim) and (start_per == cur_stop):
+                    cur_stop = stop_per
+                    cur_n_blocks += 1
+                else:
+                    self.groups.append(
+                        _NormGroup(
+                            start=cur_start,
+                            stop=cur_stop,
+                            l_dim=cur_l_dim,
+                            n_blocks=cur_n_blocks,
+                            is_scalar=(cur_l == 0),
+                        )
+                    )
+                    cur_l = l
+                    cur_start = start_per
+                    cur_stop = stop_per
+                    cur_l_dim = l_dim
+                    cur_n_blocks = 1
+
+        if cur_n_blocks > 0:
+            self.groups.append(
+                _NormGroup(
+                    start=cur_start,
+                    stop=cur_stop,
+                    l_dim=cur_l_dim,
+                    n_blocks=cur_n_blocks,
+                    is_scalar=(cur_l == 0),
+                )
             )
 
-            x = in_irreps.randn(10, -1).reshape(10, 8, -1)
-            output = so3_linear(x)
-        '''
-
-        super().__init__()
-        self.irreps = irreps
-        self.mul = irreps[0].mul
+        # Bias for scalar blocks: pack scalar per-mul features in the order encountered
         self.bias = None
+        self.scalar_bias_instructions = torch.jit.annotate(List[_BiasInstruction], [])
+        if bias:
+            b_cursor = 0
+            for g in self.groups:
+                if g.is_scalar:
+                    seg_len = int(g.stop - g.start)  # scalar: l_dim=1 => length == n_blocks
+                    self.scalar_bias_instructions.append(
+                        _BiasInstruction(
+                            out_start=g.start,
+                            out_stop=g.stop,
+                            bias_start=b_cursor,
+                            bias_stop=b_cursor + seg_len,
+                        )
+                    )
+                    b_cursor += seg_len
+            if b_cursor > 0:
+                # bias is stored in channel format: (mul, total_scalar_per_mul)
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul, b_cursor, dtype=torch.float32))
 
-        assert normalization in ['norm', 'component', 'std']
-        self.normalization = normalization
-        self.eps = eps
-
-        l_dims = []
-        lengths = []
-        l_dim0_list = []
-        rearrange_in_list  = []
-        rearrange_out_list = []
-
-        if self.normalization == 'std':
-            self.register_buffer('balance_degree_weight', torch.zeros(sum([(2*l+1) for l in set(irreps.ls)]), 1))
+        # For 'std', stabilize by 1/sqrt(#unique l). For others, no extra scaling.
+        if self.normalization == "std" and self.n_unique_l > 0:
+            self.l_scale = 1.0 / math.sqrt(float(self.n_unique_l))
         else:
-            self.balance_degree_weight = None
+            self.l_scale = 1.0
 
-        start = 0
-        for l in set(irreps.ls):
-            l_irr = [irr for irr in irreps if irr.ir.l == l]
-            assert all([irr.mul == self.mul for irr in l_irr])  # assert all have same multiplicity
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mul == 0:
+            return x
 
-            _l_dims = [2 * l + 1] * len(l_irr)
-            l_dims.append(_l_dims)
-            lengths.append(sum(_l_dims))
-            _l_dim0 = _l_dims[0]
-            l_dim0_list.append(_l_dim0)
+        x_is_flat = (x.ndim == 2)
+        if x_is_flat:
+            B, D = x.shape
+            if int(D) != self.irreps_dim:
+                raise ValueError(f"SO3_LayerNorm: expected last dim {self.irreps_dim}, got {D}.")
+            x_ch = x.reshape(B, self.mul, self.feat_per_mul)
+        else:
+            if x.ndim != 3:
+                raise ValueError(f"SO3_LayerNorm expects x.ndim in {{2,3}}, got {x.ndim}.")
+            B = int(x.shape[0])
+            if int(x.shape[1]) != self.mul:
+                raise ValueError(f"SO3_LayerNorm: expected mul={self.mul}, got {x.shape[1]}.")
+            if int(x.shape[2]) != self.feat_per_mul:
+                raise ValueError(f"SO3_LayerNorm: expected feat_per_mul={self.feat_per_mul}, got {x.shape[2]}.")
+            x_ch = x
 
-            rearrange_in_list.append( Rearrange('b m (i l) -> b l (m i)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
-            rearrange_out_list.append(Rearrange('b l (m i) -> b m (i l)', m=self.mul, l=_l_dim0, i=len(_l_dims)))
+        out = torch.empty_like(x_ch)
 
-            if self.normalization == 'std':
-                self.balance_degree_weight[start : (start + _l_dim0), :] = (1.0 / (_l_dim0 * len(set(irreps.ls))))
+        # Normalize each contiguous l-group independently (one scale per batch per group)
+        for g in self.groups:
+            # slice group: (B, mul, n_blocks*l_dim)
+            seg = x_ch[:, :, g.start:g.stop]
 
-            start += _l_dim0
+            # reshape -> (B, l_dim, C) with C = mul * n_blocks
+            seg4 = seg.reshape(B, self.mul, g.n_blocks, g.l_dim)      # (B, mul, n_blocks, l_dim)
+            seg4 = seg4.permute(0, 3, 1, 2)                           # (B, l_dim, mul, n_blocks)
+            feat = seg4.reshape(B, g.l_dim, self.mul * g.n_blocks)    # (B, l_dim, C)
 
-            if l == 0 and bias:
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul, len(l_irr)))
-
-        self.l_dims = l_dims
-        self.lengths            = tuple(lengths)
-        self.l_dim0_list        = tuple(l_dim0_list)
-        self.rearrange_in_list  = torch.nn.ModuleList(rearrange_in_list)
-        self.rearrange_out_list = torch.nn.ModuleList(rearrange_out_list)
-
-        self.l_dim_norm = 1.
-        if self.normalization == 'std':
-            self.l_dim_norm = 1. / math.sqrt(len(self.l_dims))
-
-
-    def forward(self, x: torch.Tensor):
-        '''
-        Forward pass for the SO3_Linear layer.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, mul, feature_dim).
-
-        Returns:
-            torch.Tensor: Output tensor after linear transformation and optional bias addition.
-        '''
-
-        orig_shape = x.shape
-        if len(orig_shape) == 2:
-            x = x.unsqueeze(-1)
-
-        out = []
-        start = 0
-        l_start = 0
-        for idx, (rearrange_in, rearrange_out) in enumerate(zip(self.rearrange_in_list, self.rearrange_out_list)):
-            _length, _l_dim0 = self.lengths[idx], self.l_dim0_list[idx]
-
-            feature = x.narrow(dim=-1, start=start, length=_length)
-            feature = rearrange_in(feature)
-
-            if self.normalization == 'norm':
-                feature_norm = feature.pow(2).sum(dim=1, keepdim=True)      # [N, 1, C]
-            elif self.normalization == 'component':
-                feature_norm = feature.pow(2).mean(dim=1, keepdim=True)     # [N, 1, C]
-            elif self.normalization == 'std':
-                feature_norm = feature.pow(2)                               # [N, (2 * l) + 1, C]
-                balance_degree_weight = self.balance_degree_weight.narrow(dim=0, start=l_start, length=_l_dim0)
-                feature_norm = torch.einsum('blc, la -> bac', feature_norm, balance_degree_weight) # [N, 1, C]
+            if self.normalization == "norm":
+                stat = feat.pow(2).sum(dim=1, keepdim=True)           # (B, 1, C)
             else:
-                raise Exception(f'Invalid normalization: {self.normalization}. Use one among [norm, component, std]')
+                stat = feat.pow(2).mean(dim=1, keepdim=True)          # (B, 1, C)
 
-            feature_norm = torch.mean(feature_norm, dim=2, keepdim=True)    # [N, 1, 1]
-            feature_norm = (feature_norm + self.eps).pow(-0.5) * self.l_dim_norm
-            feature = feature * feature_norm
+            # one scalar per batch per group
+            stat = stat.mean(dim=2, keepdim=True)                     # (B, 1, 1)
+            inv = (stat + self.eps).rsqrt() * self.l_scale
+            feat = feat * inv
 
-            feature = rearrange_out(feature)
+            # back: (B, l_dim, C) -> (B, mul, n_blocks*l_dim)
+            seg4 = feat.reshape(B, g.l_dim, self.mul, g.n_blocks).permute(0, 2, 3, 1)
+            out[:, :, g.start:g.stop] = seg4.reshape(B, self.mul, g.n_blocks * g.l_dim)
 
-            out.append(feature)
-            start += _length
-            l_start += _l_dim0
-
-        out = torch.cat(out, dim=-1)
+        # Add scalar bias (channel format) on scalar groups only
         if self.bias is not None:
-            out[..., :sum(self.l_dims[0])] += self.bias.unsqueeze(0)
+            for bi in self.scalar_bias_instructions:
+                out[:, :, bi.out_start:bi.out_stop] += self.bias[:, bi.bias_start:bi.bias_stop].unsqueeze(0)
 
-        if out.shape != orig_shape:
-            if len(orig_shape) == 2:
-                a, b = orig_shape
-                out = out.reshape(a, b)
-            else:
-                a, b, c = orig_shape
-                out = out.reshape(a, b, c)
+        if x_is_flat:
+            return out.reshape(B, self.irreps_dim)
         return out
 
-    def __repr__(self):
-        return f"{self.__class__.__name__}("     + \
-               f"irreps={self.irreps}, "         + \
-               f"bias={self.bias is not None}, " + \
-               f"norm={str(self.normalization)})"
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(irreps={self.irreps}, norm={self.normalization}, bias={self.bias is not None})"

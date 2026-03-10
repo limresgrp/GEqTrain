@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import re
 from typing import Union, List, Dict
 
@@ -37,14 +38,23 @@ class Loss:
         # The Loss class owns its own statistics tracker.
         self.loss_stat = LossStat(self)
 
-    def __call__(self, pred: dict, ref: dict, **kwargs):
+    def __call__(self, pred: dict, ref: dict, normalization_fields: dict = None, **kwargs):
         """Computes the total weighted loss and contributions from each component."""
+        if normalization_fields is None:
+            normalization_fields = {}
         total_loss = 0.0
         contributions = {}
         for key in self.keys:
             clean_key = self.remove_suffix(key)
             try:
-                loss_val = self.funcs[key](pred=pred, ref=ref, key=clean_key, mean=True, **kwargs)
+                loss_val = self.funcs[key](
+                    pred=pred,
+                    ref=ref,
+                    key=clean_key,
+                    mean=True,
+                    normalization_fields=normalization_fields,
+                    **kwargs,
+                )
                 contributions[key] = loss_val.detach()
                 total_loss += self.coeffs[key].to(loss_val.device) * loss_val
             except Exception as e:
@@ -69,26 +79,30 @@ class Loss:
         else:
             raise NotImplementedError(f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}")
 
-    def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = {}):
+    def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = None):
         key = self.suffix_key(key)
         self.keys.append(key)
         self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
 
+        func_params = {} if func_params is None else dict(func_params)
         instance = None
-        # 1. Try to instantiate as a standard torch.nn loss via the wrapper
-        try:
-            # The LossWrapper's __init__ will fail if `func` is not in `torch.nn`
-            instance = LossWrapper(func_name=func, params=func_params)
-        except NameError:
+        # 1. Check for a standard torch.nn loss without relying on exceptions.
+        torch_cls = getattr(torch.nn, func, None) if isinstance(func, str) else None
+        is_torch_loss = inspect.isclass(torch_cls) and issubclass(torch_cls, torch.nn.modules.loss._Loss)
+        if is_torch_loss:
+            instance = LossWrapper(func_name=func, params=dict(func_params))
+        else:
             # 2. If it's not a torch.nn loss, treat it as a custom one
-            try:
-                from . import _loss
-                # Try loading from our custom _loss.py module first
-                loss_class = getattr(_loss, func)
-            except Exception:
-                # If not found locally, assume it's a full path to a user's class
-                loss_class = _instantiate_from_path(func)
-            
+            if callable(func) and not isinstance(func, str):
+                loss_class = func
+            else:
+                try:
+                    from . import _loss
+                    # Try loading from our custom _loss.py module first
+                    loss_class = getattr(_loss, func)
+                except Exception:
+                    # If not found locally, assume it's a full path to a user's class
+                    loss_class = _instantiate_from_path(func)
             # Instantiate the custom class. We assume a constructor that accepts params.
             instance = loss_class(**func_params)
 

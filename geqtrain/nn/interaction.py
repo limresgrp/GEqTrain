@@ -1,710 +1,557 @@
 import math
-import functools
 import torch
-import wandb
+from dataclasses import dataclass
 
 from typing import Optional, List, Tuple, Union
-from geqtrain.utils._model_utils import process_out_irreps
+from geqtrain.utils._model_utils import build_concatenation_permutation, prepare_conditioning_tensors, process_out_irreps
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
 from einops.layers.torch import Rearrange
-
+from geqtrain.nn import SO3_Linear
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from geqtrain.data import AtomicDataDict
+from geqtrain.data import (
+    AtomicDataDict,
+    _NODE_FIELDS,
+    _EDGE_FIELDS,
+)
 from geqtrain.nn import (
     GraphModuleMixin,
     SO3_LayerNorm,
     ScalarMLPFunction,
 )
-from geqtrain.nn.allegro import (
-    Linear,
-    Contracter,
-    MakeWeightedChannels,
-)
-from geqtrain.utils.tp_utils import SCALAR, PSEUDO_SCALAR, complete_parities, tp_path_exists
-from geqtrain.nn.cutoffs import tanh_cutoff
-from geqtrain.nn._film import FiLMFunction
-
+from geqtrain.nn.allegro import Contracter
+from geqtrain.utils.so3 import split_irreps, tp_path_exists
+from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
-from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
-from geqtrain.nn.AdaLN import AdaLN
+from geqtrain.nn.mace.irreps_tools import reshape_irreps
 
-def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
-    if not torch.jit.is_scripting() and wandb.run is not None:
-        with torch.no_grad():  # optional, but just in case
-            s = "train" if train else "eval"
-            try:
-                wandb.log({
-                    f"activations_dists/{s}/{name}.mean": t.mean().item(),
-                    f"activations_dists/{s}/{name}.std":  t.std().item(),
-                })
-            except RuntimeError as e:
-                print(f"[WandB log error] Skipped logging {name}: {e}")
-
-
-def apply_residual_stream(skip_residual: bool, latents, new_latents, this_layer_update_coeff: Optional[torch.Tensor], active_edges):
-    if skip_residual:
-        return torch.index_add(latents, 0, active_edges, new_latents)
-
-    assert this_layer_update_coeff is not None
+def apply_residual_stream(
+    latents: torch.Tensor,
+    new_latents: torch.Tensor,
+    residual_update_coeff: Optional[torch.Tensor],
+) -> torch.Tensor:
+    if residual_update_coeff is None:
+        # This happens on the first layer, where the dimensions of `latents` (from initial edge attributes)
+        # and `new_latents` (from the first MLP) are different. We just take the new latents.
+        return new_latents
+    
     # At init, we assume new and old to be approximately uncorrelated
     # Thus their variances add
     # we always want the latent space to be normalized to variance = 1.0,
     # because it is critical for learnability. Still, we want to preserve
     # the _relative_ magnitudes of the current latent and the residual update
-    # to be controled by `this_layer_update_coeff`
+    # to be controled by `residual_update_coeff`
     # Solving the simple system for the two coefficients:
-    #   a^2 + b^2 = 1  (variances add)   &    a * this_layer_update_coeff = b
+    #   a^2 + b^2 = 1  (variances add)   &    a * residual_update_coeff = b
     # gives
-    #   a = 1 / sqrt(1 + this_layer_update_coeff^2)  &  b = this_layer_update_coeff / sqrt(1 + this_layer_update_coeff^2)
+    #   a = 1 / sqrt(1 + residual_update_coeff^2)  &  b = residual_update_coeff / sqrt(1 + residual_update_coeff^2)
     # rsqrt is reciprocal sqrt
-    coefficient_old = torch.rsqrt(this_layer_update_coeff.square() + 1)
-    coefficient_new = this_layer_update_coeff * coefficient_old
-    # Residual update
-    # Note that it only runs when there are latents to resnet with, so not at the first layer
-    # index_add adds only to the edges for which we have something to contribute
-    return torch.index_add(coefficient_old * latents, 0, active_edges, coefficient_new * new_latents)
+    coefficient_old = torch.rsqrt(residual_update_coeff.square() + 1)
+    coefficient_new = residual_update_coeff * coefficient_old
+    return coefficient_old * latents + coefficient_new * new_latents
+
+
+def build_tps_irreps_list(
+    num_layers: int,
+    tp_in_irreps: o3.Irreps,
+    tp_out_irreps: o3.Irreps,
+    tp_latent_irreps: o3.Irreps
+) -> Tuple[List[o3.Irreps], List[o3.Irreps]]:
+        """Pre-computes the irreps for each layer's tensor product."""
+        
+        # Build up the irreps for the iterated TPs layer by layer
+        tps_irreps = [tp_in_irreps]
+        arg_irreps = tp_in_irreps
+        for i in range(num_layers):
+            ir_out = tp_out_irreps if i == num_layers - 1 else tp_latent_irreps
+            # Prune impossible paths
+            ir_out = o3.Irreps([(mul, ir) for mul, ir in ir_out if tp_path_exists(arg_irreps, tp_latent_irreps, ir)])
+            arg_irreps = ir_out
+            tps_irreps.append(ir_out)
+            
+        # Prune unneeded paths backwards from the output
+        new_tps_irreps = [tps_irreps[-1]]
+        temp_out_irreps = tps_irreps[-1]
+        for current_arg_irreps in reversed(tps_irreps[:-1]):
+            new_arg_irreps = []
+            for mul, arg_ir in current_arg_irreps:
+                # Check if this irrep `arg_ir` can produce any of the irreps `temp_out_irreps`
+                # that we need for the next step in the backward pass.
+                if any(out_ir in arg_ir * env_ir for _, env_ir in tp_latent_irreps for _, out_ir in temp_out_irreps):
+                    new_arg_irreps.append((mul, arg_ir))
+            new_arg_irreps = o3.Irreps(new_arg_irreps)
+            new_tps_irreps.append(new_arg_irreps)
+            temp_out_irreps = new_arg_irreps
+        
+        tps_irreps = list(reversed(new_tps_irreps))
+        
+        return tps_irreps[:-1], tps_irreps[1:]
+
+
+@dataclass
+class InteractionLayerConfig:
+    """Configuration for an InteractionLayer."""
+    latent_module: torch.nn.Module
+    latent_module_kwargs: dict
+    latent_dim: int
+    eq_latent_multiplicity: int
+    use_attention: bool
+    attention_head_dim: int
+    use_mace_product: bool
+    product_correlation: int
+    tp_irreps_in: o3.Irreps
+    tp_irreps_out: o3.Irreps
+    equiv_latent_irreps: o3.Irreps
+    last_layer_equiv_latent_irreps: o3.Irreps
+    node_invariant_field: str
+    edge_conditioning_dim: int
+    is_last_layer: bool
+    irreps_in: dict
+    attention_logit_clip: float
+    use_equivariant_residual: bool
 
 
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
-    '''
-    ctor args: match yaml keys with keys in ctor kwargs
-    always outputs scalars
-    Nomenclature and dims:
-        "node_attrs"            [n_nodes, dim]      node_invariant_field            atom types (embedded?)
-        "edge_radial_attrs"     [n_edge, dim]       edge_invariant_field            radial embedding of displacement vectors BESSEL
-        "edge_angular_attrs"    [n_edge, dim]       edge_equivariant_field          angular embedding of displacement vectors SH
-        "edge_features"         [n_edge, dim]       out_field                       edge_features are the output of interaction block
-    '''
-    num_layers: int
-    edge_invariant_field: str
-    edge_equivariant_field: str
-    node_invariant_field: str
-    env_embed_multiplicity: int
-    out_field: str
-    
+    conditioning_fields: List[str]
+
     def __init__(
         self,
-        # required params
         num_layers: int,
-        r_max:      float,
-        # optional params
-        out_irreps: Optional[Union[o3.Irreps, str]] = None, #! out_irreps: if None: (yaml.latent_dim x lmax), else yaml.out_irreps
-        output_ls:  Optional[List[int]]             = None,
-        output_mul: Optional[Union[str, int]]       = None, #! 3 options: 1) None: don't change out_irreps mul, 2) 'hidden': mul=yaml.latent_dim, 3) int
-        # cutoffs
-        TanhCutoff_n: float = 6.,
-        # alias:
-        node_invariant_field   = AtomicDataDict.NODE_ATTRS_KEY,
-        node_equivariant_field = AtomicDataDict.NODE_EQ_ATTRS_KEY,
-        edge_invariant_field   = AtomicDataDict.EDGE_ATTRS_KEY,
-        edge_equivariant_field = AtomicDataDict.EDGE_EQ_ATTRS_KEY,
-        out_field              = AtomicDataDict.EDGE_FEATURES_KEY,
-        # hyperparams:
-        latent_dim:             int  = 64,
-        env_embed_multiplicity: int  = 64,
-        use_attention:          bool = False,
-        head_dim:               int  = 16,
-        use_mace_product:       bool = False,
-        product_correlation:    int  = 2,
-        parity:                 str  = 'so3',
-        # MLP parameters:
-        two_body_latent        = ScalarMLPFunction,
-        two_body_latent_kwargs = {},
-        env_embed              = ScalarMLPFunction,
-        env_embed_kwargs       = {},
-        latent                 = ScalarMLPFunction,
-        latent_kwargs          = {},
-        # Graph conditioning
-        graph_conditioning_field=AtomicDataDict.GRAPH_ATTRS_KEY,
-        # Other:
+        out_irreps: Optional[Union[o3.Irreps, str]] = None,
+        output_ls: Optional[List[int]] = None,
+        output_mul: Optional[Union[str, int]] = None,
+        node_invariant_field=AtomicDataDict.NODE_ATTRS_KEY,
+        node_equivariant_field=AtomicDataDict.NODE_EQ_ATTRS_KEY,
+        edge_invariant_field=AtomicDataDict.EDGE_ATTRS_KEY,
+        edge_equivariant_field=AtomicDataDict.EDGE_EQ_ATTRS_KEY,
+        edge_spharm_emb_field=AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
+        edge_radial_emb_field=AtomicDataDict.EDGE_RADIAL_EMB_KEY,
+        out_field=AtomicDataDict.EDGE_FEATURES_KEY,
+        latent_module=ScalarMLPFunction,
+        latent_module_kwargs: Optional[dict] = None,
+        latent_dim: int = 256,
+        eq_latent_multiplicity: int = 16,
+        use_attention: bool = False,
+        attention_head_dim: int = 64,
+        attention_logit_clip: float = 0.0,
+        use_mace_product: bool = False,
+        product_correlation: int = 2,
+        residual_update_max: float = 1.0,
+        use_equivariant_residual: bool = True,
+        conditioning_fields: Optional[List[str]] = None,
         irreps_in = None,
-        debug: bool = False,
-        learn_cutoff_bias: bool = True,
-        use_post_norm: bool = True,
     ):
         super().__init__()
-        assert (num_layers >= 1)
-        self.debug = debug
-        # save parameters
         self.num_layers             = num_layers
         self.node_invariant_field   = node_invariant_field
         self.node_equivariant_field = node_equivariant_field
+        self.edge_radial_emb_field  = edge_radial_emb_field
         self.edge_invariant_field   = edge_invariant_field
+        self.edge_spharm_emb_field  = edge_spharm_emb_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
-        self.env_embed_multiplicity = env_embed_multiplicity
-        self.latent_dim             = latent_dim
-        self.head_dim               = head_dim
-        self.isqrtd                 = math.isqrt(head_dim)
-        self.tanh_cutoff_n          = float(TanhCutoff_n)
-        self.learn_cutoff_bias      = learn_cutoff_bias
-        self.use_post_norm          = use_post_norm
-        # architectural choices
-        self.use_attention          = use_attention
-        self.use_mace_product       = use_mace_product
-        # set up irreps
-        self._init_irreps(irreps_in=irreps_in, required_irreps_in=[self.node_invariant_field, self.edge_invariant_field, self.edge_equivariant_field])
-        input_edge_eq_irreps = self.irreps_in[self.edge_equivariant_field]
-        # save dimensionalities
-        self.edge_invariant_dim = self.irreps_in[self.edge_invariant_field].num_irreps
-        self.edge_radial_emb_dim = self.irreps_in[AtomicDataDict.EDGE_RADIAL_EMB_KEY].num_irreps
-        # initialize scalar functions
-        two_body_latent = functools.partial(two_body_latent, **two_body_latent_kwargs)
-        latent          = functools.partial(latent,          **latent_kwargs)
-        env_embed       = functools.partial(env_embed,       **env_embed_kwargs)
-
-        env_embed_irreps     = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
-        edge_features_irreps = complete_parities(env_embed_irreps) if parity == "o3_full" else env_embed_irreps
-        assert (edge_features_irreps[0].ir == SCALAR) or (edge_features_irreps[0].ir == PSEUDO_SCALAR), "edge_features_irreps must start with scalars"
+        if latent_module_kwargs is None:
+            latent_module_kwargs = {"mlp_latent_dimensions": [128, 128], "mlp_nonlinearity": "silu"}
         
-        out_irreps, output_ls, output_mul = process_out_irreps(
+        self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
+        if residual_update_max <= 0.0:
+            raise ValueError("`residual_update_max` must be > 0.")
+        if attention_logit_clip < 0.0:
+            raise ValueError("`attention_logit_clip` must be >= 0.")
+        self.residual_update_max = float(residual_update_max)
+        self.attention_logit_clip = float(attention_logit_clip)
+        self.use_equivariant_residual = bool(use_equivariant_residual)
+        
+        # --- Irreps Initialization and Validation ---
+        required_irreps = [
+            self.node_invariant_field, self.edge_radial_emb_field,
+            self.edge_spharm_emb_field
+        ] + self.conditioning_fields
+        self._init_irreps(
+            required_irreps_in=required_irreps,
+            irreps_in=irreps_in,
+        )
+
+        # Initialize and validate all input fields
+        self._init_input_field('node_invariant_field', 'invariant')
+        self._init_input_field('node_equivariant_field', 'equivariant')
+        self._init_input_field('edge_invariant_field', 'invariant')
+        self._init_input_field('edge_equivariant_field', 'equivariant')
+
+        # Also init radial and spharm fields
+        self._init_input_field('edge_radial_emb_field', 'invariant')
+        self._init_input_field('edge_spharm_emb_field', 'equivariant')
+
+        # --- Conditioning Tensor Dimension Calculation ---
+        self.edge_conditioning_dim = 0
+        for field in self.conditioning_fields:
+            dim = self.irreps_in[field].dim
+            if field in _NODE_FIELDS:
+                self.edge_conditioning_dim += 2 * dim
+            elif field in _EDGE_FIELDS:
+                self.edge_conditioning_dim += dim
+
+        # --- Define network architecture based on final irreps ---
+        # 1. Build list of irreps for initial equivariant latent
+        eq_irreps_to_concat = [self.edge_spharm_emb_field_irreps]
+        if self.has_edge_equivariant_field_input:
+            eq_irreps_to_concat.append(self.edge_equivariant_field_irreps)
+        if self.has_node_equivariant_field_input:
+            eq_irreps_to_concat.append(self.node_equivariant_field_irreps) # for src
+            eq_irreps_to_concat.append(self.node_equivariant_field_irreps) # for target
+
+        permutation, initial_equiv_latent_irreps = build_concatenation_permutation(eq_irreps_to_concat)
+        self.register_buffer('eq_concat_permutation', permutation)
+
+        # The equivariant latent will have these irreps
+        equiv_latent_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in initial_equiv_latent_irreps])
+
+        # 2. Build list of dimensions for initial scalar features
+        initial_scalar_latent_dim = self.edge_radial_emb_field_irreps.dim
+        if self.has_edge_invariant_field_input: initial_scalar_latent_dim += self.edge_invariant_field_irreps.dim
+        if self.has_node_invariant_field_input: initial_scalar_latent_dim += 2 * self.node_invariant_field_irreps.dim
+
+        # Determine the final output irreps for the entire module
+        default_out_irreps = o3.Irreps([
+            (latent_dim, ir) if ir.l == 0 else (eq_latent_multiplicity, ir)
+            for _, ir in initial_equiv_latent_irreps]
+        )
+        final_out_irreps = process_out_irreps(
             out_irreps=out_irreps,
             output_ls=output_ls,
             output_mul=output_mul,
-            latent_dim=latent_dim,
-            edge_attrs_irreps=edge_features_irreps,
+            default_irreps=default_out_irreps,
+        )
+        # The tensor product takes the l>0 eq_latent and the l>=0 env_nodes
+        tp_recurrent_irreps = equiv_latent_irreps
+        tp_out_irreps = o3.Irreps([(eq_latent_multiplicity, ir) for _, ir in final_out_irreps])
+        # On last layer, the equiv_latent should be of only equivariant features, as scalar ones are not used and would be discarded
+        _, last_layer_equiv_latent_irreps = split_irreps(o3.Irreps([(mul, ir) for mul, ir in equiv_latent_irreps if ir in tp_out_irreps]))
+
+        tps_irreps_in, tps_irreps_out = build_tps_irreps_list(num_layers, tp_recurrent_irreps, tp_out_irreps, tp_recurrent_irreps)
+
+        # === Initial Latent Projection ===
+        # This MLP will take the initial scalar and equivariant features and project them
+        # into the initial latent space for the interaction layers.
+        self.initial_latent_generator = EquivariantScalarMLP(
+            in_irreps=(initial_scalar_latent_dim, initial_equiv_latent_irreps),
+            out_irreps=(latent_dim, equiv_latent_irreps),
+            latent_module=latent_module,
+            latent_kwargs=latent_module_kwargs,
+            equiv_linear_module=SO3_Linear,
+            output_shape_spec="channel_wise",
         )
 
-        self.out_multiplicity = output_mul
+        self._latent_resnet_update_params = torch.nn.Parameter(torch.full((self.num_layers - 1,), -4.0))
+        self.interaction_layers = torch.nn.ModuleList()
+        
+        for i in range(self.num_layers):
+            is_last_layer = (i == self.num_layers - 1)
 
-        # Initially, we have the B(r)Y(\vec{r})-projection of the edges (possibly embedded)
-        arg_irreps = env_embed_irreps
+            layer_config = InteractionLayerConfig(
+                latent_module = latent_module,
+                latent_module_kwargs = latent_module_kwargs,
+                latent_dim = latent_dim,
+                eq_latent_multiplicity = eq_latent_multiplicity,
+                use_attention = use_attention,
+                attention_head_dim = attention_head_dim,
+                use_mace_product = use_mace_product and not is_last_layer,
+                product_correlation = product_correlation,
+                tp_irreps_in = tps_irreps_in[i],
+                tp_irreps_out = tps_irreps_out[i],
+                equiv_latent_irreps = equiv_latent_irreps,
+                last_layer_equiv_latent_irreps = last_layer_equiv_latent_irreps,
+                irreps_in = self.irreps_in,
+                node_invariant_field = self.node_invariant_field,
+                is_last_layer = is_last_layer,
+                edge_conditioning_dim = self.edge_conditioning_dim,
+                attention_logit_clip = self.attention_logit_clip,
+                use_equivariant_residual = self.use_equivariant_residual,
+            )
 
-        # - begin irreps -
-        # start to build up the irreps for the iterated TPs
-        tps_irreps = [arg_irreps]
-        for layer_index in range(num_layers):
-            ir_out = edge_features_irreps
-            # Create higher order terms cause there are more TPs coming
-            if layer_index == self.num_layers - 1:
-                # No more TPs follow this, so only need ls that are present in out_irreps
-                ir_out = out_irreps
+            self.interaction_layers.append(InteractionLayer(layer_config))
 
-            # Prune impossible paths
-            ir_out = o3.Irreps([(mul, ir) for mul, ir in ir_out if tp_path_exists(arg_irreps, edge_features_irreps, ir)])
-            # the argument to the next tensor product is the output of this one
-            arg_irreps = ir_out
-            tps_irreps.append(ir_out)
-        # - end build irreps -
+        # Final projection to the desired output irreps
+        self.final_projection = EquivariantScalarMLP(
+            in_irreps=(latent_dim, last_layer_equiv_latent_irreps), # Input from the recurrent latent state
+            out_irreps=final_out_irreps, # Desired final output irreps
+            latent_module=latent_module,
+            latent_kwargs=latent_module_kwargs,
+            equiv_linear_module=SO3_Linear,
+            output_shape_spec="flat", # The out_field expects a single flat tensor
+            conditioning_dim=self.edge_conditioning_dim, # Pass edge conditioning to the final projection
+        )
 
-        # - Remove unneeded paths -
-        temp_out_irreps = tps_irreps[-1]
-        new_tps_irreps = [temp_out_irreps]
-        for arg_irreps in reversed(tps_irreps[:-1]):
-            new_arg_irreps = []
-            for mul, arg_ir in arg_irreps:
-                for _, env_ir in edge_features_irreps:
-                    if any(i in temp_out_irreps for i in arg_ir * env_ir):
-                        # arg_ir is useful: arg_ir * env_ir has a path to something we want
-                        new_arg_irreps.append((mul, arg_ir))
-                        # once its useful once, we keep it no matter what
-                        break
-            new_arg_irreps = o3.Irreps(new_arg_irreps)
-            new_tps_irreps.append(new_arg_irreps)
-            temp_out_irreps = new_arg_irreps
+        # The output field will contain the final equivariant features
+        self.irreps_out[self.out_field] = final_out_irreps
 
-        assert len(new_tps_irreps) == len(tps_irreps)
-        tps_irreps = list(reversed(new_tps_irreps))
-        del new_tps_irreps
-        assert tps_irreps[-1].lmax == out_irreps.lmax
-        tps_irreps_in = tps_irreps[:-1]
-        tps_irreps_out = tps_irreps[1:]
-        del tps_irreps
-
-        # Environment builder:
-        env_weighter = MakeWeightedChannels(irreps_in=input_edge_eq_irreps, multiplicity_out=self.env_embed_multiplicity)
-
-        # - Layer resnet update weights - #
-        # We initialize to zeros, which under the sigmoid() become 0.5
-        # so 1/2 * layer_1 + 1/4 * layer_2 + ...
-        # note that the sigmoid of these are the factor _between_ layers
-        # so the first entry is the ratio for the latent resnet of the first and second layers, etc.
-        # e.g. if there are 3 layers, there are 2 ratios: l1:l2, l2:l3
-        self._latent_resnet_update_params = torch.nn.Parameter(torch.zeros(self.num_layers, dtype=torch.float32))
-        self.register_buffer("per_layer_cutoffs", torch.full((num_layers + 1,), r_max))
-        self.register_buffer("_zero", torch.as_tensor(0.0))
-
-        # - Start Interaction Layers - #
-        self.interaction_layers = torch.nn.ModuleList([])
-        self._tp_n_scalar_outs: List[int] = []
-
+    def _init_input_field(self, field_name: str, field_type: str):
         """
-        input_edge_eq_irreps: 1x0e+1x1o+1x2e [+ input_eq_feats]
-        env_embed_irreps:     8x0e+8x1o+8x2e [+ input_eq_feats with mul 8]
-        edge_features_irreps: 8x0o+8x0e+8x1o+8x1e+8x2o+8x2e (env_embed_irreps with complete parity)
+        Initializes and validates an input field from `irreps_in`.
+        Sets `self.has_<field_name>_input` and `self.<field_name>_irreps`.
         """
+        field_key = getattr(self, field_name)
+        has_input_attr = f"has_{field_name}_input"
+        irreps_attr = f"{field_name}_irreps"
 
-        for layer_index, tps_irreps in enumerate(zip(tps_irreps_in, tps_irreps_out)):
-            is_last_layer = layer_index == self.num_layers - 1
-            linear_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0]) if is_last_layer else edge_features_irreps
-
-            self.interaction_layers.append(
-                InteractionLayer(
-                    layer_index=layer_index,
-                    is_last_layer=is_last_layer,
-                    parent=self,
-                    tps_irreps=tps_irreps,
-                    input_edge_eq_irreps=input_edge_eq_irreps,
-                    env_embed_irreps=env_embed_irreps,
-                    linear_out_irreps=linear_out_irreps,
-                    product_correlation=product_correlation,
-                    previous_latent_dim=self.interaction_layers[-1].latent_mlp.out_features if layer_index > 0 else None,
-                    graph_conditioning_field=graph_conditioning_field,
-                    env_weighter=env_weighter,
-                    two_body_latent=two_body_latent,
-                    latent=latent,
-                    env_embed=env_embed,
-                )
-            )
-
-        if linear_out_irreps:
-            self.last_eq_norm = SO3_LayerNorm(linear_out_irreps)
-
-        # - End Interaction Layers - #
-
-        # Equivariant out features
-        self.reshape_back_features = inverse_reshape_irreps(out_irreps)
-        self.has_scalar_output = False
-        self.final_latent_mlp, self.final_readout_mlp, self.post_norm = None, None, None
-        self.out_n_scalars = (out_irreps.count(SCALAR) + out_irreps.count(PSEUDO_SCALAR)) // self.out_multiplicity
-        if self.out_n_scalars > 0:
-            self.has_scalar_output = True
-            # Invariant out features
-            self.final_latent_mlp = latent(
-                # embedded latent invariants from the previous layer(s) + invariants extracted from the last layer's TP
-                mlp_input_dimension=(self.latent_dim + self.env_embed_multiplicity * self._tp_n_scalar_outs[layer_index]),
-                mlp_output_dimension=self.latent_dim,
-            )
-
-            self.final_readout_mlp = latent(
-                mlp_input_dimension=self.latent_dim,
-                mlp_output_dimension=self.out_multiplicity * self.out_n_scalars,
-            )
-
-            self.rbf_embedder = None
-            if self.learn_cutoff_bias:
-                self.rbf_embedder = AdaLN(self.latent_dim, self.edge_radial_emb_dim)
-            self.post_norm = None
-            if self.use_post_norm:
-                self.post_norm = torch.nn.LayerNorm(self.final_latent_mlp.out_features)
-
-        # - End build modules - #
-        out_feat_elems = (irr.ir.dim for irr in out_irreps)
-        self.out_feat_elems = sum(out_feat_elems)
-        self.out_irreps = out_irreps
-        self.irreps_out.update({self.out_field: self.out_irreps})
+        if field_key is not None and field_key in self.irreps_in:
+            irreps = self.irreps_in[field_key]
+            if irreps.dim > 0:
+                if field_type == 'invariant':
+                    if not all(ir.l == 0 for _, ir in irreps):
+                        raise ValueError(f"Field '{field_key}' is specified as invariant but contains non-scalar irreps: {irreps}")
+                    setattr(self, has_input_attr, True)
+                    setattr(self, irreps_attr, irreps)
+                    return
+                elif field_type == 'equivariant':
+                    setattr(self, has_input_attr, True)
+                    setattr(self, irreps_attr, irreps)
+                    return
+                else:
+                    raise ValueError(f"Invalid field_type '{field_type}'")
+        # Field is not present or not specified
+        setattr(self, has_input_attr, False)
+        setattr(self, irreps_attr, o3.Irreps(""))
 
     def forward(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        edge_center       = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        edge_neigh        = data[AtomicDataDict.EDGE_INDEX_KEY][0]
-        edge_length       = data[AtomicDataDict.EDGE_LENGTH_KEY]
-        edge_equivariants = data[self.edge_equivariant_field]
-        edge_invariants   = data[self.edge_invariant_field]
-        node_invariants   = data[self.node_invariant_field]
-        num_edges         = edge_invariants.shape[0]
-        num_nodes         = node_invariants.shape[0]
+        layer_update_coefficients = self._latent_resnet_update_params.sigmoid() * self.residual_update_max
 
-        # Initialize state
-        latents      = torch.zeros((num_edges, self.latent_dim), dtype=torch.float32, device=edge_center.device)
-        eq_features  = None
-        active_edges = torch.arange(num_edges,device=edge_center.device)
-        out_features = torch.zeros((num_edges, self.out_multiplicity, self.out_feat_elems), dtype=torch.float32, device=edge_center.device)
+        # === 1. Prepare Initial Scalar and Equivariant Latents ===
+        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        edge_dst = data[AtomicDataDict.EDGE_INDEX_KEY][1]
+
+        # Build initial scalar latent
+        scalar_input_parts = [data[self.edge_radial_emb_field]]
+        if self.has_edge_invariant_field_input:
+            scalar_input_parts.append(data[self.edge_invariant_field])
+        if self.has_node_invariant_field_input:
+            node_invariants = data[self.node_invariant_field]
+            scalar_input_parts.append(node_invariants[edge_src])
+            scalar_input_parts.append(node_invariants[edge_dst])
+        initial_scalar_latent = torch.cat(scalar_input_parts, dim=-1)
+
+        # Build initial equivariant latent
+        equiv_input_parts = [data[self.edge_spharm_emb_field]]
+        if self.has_edge_equivariant_field_input:
+            equiv_input_parts.append(data[self.edge_equivariant_field])
+        if self.has_node_equivariant_field_input:
+            node_equivariants = data[self.node_equivariant_field]
+            equiv_input_parts.append(node_equivariants[edge_src])
+            equiv_input_parts.append(node_equivariants[edge_dst])
         
-        # Update edge_invariants with center-neighbor node_attrs
-        edge_invariants = torch.cat([node_invariants[edge_center], node_invariants[edge_neigh], edge_invariants], dim=-1)            
-        
-        # Compute the sigmoids vectorized instead of each loop
-        layer_update_coefficients = self._latent_resnet_update_params.sigmoid()
-        # Vectorized precompute per layer cutoffs
-        cutoff_coeffs_all = tanh_cutoff(edge_length, self.per_layer_cutoffs, n=self.tanh_cutoff_n)
+        initial_equiv_latent = torch.cat(equiv_input_parts, dim=-1)
+        if self.eq_concat_permutation is not None:
+            initial_equiv_latent = initial_equiv_latent[:, self.eq_concat_permutation]
 
-        for layer_index, layer in enumerate(self.interaction_layers):
-            cutoff_coeffs = cutoff_coeffs_all[layer_index]
-            latents, edge_invariants, eq_features = layer(
-                data=data,
-                num_nodes=num_nodes,
-                cutoff_coeffs=cutoff_coeffs,
-                node_invariants=node_invariants,
-                edge_invariants=edge_invariants,
-                edge_equivariants=edge_equivariants,
-                active_edges=active_edges,
-                latents=latents,
-                eq_features=eq_features,
-                edge_center=edge_center,
-                this_layer_update_coeff=layer_update_coefficients[layer_index - 1] if layer_index > 0 else None,
-            )
+        # === 2. Generate Initial Latent State ===
+        init_out = self.initial_latent_generator(
+            (initial_scalar_latent, initial_equiv_latent),
+        )
+        if torch.jit.isinstance(init_out, Tuple[torch.Tensor, torch.Tensor]):
+            scalar_state, equiv_state = init_out
+        else:
+            raise RuntimeError("initial_latent_generator must return scalar and equivariant tensors.")
 
-        # --- final layer --- #
+        # Prepare conditioning tensors for interaction layers
+        _, edge_conditioning = prepare_conditioning_tensors(
+            data=data,
+            conditioning_fields=self.conditioning_fields,
+        )
 
-        # - Output equivariant values - #
-        if eq_features is not None:
-            eq_features = self.last_eq_norm(eq_features)
-            out_features[..., self.out_n_scalars:] = eq_features
+        scalar_state, equiv_state = self._run_interaction_stack(
+            data=data,
+            scalar_state=scalar_state,
+            equiv_state=equiv_state,
+            edge_conditioning=edge_conditioning,
+            layer_update_coefficients=layer_update_coefficients,
+        )
 
-        out_features = self.reshape_back_features(out_features)
-
-        # - Output invariant values - #
-        if self.has_scalar_output:
-            # update latents
-            new_latents = self.final_latent_mlp(edge_invariants)
-
-            # apply cutoff bias
-            if self.learn_cutoff_bias:
-                assert self.rbf_embedder is not None
-                new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
-            else:
-                cutoff_coeffs = cutoff_coeffs_all[layer_index + 1]
-                half = new_latents.size(1) // 2
-                new_latents = torch.cat([
-                    new_latents[:, :half] * cutoff_coeffs.unsqueeze(-1),
-                    new_latents[:, half:]
-                ], dim=1)
-
-            if self.use_post_norm:
-                assert self.post_norm is not None
-                new_latents = self.post_norm(new_latents)
-            latents = apply_residual_stream(False, latents, new_latents, layer_update_coefficients[layer_index], active_edges)
-
-            # last update on residued features
-            latents = self.final_readout_mlp(latents)
-            out_features[..., :self.out_multiplicity * self.out_n_scalars] = latents
-
-        data[self.out_field] = out_features
-        if self.debug and wandb.run is not None:
-          log_feature_on_wandb(f"{str(self)}.out_features.scalar", latents, self.training)
-          if eq_features is not None: log_feature_on_wandb(f"{self.name}.out_features.vectorial", eq_features, self.training)
+        final_out = self.final_projection((scalar_state, equiv_state))
+        if torch.jit.isinstance(final_out, torch.Tensor):
+            data[self.out_field] = final_out
+        else:
+            raise RuntimeError("final_projection must return a Tensor.")
         return data
+
+    def _run_interaction_stack(
+        self,
+        data: AtomicDataDict.Type,
+        scalar_state: torch.Tensor,
+        equiv_state: Optional[torch.Tensor],
+        edge_conditioning: Optional[torch.Tensor],
+        layer_update_coefficients: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        s = scalar_state
+        e = equiv_state
+        for i, layer in enumerate(self.interaction_layers):
+            residual_update_coeff = layer_update_coefficients[i - 1] if i > 0 else None
+            s, e = layer(
+                data=data,
+                scalar_state=s,
+                equiv_state=e,
+                edge_conditioning=edge_conditioning,
+                residual_update_coeff=residual_update_coeff,
+            )
+        return s, e
 
 
 @compile_mode("script")
 class InteractionLayer(torch.nn.Module):
+    """
+    Refactored InteractionLayer.
+    - Decoupled from InteractionModule; all dependencies are injected.
+    - `__init__` is streamlined and groups related module constructions.
+    - Forward pass is clarified and returns the correct signature.
+    """
+    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product", "attention_logit_clip", "use_equivariant_residual"]
     def __init__(
-        self,
-        layer_index: int,
-        is_last_layer: bool,
-        parent: InteractionModule,
-        tps_irreps: Tuple[o3.Irreps],
-        input_edge_eq_irreps: o3.Irreps,
-        env_embed_irreps: o3.Irreps,
-        linear_out_irreps: o3.Irreps,
-        product_correlation: int,
-        previous_latent_dim: Optional[int],
-        graph_conditioning_field: str,
-        env_weighter: MakeWeightedChannels,
-        two_body_latent: torch.nn.Module, # constructor func
-        latent: torch.nn.Module,
-        env_embed: torch.nn.Module,
-    ) -> None:
+        self, config: InteractionLayerConfig
+    ):
         super().__init__()
-        #! cannot store self.parent = parent due to nn recursive loops
-        self.debug                  = parent.debug
-        self.layer_index            = layer_index
-        self.is_last_layer          = is_last_layer
-        self.env_embed_multiplicity = parent.env_embed_multiplicity
-        self.latent_dim             = parent.latent_dim
-        self.head_dim               = parent.head_dim
-        self.isqrtd                 = math.isqrt(self.head_dim)
-        self.use_attention          = parent.use_attention
-        self.use_mace_product       = parent.use_mace_product
-        self.learn_cutoff_bias      = parent.learn_cutoff_bias
-        self.use_post_norm          = parent.use_post_norm
-        self.edge_invariant_dim     = parent.edge_invariant_dim
-        self.edge_radial_emb_dim    = parent.edge_radial_emb_dim
+        self.node_invariant_field = config.node_invariant_field
+        self.use_attention = config.use_attention
+        self.use_mace_product = config.use_mace_product
+        self.attention_logit_clip = float(config.attention_logit_clip)
+        self.use_equivariant_residual = bool(config.use_equivariant_residual)
 
-        emb_latent_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in env_embed_irreps if ir in input_edge_eq_irreps])
+        # === Define dimensions and irreps ===
+        node_inv_dim = config.irreps_in[config.node_invariant_field].dim
+        
+        edge_mlp_kwargs = {
+            "conditioning_dim": config.edge_conditioning_dim,
+            'latent_kwargs': config.latent_module_kwargs
+        }
 
-        # Make the env embed linear, which mixes eq. feats after edges scatter over nodes
-        self.env_norm = SO3_LayerNorm(env_embed_irreps)
-        self.env_linear = Linear(
-            env_embed_irreps,
-            env_embed_irreps,
-            internal_weights=True,
-            shared_weights=True,
+        # === Environment embedding modules ===
+        self.env_embed_mlp = EquivariantScalarMLP(
+            in_irreps=(config.latent_dim, config.equiv_latent_irreps),
+            out_irreps=config.equiv_latent_irreps,
+            **edge_mlp_kwargs
         )
+        self.node_env_norm = SO3_LayerNorm(config.equiv_latent_irreps)
 
-        self.product, self.reshape_in_module = None, None
-        if self.use_mace_product:
-            # Perform eq. Atomic Cluster Expansion
-            self.product = EquivariantProductBasisBlock(
-                node_feats_irreps=env_embed_irreps,
-                target_irreps=env_embed_irreps,
-                correlation=product_correlation,
-                num_elements=parent.irreps_in[parent.node_invariant_field].num_irreps,
-            )
-
-            # Reshape back product so that you can perform tp: n m d -> n (m d)
-            self.reshape_in_module = reshape_irreps(env_embed_irreps)
-
-        # Make TP
-        l_arg_irreps, l_out_irreps = tps_irreps
-        tmp_i_out = 0
-        tp_n_scalar_outs = 0
-        instr = []
-        full_out_irreps = []
-        for i_out, (_, ir_out) in enumerate(l_out_irreps):
-            for i_1, (_, ir_1) in enumerate(l_arg_irreps):
-                for i_2, (mul, ir_2) in enumerate(env_embed_irreps):
-                    if ir_out in ir_1 * ir_2: # checks if this L can be obtained via tp between the 2 considered irreps
-                        if ir_out == SCALAR or ir_out == PSEUDO_SCALAR:
-                            tp_n_scalar_outs += 1 # count number of scalars
-                        instr.append((i_1, i_2, tmp_i_out))
-                        full_out_irreps.append((mul, ir_out))
-                        tmp_i_out += 1
-        parent._tp_n_scalar_outs.append(tp_n_scalar_outs)
-        full_out_irreps = o3.Irreps(full_out_irreps)
-        assert all(ir == SCALAR or ir == PSEUDO_SCALAR for _, ir in full_out_irreps[:tp_n_scalar_outs])
-
-        # Build tensor product between env-aware node feats and edge attrs
-        eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in l_arg_irreps])
-        self.eq_features_irreps_norm = SO3_LayerNorm(eq_features_irreps)
-
-        self.tp = Contracter(
-            irreps_in1=eq_features_irreps,
-            irreps_in2=env_embed_irreps,
-            irreps_out=full_out_irreps,
-            instructions=instr,
-            connection_mode=("uuu"),
-            shared_weights=False,
-            has_weight=False,
-            normalization='component', # 'norm' or 'component'
-        )
-        self.tp_norm = SO3_LayerNorm(o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in full_out_irreps]))
-        self.rearrange_scalars = Rearrange('e m s -> e (m s)')
-
-        # Make env embed mlp
-        generate_n_weights = (env_weighter.weight_numel)  # the weight for the edge embedding
-        generate_n_weights += self.env_embed_multiplicity # + the weights for the edge attention
-
-        if self.layer_index == 0:
-            # also need weights to embed the edge itself
-            # this is because the 2 body latent is mixed in with the first layer
-            # in terms of code
-            generate_n_weights += env_weighter.weight_numel
-
-        # FiLM layer for conditioning on graph input features
-        self.film = None
-        self.graph_conditioning_field = graph_conditioning_field
-        if self.graph_conditioning_field in parent.irreps_in:
-            self.film = FiLMFunction(
-                mlp_input_dimension=parent.irreps_in[self.graph_conditioning_field].dim,
+        # === Attention modules ===
+        self.node_attr_to_query = None
+        self.latent_to_key = None
+        if config.use_attention:
+            self.inv_sqrtd = 1. / math.sqrt(config.attention_head_dim)
+            self.node_attr_to_query = config.latent_module(node_inv_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            self.latent_to_key = config.latent_module(config.latent_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            self.rearrange_qk = Rearrange('e (m d) -> e m d', m=config.eq_latent_multiplicity, d=config.attention_head_dim)
+        
+        # === MACE product modules ===
+        self.node_inv_to_product_mlp = None
+        self.reshape_in_module = None
+        if config.use_mace_product:
+            # Project node invariants to match the multiplicity of the equivariant features
+            self.node_inv_to_product_mlp = config.latent_module(
+                mlp_input_dimension=node_inv_dim,
                 mlp_latent_dimensions=[],
-                mlp_output_dimension=generate_n_weights,
-                mlp_nonlinearity=None,
+                mlp_output_dimension=config.eq_latent_multiplicity
             )
 
-        self.linear = Linear(
-            irreps_in=o3.Irreps([(mul, ir) for mul, ir in full_out_irreps if ir.l in linear_out_irreps.ls]),
-            irreps_out=linear_out_irreps,
-            internal_weights=True,
-            shared_weights=True,
-        ) if len(set(linear_out_irreps.ls)) > 0 else None
-        self.latest_linear_out_irreps = linear_out_irreps
+            self.product = EquivariantProductBasisBlock(
+                node_feats_irreps=config.equiv_latent_irreps,
+                target_irreps=config.equiv_latent_irreps,
+                correlation=config.product_correlation,
+                num_elements=node_inv_dim,
+            )
+            self.reshape_in_module = reshape_irreps(config.equiv_latent_irreps)
 
-        node_invariants_dim = parent.irreps_in[parent.node_invariant_field].num_irreps
-        edge_invariants_dim_0 = 2*node_invariants_dim + parent.irreps_in[parent.edge_invariant_field].num_irreps
-        edge_invariants_dim = self.latent_dim + self.env_embed_multiplicity * parent._tp_n_scalar_outs[self.layer_index - 1]
-        if self.layer_index == 0:
-            input_eq_features_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
-            self.eq_features_linear = Linear(
-                irreps_in=input_eq_features_irreps,
-                irreps_out=env_embed_irreps,
-                internal_weights=True,
-                shared_weights=True,
-            )
-            assert previous_latent_dim is None
-            # at the first layer, we have no invariants from previous TPs
-            self.latent_mlp = two_body_latent(
-                mlp_input_dimension=edge_invariants_dim_0,
-                mlp_output_dimension=self.latent_dim,
-            )
-        else:
-            self.eq_features_linear = None
-            assert previous_latent_dim is not None
-            self.latent_dim = previous_latent_dim
-            # the embedded latent invariants from the previous layer(s)
-            # and the invariants extracted from the last layer's TP:
-            
-            self.latent_mlp = latent(
-                mlp_input_dimension=edge_invariants_dim,
-                mlp_output_dimension=self.latent_dim,
-            )
-
-        input_embed_irreps = o3.Irreps([(self.env_embed_multiplicity, ir) for _, ir in input_edge_eq_irreps])
-        self.emb_latent_linear = Linear(
-            irreps_in=input_embed_irreps,
-            irreps_out=emb_latent_irreps,
-            internal_weights=True,
-            shared_weights=True,
+        # === Tensor Product modules ===
+        # Build the tensor product for this layer
+        # The output of the TP will be projected to the new scalar and equivariant latents.
+        instr = []
+        full_out_irreps_list: List[Tuple[int, o3.Irrep]] = []
+        i_out_running = 0
+        for _, ir_out in config.tp_irreps_out:
+            for i_1, (_, ir_1) in enumerate(config.tp_irreps_in): # this is eq_latent (l>0)
+                for i_2, (mul, ir_2) in enumerate(config.equiv_latent_irreps): # this is env_nodes (l>=0)
+                    if ir_out in ir_1 * ir_2:
+                        instr.append((i_1, i_2, i_out_running))
+                        full_out_irreps_list.append((mul, ir_out))
+                        i_out_running += 1
+        tp_out_irreps = o3.Irreps(full_out_irreps_list)
+        self.tp = Contracter(
+            irreps_in1=config.tp_irreps_in, irreps_in2=config.equiv_latent_irreps, irreps_out=tp_out_irreps,
+            instructions=instr, connection_mode="uuu", shared_weights=False, has_weight=False, normalization='component',
         )
+        self.tp_norm = SO3_LayerNorm(tp_out_irreps)
 
-        # the env embed MLP takes the last latent's output as input and outputs enough weights for the env embedder
-        self.env_embed_mlp = env_embed(
-          mlp_input_dimension=self.latent_dim,
-          mlp_output_dimension=generate_n_weights,
+        # === Final Scalar+Equivariant Projection === #
+        self.projection = EquivariantScalarMLP(
+            in_irreps=tp_out_irreps,
+            out_irreps=(config.latent_dim, config.last_layer_equiv_latent_irreps if config.is_last_layer else config.equiv_latent_irreps),
+            output_shape_spec="flat" if config.is_last_layer else "channel_wise", # Only flatten if it's the very last layer output
+            **edge_mlp_kwargs
         )
-
-        # Take the node attrs and obtain a query matrix
-        self.edge_attr_to_query = ScalarMLPFunction(
-            mlp_input_dimension=edge_invariants_dim_0 if self.layer_index==0 else edge_invariants_dim,
-            mlp_latent_dimensions = [],
-            mlp_output_dimension=self.env_embed_multiplicity * self.head_dim,
-            mlp_nonlinearity = None,
-            use_layer_norm=False,
-            zero_init_last_layer_weights= True,
-        ) if self.use_attention else None
-
-        # Take the node attrs and obtain a query matrix
-        self.latent_to_key = ScalarMLPFunction(
-            mlp_input_dimension = self.latent_dim,
-            mlp_latent_dimensions = [],
-            mlp_output_dimension = self.env_embed_multiplicity * self.head_dim,
-            mlp_nonlinearity = None,
-            use_layer_norm=False,
-            zero_init_last_layer_weights = True,
-        ) if self.use_attention else None
-
-        self.rearrange_qk = Rearrange('e (m d) -> e m d', m=self.env_embed_multiplicity, d=self.head_dim) if self.use_attention else None
-        self._env_weighter = env_weighter
-        self.tp_n_scalar_out = parent._tp_n_scalar_outs[self.layer_index]
-
-        self.rbf_embedder = None
-        if self.learn_cutoff_bias:
-            self.rbf_embedder = AdaLN(self.latent_dim, self.edge_radial_emb_dim)
-        self.post_norm = None
-        if self.use_post_norm:
-            self.post_norm = torch.nn.LayerNorm(self.latent_dim)
-
-    def apply_attention(self, edge_invariants, edge_center, latents, emb_latent) -> torch.Tensor:
-
-        # Asserts needed for JIT
-        assert self.edge_attr_to_query is not None
-        assert self.latent_to_key is not None
-        assert self.rearrange_qk is not None
-
-        Q = self.edge_attr_to_query(edge_invariants)
-        Q = self.rearrange_qk(Q)
-
-        K = self.latent_to_key(latents)
-        K = self.rearrange_qk(K)
-
-        W = torch.einsum('emd,emd -> em', Q, K) * self.isqrtd
-        # updated emb_latent
-        return torch.einsum('emd,em->emd', emb_latent, scatter_softmax(W, edge_center, dim=0))
-
-    def apply_mace(self, local_env_per_active_atom, node_invariants, active_node_centers) -> torch.Tensor:
-        # Asserts needed for JIT
-        assert self.product is not None
-        assert self.reshape_in_module is not None
-        expanded_features_per_active_atom: torch.Tensor = self.product(
-            node_feats=local_env_per_active_atom,
-            node_attrs=node_invariants[active_node_centers],
-            sc=None,
-        )
-        # updated local_env_per_active_atom
-        return self.reshape_in_module(expanded_features_per_active_atom)
-
+        
     def forward(
         self,
         data: AtomicDataDict.Type,
-        num_nodes: int,
-        cutoff_coeffs: torch.Tensor,
-        node_invariants: torch.Tensor,
-        edge_invariants: torch.Tensor,
-        edge_equivariants: torch.Tensor,
-        active_edges: torch.Tensor,
-        latents: torch.Tensor,
-        eq_features: Optional[torch.Tensor],
-        edge_center: torch.Tensor,
-        this_layer_update_coeff: Optional[torch.Tensor],
-    ):
-        new_latents = self.latent_mlp(edge_invariants)
-        # Apply cutoff, which propagates through to everything else
-        if self.learn_cutoff_bias:
-            assert self.rbf_embedder is not None
-            new_latents = self.rbf_embedder(new_latents, data[AtomicDataDict.EDGE_RADIAL_EMB_KEY])
+        scalar_state: torch.Tensor,
+        equiv_state: Optional[torch.Tensor],
+        edge_conditioning: Optional[torch.Tensor],
+        residual_update_coeff: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        
+        # === Prepare inputs ===
+        node_attrs = data[self.node_invariant_field]
+        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        num_nodes = node_attrs.shape[0]
+        if equiv_state is None:
+            raise RuntimeError("InteractionLayer expected an equivariant latent tensor but received None.")
+        equiv_state_tensor = equiv_state
+
+        # === 1. Build local environment embedding ===
+        env_edges_raw = self.env_embed_mlp((scalar_state, equiv_state_tensor))
+        if torch.jit.isinstance(env_edges_raw, torch.Tensor):
+            env_edges = env_edges_raw
         else:
-            half = new_latents.size(1) // 2
-            new_latents = torch.cat([
-                new_latents[:, :half] * cutoff_coeffs.unsqueeze(-1),
-                new_latents[:, half:]
-            ], dim=1)
-        if self.use_post_norm:
-            assert self.post_norm is not None
-            new_latents = self.post_norm(new_latents)
-
-        latents = apply_residual_stream(self.layer_index==0, latents, new_latents, this_layer_update_coeff, active_edges)
-
-        # From the latents, compute the weights for active edges:
-        weights = self.env_embed_mlp(latents)
-
-        if self.film is not None:
-            weights = self.film(weights, data[self.graph_conditioning_field], data[AtomicDataDict.BATCH_KEY][edge_center])
-
-        w_index = 0
-        if self.layer_index == 0:
-            # embed initial edge
-            env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel) # (dim, start, length)
-            w_index += self._env_weighter.weight_numel
-            eq_features = self._env_weighter(edge_equivariants, env_w)
-            if self.eq_features_linear is not None:
-                eq_features = self.eq_features_linear(eq_features)
-        assert eq_features is not None
-        eq_features = self.eq_features_irreps_norm(eq_features)
-
-        # Extract weights for the edge attrs
-        env_w = weights.narrow(-1, w_index, self._env_weighter.weight_numel)
-        w_index += self._env_weighter.weight_numel
-        emb_latent = self._env_weighter(edge_equivariants, env_w) # emb_latent is normalized below
-        if self.emb_latent_linear is not None:
-            emb_latent = self.emb_latent_linear(emb_latent)
-
+            raise RuntimeError("env_embed_mlp must return a Tensor.")
+        
         if self.use_attention:
-            emb_latent = self.apply_attention(edge_invariants, edge_center, latents, emb_latent)
-
-        # Pool over all attention-weighted edge features to build node local environment embedding
-        local_env_per_node = scatter_sum(emb_latent, edge_center, dim=0, dim_size=num_nodes)
-
-        active_node_centers = torch.unique(edge_center)
-        local_env_per_node_active_node_centers = local_env_per_node[active_node_centers]
-
-        local_env_per_node_active_node_centers = self.env_norm(local_env_per_node_active_node_centers)
-        local_env_per_active_atom = self.env_linear(local_env_per_node_active_node_centers)
-
+            assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
+            Q = self.rearrange_qk(self.node_attr_to_query(node_attrs[edge_src]))
+            K = self.rearrange_qk(self.latent_to_key(scalar_state))
+            W = torch.einsum('emd,emd -> em', Q, K) * self.inv_sqrtd
+            if self.attention_logit_clip > 0.0:
+                W = torch.clamp(W, min=-self.attention_logit_clip, max=self.attention_logit_clip)
+            attn_softmax = scatter_softmax(W, edge_src, dim=0)
+            env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
+        
+        env_nodes = scatter_sum(env_edges, edge_src, dim=0, dim_size=num_nodes)
         if self.use_mace_product:
-            local_env_per_active_atom = self.apply_mace(local_env_per_active_atom, node_invariants, active_node_centers)
+            assert self.node_inv_to_product_mlp is not None
+            assert self.reshape_in_module is not None
+            env_nodes = self.reshape_in_module(self.product(node_feats=env_nodes, node_attrs=node_attrs, sc=None))
+        env_nodes = self.node_env_norm(env_nodes)
 
-        expanded_features_per_node = torch.zeros_like(local_env_per_node, dtype=local_env_per_active_atom.dtype)
-        expanded_features_per_node = torch.index_add(expanded_features_per_node, 0, active_node_centers, local_env_per_active_atom)
-
-        # Copy to get per-edge
-        # Large allocation, but no better way to do this:
-        local_env_per_active_edge = expanded_features_per_node[edge_center]
-
-        # Now do the TP
-        # recursively tp current features with the environment embeddings
-        tp_out = self.tp(eq_features, local_env_per_active_edge)
+        edge_local_env = env_nodes[edge_src]
+        
+        # === 3. Interact via Tensor Product ===
+        tp_out = self.tp(equiv_state_tensor, edge_local_env)
         tp_out = self.tp_norm(tp_out)
 
-        # Get invariants
-        # features has shape [z][mul][k]
-        # we know scalars are first
-        scalars, equivariant = torch.split(tp_out, [self.tp_n_scalar_out, tp_out.size(-1) - self.tp_n_scalar_out], dim=-1)
-        scalars = self.rearrange_scalars(scalars)
+        # === 4. Extract new features ===
+        proj_out = self.projection(tp_out, edge_conditioning)
+        new_equiv_state = torch.jit.annotate(Optional[torch.Tensor], None)
+        if torch.jit.isinstance(proj_out, Tuple[torch.Tensor, Optional[torch.Tensor]]):
+            new_scalar_state, new_equiv_state = proj_out
+        else:
+            raise RuntimeError("Projection must return scalar and equivariant tensors.")
+        scalar_state = apply_residual_stream(scalar_state, new_scalar_state, residual_update_coeff)
+        if (
+            self.use_equivariant_residual
+            and new_equiv_state is not None
+            and new_equiv_state.shape == equiv_state_tensor.shape
+        ):
+            equiv_state_out = apply_residual_stream(
+                equiv_state_tensor, new_equiv_state, residual_update_coeff
+            )
+        else:
+            equiv_state_out = new_equiv_state
 
-        inv_latent = torch.cat([latents, scalars],dim=-1) # scalars.shape (E, 2*sum(embedding_dimensionality in yaml))
-
-        if self.debug and wandb.run is not None:
-            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.latents", latents, self.training)
-            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.inv_latent", inv_latent, self.training)
-
-        if self.linear is None:
-            return latents, inv_latent, None
-
-        # do the linear for eq. features
-        eq_features = self.linear(equivariant if self.is_last_layer else tp_out)
-        if self.debug and wandb.run is not None:
-            log_feature_on_wandb(f"{self.parent.name}/{self.layer_index}.eq_features", eq_features, self.training)
-        return latents, inv_latent, eq_features
+        return scalar_state, equiv_state_out

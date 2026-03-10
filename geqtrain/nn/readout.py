@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,15 +12,14 @@ from geqtrain.data import (
     _GRAPH_FIELDS,
 )
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
-from geqtrain.nn._film import FiLMFunction
-from geqtrain.nn.allegro import Linear
-from geqtrain.nn.mace.irreps_tools import reshape_irreps, inverse_reshape_irreps
 from geqtrain.nn._heads import L0IndexedAttention
-from geqtrain.utils.tp_utils import PSEUDO_SCALAR, SCALAR
+from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
+from geqtrain.utils._model_utils import build_concatenation_permutation
 
 
 @compile_mode("script")
 class ReadoutModule(GraphModuleMixin, nn.Module):
+    conditioning_fields: List[str]
     """
     This module takes a feature tensor (`field`) and computes an output tensor
     (`out_field`). It can optionally condition its internal transformations on a
@@ -28,10 +27,18 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
     """
     def __init__(
         self,
-        field: str,
         irreps_in,
-        out_field: Optional[str] = None,
-        conditioning_field: Optional[str] = None,
+        # Input fields
+        field: Optional[str] = None,
+        invariant_field: Optional[str] = None,
+        equivariant_field: Optional[str] = None,
+        # Output fields
+        out_field: Optional[str] = None, # The key where the output will be stored (can be invariant+equivariant)
+        scalar_out_field: Optional[str] = None, # secondary field for scalar output only
+        invariant_out_field: Optional[str] = None, # Alternatively, specify invariant field directly
+        equivariant_out_field: Optional[str] = None, # And equivariant field directly as well
+        # Other params
+        conditioning_fields: Optional[List[str]] = None, # List of keys to use for conditioning
         out_irreps: Union[o3.Irreps, str, None] = None,
         strict_irreps: bool = True,
         readout_latent=ScalarMLPFunction,
@@ -42,110 +49,171 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
     ):
         super().__init__()
 
-        self.field = field
-        self.out_field = out_field or self.field
-        self.conditioning_field = conditioning_field
+        # -- Input field validation --
+        if field is not None:
+            if invariant_field is not None or equivariant_field is not None:
+                raise ValueError("Cannot specify both `field` and (`invariant_field` or `equivariant_field`).")
+            self.field = field
+            self.invariant_field = None
+            self.equivariant_field = None
+            self.input_mode = "single"
+        else:
+            if invariant_field is None and equivariant_field is None:
+                raise ValueError("Must specify either `field` or at least one of `invariant_field`, `equivariant_field`.")
+            self.field = None
+            self.invariant_field = invariant_field
+            self.equivariant_field = equivariant_field
+            self.input_mode = "split"
+
+        # -- Output field validation --
+        if out_field is not None:
+            if invariant_out_field is not None or equivariant_out_field is not None:
+                raise ValueError("Cannot specify both `out_field` and (`invariant_out_field` or `equivariant_out_field`).")
+            self.out_field = out_field
+            self.invariant_out_field = None
+            self.equivariant_out_field = None
+            self.scalar_out_field = scalar_out_field
+            self.output_mode = "single"
+        else:
+            if invariant_out_field is None and equivariant_out_field is None:
+                # Default to writing to the input field(s) if no output is specified
+                if self.input_mode == "single":
+                    self.out_field = self.field
+                    self.invariant_out_field = None
+                    self.equivariant_out_field = None
+                    self.output_mode = "single"
+                    self.scalar_out_field = scalar_out_field
+                else:
+                    self.out_field = None
+                    self.invariant_out_field = self.invariant_field
+                    self.equivariant_out_field = self.equivariant_field
+                    self.output_mode = "split"
+                    self.scalar_out_field = None # Not supported in this default case
+            else:
+                self.out_field = None
+                self.invariant_out_field = invariant_out_field
+                self.equivariant_out_field = equivariant_out_field
+                self.output_mode = "split"
+                self.scalar_out_field = None # Not supported in this default case
+
+        self._out_field = self.out_field if self.out_field is not None else ""
+        self._has_out_field = self.out_field is not None
+        self._scalar_out_field = self.scalar_out_field if self.scalar_out_field is not None else ""
+        self._has_scalar_out_field = self.scalar_out_field is not None
+        self._invariant_out_field = self.invariant_out_field if self.invariant_out_field is not None else ""
+        self._has_invariant_out_field = self.invariant_out_field is not None
+        self._equivariant_out_field = self.equivariant_out_field if self.equivariant_out_field is not None else ""
+        self._has_equivariant_out_field = self.equivariant_out_field is not None
+
+        self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         self.ignore_amp = ignore_amp
         self.resnet = resnet
 
-        # --- Irreps Initialization ---
-        if out_irreps is None:
-            if self.out_field in irreps_in:
-                out_irreps = irreps_in[self.out_field]
-            else:
-                raise ValueError(
-                    f"out_irreps is None, but out_field '{self.out_field}' is not in irreps_in. "
-                    "Please provide out_irreps explicitly."
-                )
+        # --- Input/Output Irreps Determination ---
+        required_irreps = []
+        if self.field is not None: required_irreps.append(self.field)
+        if self.invariant_field is not None: required_irreps.append(self.invariant_field)
+        if self.equivariant_field is not None: required_irreps.append(self.equivariant_field)
+        required_irreps.extend(self.conditioning_fields)
 
-        required_irreps = [field]
-        if self.conditioning_field is not None:
-            required_irreps.append(self.conditioning_field)
-            
         self._init_irreps(
             irreps_in=irreps_in,
             required_irreps_in=required_irreps,
-            irreps_out={self.out_field: out_irreps},
         )
-        in_irreps: o3.Irreps = self.irreps_in[field]
-        out_irreps: o3.Irreps = self.irreps_out[self.out_field]
-        self.out_irreps_dim = out_irreps.dim
 
+        # Determine the combined output irreps for the EquivariantScalarMLP processor
+        processor_out_irreps_combined: o3.Irreps
+        if out_irreps is None:
+            if self.input_mode == 'single':
+                # Case 1 & 2: input is single, output is single or split.
+                # The processor's output irreps match the single input irreps.
+                processor_out_irreps_combined = self.irreps_in[self.field]
+            else: # self.input_mode == 'split'
+                # Case 3 & 4: input is split, output is single or split.
+                # The processor's output irreps are the combination of the split input irreps.
+                processor_out_irreps_combined = o3.Irreps("")
+                if self.invariant_field and self.invariant_field in self.irreps_in:
+                    processor_out_irreps_combined += self.irreps_in[self.invariant_field]
+                if self.equivariant_field and self.equivariant_field in self.irreps_in:
+                    processor_out_irreps_combined += self.irreps_in[self.equivariant_field]
+                if processor_out_irreps_combined.dim == 0:
+                    raise ValueError("For split input, `out_irreps` is None, but neither `invariant_field` nor `equivariant_field` are found in `irreps_in`. Please provide `out_irreps` explicitly or ensure input fields exist.")
+        else:
+            processor_out_irreps_combined = out_irreps if isinstance(out_irreps, o3.Irreps) else o3.Irreps(out_irreps)
+
+        # Determine the combined input irreps for the EquivariantScalarMLP processor
+        processor_in_irreps: o3.Irreps
+        self.split_index: int = 0
+        self.n_scalars_in: int = 0
+        if self.input_mode == "single":
+            processor_in_irreps = self.irreps_in[self.field]
+            self.n_scalars_in = sum(mul * ir.dim for mul, ir in processor_in_irreps if ir.l == 0)
+            self.split_index = self.n_scalars_in
+        else: # "split"
+            combined_in_irreps_list = []
+            if self.invariant_field and self.invariant_field in irreps_in: combined_in_irreps_list.append(o3.Irreps(irreps_in[self.invariant_field]))
+            if self.equivariant_field and self.equivariant_field in irreps_in: combined_in_irreps_list.append(o3.Irreps(irreps_in[self.equivariant_field]))
+            processor_in_irreps = (combined_in_irreps_list[0], combined_in_irreps_list[1])
+            self.n_scalars_in = combined_in_irreps_list[0].dim
+            self.split_index = self.n_scalars_in
+            
+        # Prepare irreps_out for GraphModuleMixin, reflecting the actual output fields
+        gm_irreps_out = {}
+        if self.output_mode == "single":
+            processor_out_irreps = processor_out_irreps_combined
+            gm_irreps_out[self.out_field] = processor_out_irreps
+            if self.scalar_out_field is not None:
+                scalar_part = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps if ir.l == 0])
+                if scalar_part.dim > 0: gm_irreps_out[self.scalar_out_field] = scalar_part
+        else:
+            # Split the combined output irreps into scalar and equivariant parts for GraphModuleMixin
+            scalar_out_irreps_for_gm = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps_combined if ir.l == 0])
+            equivariant_out_irreps_for_gm = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps_combined if ir.l > 0])
+            if self.invariant_out_field and len(scalar_out_irreps_for_gm) > 0:
+                gm_irreps_out[self.invariant_out_field] = scalar_out_irreps_for_gm
+            if self.equivariant_out_field and len(equivariant_out_irreps_for_gm) > 0:
+                gm_irreps_out[self.equivariant_out_field] = equivariant_out_irreps_for_gm
+            processor_out_irreps = (scalar_out_irreps_for_gm, equivariant_out_irreps_for_gm)
+
+        self.irreps_out.update(gm_irreps_out)
+        
         # --- Resnet ---
         self._resnet_update_coeff: Optional[nn.Parameter] = None
         if self.resnet:
-            if self.out_field not in self.irreps_in:
-                 raise ValueError(f"For resnet=True, out_field='{self.out_field}' must be in `irreps_in`")
-            if self.irreps_in[self.out_field] != out_irreps:
+            representative_out_field = self.out_field if self.output_mode == "single" else (self.invariant_out_field or self.equivariant_out_field)
+            if representative_out_field not in self.irreps_in:
+                 raise ValueError(f"For resnet=True, out_field='{representative_out_field}' must be in `irreps_in`")
+            if self.irreps_in[representative_out_field] != processor_out_irreps_combined:
                  raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
-            self._resnet_update_coeff = nn.Parameter(torch.tensor([0.0]))
+            # Start close to identity by using a strongly negative logit.
+            self._resnet_update_coeff = nn.Parameter(torch.tensor([-5.0], dtype=torch.float32))
+        
+        # --- Conditioning Fields Validation and Dimension Calculation ---
+        self.total_conditioning_dim = 0
+        for cond_field in self.conditioning_fields:
+            if cond_field not in self.irreps_in:
+                raise ValueError(f"Conditioning field '{cond_field}' not found in irreps_in.")
+            cond_irreps = self.irreps_in[cond_field]
+            if not all(ir.l == 0 for _, ir in cond_irreps):
+                raise ValueError(f"Conditioning field '{cond_field}' must have scalar (0e) irreps, but got {cond_irreps}.")
+            self.total_conditioning_dim += cond_irreps.dim
 
-        # --- Feature Properties ---
-        self.n_scalars_in = sum(mul for mul, ir in in_irreps if ir.l == 0)
-        self.n_scalars_out = sum(mul for mul, ir in out_irreps if ir.l == 0)
-        self.has_invariant_output = self.n_scalars_out > 0
-        self.has_equivariant_output = out_irreps.dim > self.n_scalars_out
-        self.split_index = sum(mul for mul, ir in in_irreps if ir in [SCALAR, PSEUDO_SCALAR])
-
-        # --- Conditioning Layers ---
-        self.conditioner = None
-        if self.conditioning_field is not None and self.n_scalars_in > 0:
-            conditioning_dim = self.irreps_in[self.conditioning_field].dim
-            conditioner_modules = {
-                "film1": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-                "fc1": readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.n_scalars_in, **readout_latent_kwargs),
-                "film2": FiLMFunction(conditioning_dim, [], self.n_scalars_in, mlp_nonlinearity=None),
-            }
-            if self.has_invariant_output:
-                conditioner_modules["film_scalar"] = FiLMFunction(conditioning_dim, [], self.n_scalars_out, mlp_nonlinearity=None)
-            self.conditioner = nn.ModuleDict(conditioner_modules)
-
-        # --- Invariant (Scalar) Readout ---
-        self.inv_readout = None
-        if self.has_invariant_output:
-            if self.n_scalars_in == 0:
-                raise ValueError("Cannot produce scalar output with no scalar input features.")
-            self.inv_readout = readout_latent(
-                mlp_input_dimension=self.n_scalars_in,
-                mlp_output_dimension=self.n_scalars_out,
-                **readout_latent_kwargs,
-            )
-
-        # --- Equivariant (Vectorial) Readout ---
-        self.reshape_in: Optional[reshape_irreps] = None
-        self.eq_readout_internal = None
-        self.eq_readout = None
-        self.weights_emb = None
-        self.reshape_back_features = None
-        self.use_internal_weights = self.n_scalars_in == 0
-
-        if self.has_equivariant_output:
-            eq_in_irreps = o3.Irreps([(mul, ir) for mul, ir in in_irreps if ir.l > 0])
-            assert len(eq_in_irreps) > 0, "No equivariant (l > 0) input irreps found for field '{}'. Cannot perform equivariant readout.".format(self.field)
-            eq_out_irreps = o3.Irreps([(mul, ir) for mul, ir in out_irreps if ir.l > 0])
-            self.reshape_in = reshape_irreps(eq_in_irreps)
-
-            if self.use_internal_weights:
-                # Path 1: Internal weights. Initialize only this module.
-                self.eq_readout_internal = Linear(eq_in_irreps, eq_out_irreps, internal_weights=True, pad_to_alignment=1)
-            else:
-                # Path 2: External weights. Initialize the other module.
-                self.eq_readout = Linear(eq_in_irreps, eq_out_irreps, internal_weights=False, pad_to_alignment=1)
-                self.weights_emb = readout_latent(mlp_input_dimension=self.n_scalars_in, mlp_output_dimension=self.eq_readout.weight_numel, **readout_latent_kwargs)
-                if self.conditioner is not None:
-                     self.conditioner["film_vectorial"] = FiLMFunction(self.irreps_in[self.conditioning_field].dim, [], self.eq_readout.weight_numel, mlp_nonlinearity=None)
-
-            self.reshape_back_features = inverse_reshape_irreps(eq_out_irreps)
-        elif strict_irreps and in_irreps.dim > self.n_scalars_in:
-            raise ValueError(
-                f"Input for field '{self.field}' contains non-scalar irreps ({in_irreps}), "
-                f"but output is all scalars ({out_irreps}). Non-scalar features would be unused. "
-                "To allow this, set 'strict_irreps=False'."
-            )
+        # --- Core Processing Module ---
+        self.processor = EquivariantScalarMLP(
+            in_irreps=processor_in_irreps,
+            out_irreps=processor_out_irreps,
+            conditioning_dim=self.total_conditioning_dim,
+            latent_module=readout_latent,
+            latent_kwargs=readout_latent_kwargs,
+            strict_irreps=strict_irreps,
+            output_shape_spec="flat",
+        )
+        # n_scalars_out is the total dimension of the scalar part of the output
+        self.n_scalars_out = sum(mul * ir.dim for mul, ir in processor_out_irreps_combined if ir.l == 0)
 
         # --- Bias ---
         self.bias = None
-        if self.has_invariant_output:
+        if self.n_scalars_out > 0:
             if bias is not None:
                 if isinstance(bias, float):
                     bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.float32)
@@ -163,72 +231,80 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         return self._forward_impl(data)
 
     def _forward_impl(self, data: AtomicDataDict.Type) -> AtomicDataDict.Type:
-        features = data[self.field]
-        
-        scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
+        # --- 1. Prepare inputs for EquivariantScalarMLP ---
+        if self.input_mode == "single":
+            features = data[self.field]
+        else: # "split"
+            if self.invariant_field is None or self.equivariant_field is None:
+                raise ValueError("Split input requires both invariant_field and equivariant_field.")
+            if self.invariant_field not in data or self.equivariant_field not in data:
+                raise ValueError("No input features found for split input mode.")
+            features = (
+                data[self.invariant_field],
+                data[self.equivariant_field],
+            )
 
-        if self.conditioner is not None and self.conditioning_field is not None:
-            conditioning_tensor = data[self.conditioning_field]
-            scalars = self.conditioner["film1"](scalars, conditioning_tensor)
-            scalars = self.conditioner["fc1"](scalars)
-            scalars = self.conditioner["film2"](scalars, conditioning_tensor)
+        conditioning_tensor: Optional[torch.Tensor] = None
+        if len(self.conditioning_fields) > 0:
+            conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
+            conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
+            # Broadcast graph-level conditioning to node-level if needed
+            if conditioning_tensor.shape[0] == 1 and self.input_mode == "single":
+                conditioning_tensor = conditioning_tensor.expand(features.shape[0], -1)
+            elif conditioning_tensor.shape[0] == 1 and self.input_mode == "split":
+                conditioning_tensor = conditioning_tensor.expand(features[0].shape[0], -1)
 
-        out_scalars_list = []
-        if self.has_invariant_output:
-            assert self.inv_readout is not None
-            current_out_scalars = self.inv_readout(scalars)
-            if self.conditioner is not None and "film_scalar" in self.conditioner:
-                current_out_scalars = self.conditioner["film_scalar"](current_out_scalars, data[self.conditioning_field])
-            out_scalars_list.append(current_out_scalars)
+        # --- 2. Run the core processor ---
+        # The processor can return a single tensor or a tuple
+        out_features_or_tuple = self.processor(features, conditioning_tensor)
 
-        out_equiv_list = []
-        if self.has_equivariant_output:
-            # The input `equiv` to reshape_in should not have a zero dimension if there are no equivariant features.
-            # This check ensures we don't call it unnecessarily.
-            if equiv.shape[-1] > 0:
-                assert self.reshape_in is not None
-                eq_features_in = self.reshape_in(equiv)
-                
-                if self.use_internal_weights:
-                    # Call the internal-weights module (one argument)
-                    assert self.eq_readout_internal is not None, "eq_readout_internal was not initialized for this configuration."
-                    eq_features_out = self.eq_readout_internal(eq_features_in)
-                else:
-                    # Call the external-weights module (two arguments)
-                    assert self.eq_readout is not None, "eq_readout was not initialized for this configuration."
-                    assert self.weights_emb is not None
-                    weights = self.weights_emb(scalars)
-                    if self.conditioner is not None:
-                        weights = self.conditioner["film_vectorial"](weights, data[self.conditioning_field])
-                    eq_features_out = self.eq_readout(eq_features_in, weights)
-                assert self.reshape_back_features is not None
-                out_equiv_list.append(self.reshape_back_features(eq_features_out))
+        # --- 3. Handle bias/residuals and write outputs ---
+        if self.output_mode == "single":
+            if not torch.jit.isinstance(out_features_or_tuple, torch.Tensor):
+                raise RuntimeError("ReadoutModule expected a Tensor output in single mode.")
+            out_features = out_features_or_tuple
+            if self.resnet:
+                if not self._has_out_field:
+                    raise RuntimeError("ReadoutModule resnet requires an out_field.")
+                old_features = data[self._out_field]
+                assert self._resnet_update_coeff is not None
+                coeff = self._resnet_update_coeff.sigmoid()
+                coefficient_old = torch.rsqrt(coeff.square() + 1)
+                coefficient_new = coeff * coefficient_old
+                out_features = coefficient_old * old_features + coefficient_new * out_features
+            self._apply_bias_and_write_single(data, out_features)
+        else: # "split"
+            if not torch.jit.isinstance(out_features_or_tuple, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]):
+                raise RuntimeError("ReadoutModule expected a (scalars, equivariants) tuple in split mode.")
+            self._apply_bias_and_write_split(data, out_features_or_tuple)
 
-        output_components = out_scalars_list + out_equiv_list
-        if not output_components:
-            raise ValueError("ReadoutModule produced no output features.")
-        out_features = torch.cat(output_components, dim=-1)
-        
-        if self.bias is not None:
-            out_scalars = out_features[..., :self.n_scalars_out]
-            out_equiv = out_features[..., self.n_scalars_out:]
-            biased_scalars = out_scalars + self.bias
-            if out_equiv.shape[-1] > 0:
-                out_features = torch.cat([biased_scalars, out_equiv], dim=-1)
-            else:
-                out_features = biased_scalars
-
-        if self.resnet:
-            old_features = data[self.out_field]
-            assert self._resnet_update_coeff is not None
-            coeff = self._resnet_update_coeff.sigmoid()
-            coefficient_old = torch.rsqrt(coeff.square() + 1)
-            coefficient_new = coeff * coefficient_old
-            out_features = coefficient_old * old_features + coefficient_new * out_features
-
-        data[self.out_field] = out_features
         return data
 
+    def _apply_bias_and_write_single(self, data: AtomicDataDict.Type, out_features: torch.Tensor):
+        if self.bias is not None:
+            out_features[..., :self.n_scalars_out] = out_features[..., :self.n_scalars_out] + self.bias
+
+        if self._has_scalar_out_field and self.n_scalars_out > 0:
+            data[self._scalar_out_field] = out_features[..., :self.n_scalars_out]
+
+        if not self._has_out_field:
+            raise RuntimeError("ReadoutModule expected an out_field in single mode.")
+        data[self._out_field] = out_features
+
+    def _apply_bias_and_write_split(self, data: AtomicDataDict.Type, out_tuple: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]):
+        out_scalars, out_equiv = out_tuple
+
+        if self._has_invariant_out_field:
+            if out_scalars is None:
+                raise ValueError(f"Module was configured to write to '{self.invariant_out_field}' but produced no scalar output.")
+            if self.bias is not None:
+                out_scalars = out_scalars + self.bias
+            data[self._invariant_out_field] = out_scalars
+
+        if self._has_equivariant_out_field:
+            if out_equiv is None:
+                raise ValueError(f"Module was configured to write to '{self.equivariant_out_field}' but produced no equivariant output.")
+            data[self._equivariant_out_field] = out_equiv
 
 @compile_mode("script")
 class AttentionReadoutModule(ReadoutModule):
@@ -246,6 +322,9 @@ class AttentionReadoutModule(ReadoutModule):
         **kwargs
     ):
         super().__init__(**kwargs)
+
+        if self.input_mode != "single":
+            raise NotImplementedError("AttentionReadoutModule currently only supports `field` (single tensor) input.")
 
         if self.n_scalars_in == 0:
             raise ValueError("AttentionReadoutModule requires scalar input features.")
@@ -282,11 +361,11 @@ class AttentionReadoutModule(ReadoutModule):
             # We modify the feature tensor in `data` before calling super().forward().
             features = data[self.field]
             scalars, equiv = torch.split(features, [self.split_index, features.shape[-1] - self.split_index], dim=-1)
-            
+
             # The original L0IndexedAttention implementation seems to operate on a tensor of scalars.
             scalars = self.ensemble_attnt1(scalars, data)
             scalars = self.ensemble_attnt2(scalars, data)
-            
+
             data[self.field] = torch.cat((scalars, equiv), dim=-1)
 
         return super().forward(data)

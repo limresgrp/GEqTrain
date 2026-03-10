@@ -3,13 +3,16 @@ from ._graph_model import GraphModel
 from ._global_graph_model import GlobalGraphModel
 from ._global_node_model import GlobalNodeModel
 from ._heads import Heads
-from ._scale import PerNodeAttrsScale, PerTypeScale
+from ._scale import PerNodeAttrsScale, PerTypeUnscale, PerTypeScale
 from ._combine import Combine
 from ._gradients import WithGradients
 from ._module import Module
 from ._goten_model import GotenModel
 from ._build import model_from_config
 from ._mace_model import MACEModel
+from ._recycle import RecycleModel
+from ._sph2cart import Spherical2CartesianModel
+
 
 __all__ = [
     NodeModel,
@@ -18,6 +21,7 @@ __all__ = [
     GlobalNodeModel,
     Heads,
     PerNodeAttrsScale,
+    PerTypeUnscale,
     PerTypeScale,
     model_from_config,
     WithGradients,
@@ -25,4 +29,6 @@ __all__ = [
     Module,
     GotenModel,
     MACEModel,
+    RecycleModel,
+    Spherical2CartesianModel,
 ]

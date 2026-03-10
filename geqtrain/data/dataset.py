@@ -17,13 +17,16 @@ import yaml
 import hashlib
 import torch
 import copy
+import os
 from os.path import dirname, basename, abspath
+from e3nn.o3 import Irreps
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
 
 from geqtrain.utils.torch_geometric import Batch, Dataset, Compose
 from geqtrain.utils.torch_geometric.data import Data
 from geqtrain.utils.torch_geometric.dataset import IndexType
 from geqtrain.utils.torch_geometric.utils import download_url, extract_zip
+from geqtrain.utils.pytorch_scatter import scatter_mean, scatter_std
 
 
 import geqtrain
@@ -39,6 +42,14 @@ from geqtrain.data import (
     _FIXED_FIELDS,
 )
 from geqtrain.utils.savenload import atomic_write
+from geqtrain.utils.normalization import (
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+    apply_forward_transform,
+    fit_transform_parameters,
+    resolve_normalization_map,
+    serialize_transform_params,
+)
 from .AtomicData import _process_dict
 
 
@@ -50,26 +61,60 @@ def fix_batch_dim(arr):
     return arr
 
 
+def _has_binning(options: Dict) -> bool:
+    return any(key in options for key in ("min_value", "max_value", "bin_edges", "bins"))
+
+
+def _build_bin_edges(options: Dict, num_types: int) -> np.ndarray:
+    if "bin_edges" in options:
+        bins = np.asarray(options["bin_edges"], dtype=np.float32)
+    elif "bins" in options:
+        bins = np.asarray(options["bins"], dtype=np.float32)
+    else:
+        min_value = options.get("min_value")
+        max_value = options.get("max_value")
+        if min_value is None or max_value is None:
+            raise ValueError("Binning requires 'min_value' and 'max_value' or explicit 'bin_edges'.")
+        bins = np.linspace(float(min_value), float(max_value), num_types + 1, dtype=np.float32)
+
+    if bins.ndim != 1 or bins.size < 2:
+        raise ValueError("Binning edges must be a 1D array with at least two entries.")
+
+    if num_types > 0 and bins.size - 1 != num_types:
+        raise ValueError(
+            f"Binning edges imply {bins.size - 1} bins, but num_types={num_types}."
+        )
+    return bins
+
+
+def _bin_values(values: np.ndarray, options: Dict, num_types: int) -> np.ndarray:
+    bins = _build_bin_edges(options, num_types)
+    binned = np.digitize(values, bins) - 1
+    return np.clip(binned, 0, bins.size - 2)
+
+
 def parse_attrs(
     _attributes: Dict,
     _fields: Dict,
     _fixed_fields: Dict = {},
 ) -> Dict[str, Any]:
-    '''
-    parses field properties
+    """
+    Parse attribute fields with support for categorical, numerical, and binned numerical inputs.
 
-    handles:
+    Attribute config schema (node/edge/graph/extra):
+      - attribute_type: "categorical" (default) or "numerical"
+      - embedding_mode: "embedding" (default) or "one_hot"
+      - num_types: number of categorical bins/classes (required for categorical or binned numerical)
+      - can_be_undefined: if True, allows NaN and adds an "unknown" bin at index num_types
+      - embedding_dimensionality: used by embedding layers (only enforced downstream)
 
-    num_types: 8
-    node_attributes:
-      node_types: # this kword must match the red kword in key_mapping
-        # num_types: 8 # 5 ! a +1 is always added due to "unspecified" class
-        embedding_dimensionality: 16
-        fixed: true # if equal for each frame, if so they must not have the batch dim in the npz
-        # unspecified: t/f
-
-    todo: describe logic
-    '''
+    Binning for numerical attributes:
+      - Provide attribute_type: numerical plus either:
+        - min_value and max_value (uniform bins), or
+        - bin_edges / bins (explicit bin edges)
+      - Values are mapped to integer bins in [0, num_types-1], with NaNs mapped to num_types
+        if can_be_undefined is True.
+    """
     for key, options in _attributes.items():
         if key in _fields or key in _fixed_fields:
 
@@ -83,13 +128,18 @@ def parse_attrs(
             assert attribute_type in ['categorical', 'numerical']
             embedding_mode = options.get('embedding_mode', 'embedding')
             assert embedding_mode in ['embedding', 'one_hot']
-            if attribute_type == 'numerical':
+            is_binned_numerical = attribute_type == "numerical" and _has_binning(options)
+
+            if attribute_type == 'numerical' and not is_binned_numerical:
                 if input_val is not None:
-                    input_val = input_val.astype(float)
-            elif attribute_type == 'categorical':
+                    input_val = input_val.astype(np.float32)
+            else:
                 if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
-                    continue # if 'embedding_mode' is embedding (default) and 'embedding_dimensionality' is missing, this means the field must not be used as input
-                if val is None: val = np.array([np.nan])
+                    continue  # skip if embedding is requested but dimensionality is missing
+                if val is None:
+                    val = np.array([np.nan], dtype=np.float32)
+                if "num_types" not in options:
+                    raise ValueError(f"Attribute {key} requires 'num_types' for categorical/binned input.")
                 num_types = int(options['num_types'])
                 can_be_undefined = options.get('can_be_undefined', False)
                 mask = np.isnan(val)
@@ -97,17 +147,14 @@ def parse_attrs(
                     if not can_be_undefined:
                         raise Exception(f"Found NaN value for attribute {key}. If this is allowed set 'can_be_undefined' to True in config file for this attribute.")
                     assert num_types + 1 == options.get('actual_num_types')
-                if 'min_value' in options or 'max_value' in options:
-                    # goes from 0 to 'num_types' (excluded). You have  'num_types' bins between 'min_value' and 'max_value'.
-                    # values smaller than 'min_value' or greater than 'max_value' are included in the smallest/largest bins
-                    # the actual number of bins is 'num_types' [+ 1 if can_be_undefined is True]
-                    # e.g. 'min_value' 0, 'max_value' 20, 'num_types' 4 and can_be_undefined=True becomes [-inf<5 | 5<10 | 10<15 | 15<+inf | unknown]
-                    bins = np.linspace(float(options['min_value']), float(options['max_value']), num_types + 1)
-                    input_val = np.digitize(val, bins) # x < min_value -> 0, x >= max_value -> num_types + 1 (total of num_types + 2 bins)
-                    input_val[input_val == num_types + 1] -= 1 # x>=20 fall together 15<=x<20
-                    input_val[input_val > 0] -= 1 # 0<=x<5 fall together with x<0
-                input_val[mask] = num_types # 'unkown' token has value 'num_types', while defined tokens have range [0, 'num_types')
-                input_val = val.astype(np.int64)
+
+                if is_binned_numerical:
+                    input_val = _bin_values(val.astype(np.float32), options, num_types)
+                else:
+                    input_val = val
+
+                input_val[mask] = num_types  # unknown token has value 'num_types'
+                input_val = input_val.astype(np.int64)
             if input_val is not None: # input_val can be None if it is computed by a submodule and is not present in the dataset
                 if key in _fields:
                     _fields[key] = torch.from_numpy(input_val)
@@ -115,6 +162,96 @@ def parse_attrs(
                     _fixed_fields[key] = torch.from_numpy(input_val)
 
     return _fields, _fixed_fields
+
+
+def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, num_types: int, irreps: Optional[Irreps] = None):
+    """
+    Computes the mean (bias) and standard deviation for a given field, grouped by node type.
+
+    Args:
+        dataset (ConcatDataset): The dataset to compute statistics from.
+        field (str): The key for the data field to be analyzed (e.g., "energy").
+        num_types (int): The total number of node types.
+        irreps (e3nn.o3.Irreps, optional): The irreps of the field. If provided, statistics
+            are computed on the norm of each irrep component. Defaults to None.
+
+    Returns:
+        Tuple[List[float], List[float]]: A tuple containing two lists:
+        - The per-type means (biases).
+        - The per-type standard deviations.
+    """
+    if dataset is None:
+        return None, None
+    
+    field_values_list = [data[field] for data in dataset]
+    
+    if irreps is not None:
+        # Compute norm for each irrep and concatenate
+        norm_values_list = []
+        for values in field_values_list:
+            norms = []
+            for (mul, ir), slice in zip(irreps, irreps.slices()):
+                if ir.l == 0:
+                    norms.append(values[:, slice])
+                else:
+                    norms.append(torch.linalg.norm(values[:, slice], dim=-1, keepdim=True))
+            norm_values_list.append(torch.cat(norms, dim=-1))
+        all_field_values = torch.cat(norm_values_list, dim=0)
+    else:
+        all_field_values = torch.cat(field_values_list, dim=0)
+
+    all_node_types = torch.cat([data[AtomicDataDict.NODE_TYPE_KEY] for data in dataset], dim=0).squeeze()
+
+    means = scatter_mean(all_field_values, all_node_types, dim=0, dim_size=num_types)
+    stds = scatter_std(all_field_values, all_node_types, dim=0, dim_size=num_types)
+
+    # Fallback for types with no samples to avoid NaN
+    for i, std in enumerate(stds):
+        if torch.any(torch.isnan(std)) or torch.all(std < 1.e-3):
+            stds[i] = torch.where(torch.isnan(std) | (std < 1.e-3), 1.0, std)
+
+    return means, stds
+
+def compute_global_statistics(dataset: Optional[ConcatDataset], field: str, irreps: Optional[Irreps] = None):
+    """
+    Computes the global mean and standard deviation for a given field.
+
+    Args:
+        dataset (ConcatDataset): The dataset to compute statistics from.
+        field (str): The key for the data field to be analyzed.
+        irreps (e3nn.o3.Irreps, optional): The irreps of the field. If provided, statistics
+            are computed on the norm of each irrep component. Defaults to None.
+
+    Returns:
+        Tuple[float, float]: A tuple containing:
+        - The global mean.
+        - The global standard deviation.
+    """
+    if dataset is None:
+        return None, None
+
+    field_values_list = [data[field] for data in dataset]
+
+    if irreps is not None:
+        # Compute norm for each irrep and concatenate
+        norm_values_list = []
+        for values in field_values_list:
+            norms = []
+            for ir, slice in irreps.slices():
+                if ir.l == 0:
+                    norms.append(values[:, slice])
+                else:
+                    norms.append(torch.linalg.norm(values[:, slice], dim=-1, keepdim=True))
+            norm_values_list.append(torch.cat(norms, dim=-1))
+        all_field_values = torch.cat(norm_values_list, dim=0)
+    else:
+        all_field_values = torch.cat(field_values_list, dim=0)
+    
+    mean = torch.mean(all_field_values).item()
+    std = torch.std(all_field_values).item()
+
+    return mean, std
+
 
 class InMemoryConcatDataset(ConcatDataset):
 
@@ -308,6 +445,9 @@ class AtomicDataset(Dataset):
             return params
 
         params = filter_attributes(self, pnames, IGNORE_KEYS)
+        if hasattr(self, "_normalization_specs") and len(getattr(self, "_normalization_specs", {})) > 0:
+            # Bump cache key when standardization math changes.
+            params["standardization_impl_version"] = 3
         # Add other relevant metadata:
         params["dtype"] = str(torch.float32)
         params["geqtrain_version"] = geqtrain.__version__
@@ -367,6 +507,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        normalization: Optional[Dict[str, Any]] = None,
         transforms: Optional[List[Callable]] = None,
     ):
         self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
@@ -386,6 +527,18 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.edge_attributes = edge_attributes
         self.graph_attributes = graph_attributes
         self.extra_attributes = extra_attributes
+        self.normalization = normalization or {}
+        self._normalization_specs = resolve_normalization_map(
+            {"normalization": self.normalization},
+        )
+        self._normalization_specs = {
+            field: spec
+            for field, spec in self._normalization_specs.items()
+            if bool(spec.get("apply_on_dataset", True))
+        }
+        self.means = {}
+        self.stds = {}
+
 
         # !!! don't delete this block.
         # otherwise the inherent children class
@@ -473,6 +626,140 @@ class AtomicInMemoryDataset(AtomicDataset):
             yaml.dump(self._get_parameters(), f)
         logging.info(f"Saved filtered processed data to disk at {self.processed_paths[0]}")
 
+    def _is_distribution_candidate(self, field: str, values: torch.Tensor) -> bool:
+        if not torch.is_tensor(values):
+            return False
+        if not torch.is_floating_point(values):
+            return False
+        if field.endswith("__mask__") or field.startswith("_"):
+            return False
+        excluded = {
+            AtomicDataDict.POSITIONS_KEY,
+            AtomicDataDict.EDGE_INDEX_KEY,
+            AtomicDataDict.NODE_TYPE_KEY,
+            AtomicDataDict.BATCH_KEY,
+            "ptr",
+            AtomicDataDict.CELL_KEY,
+            AtomicDataDict.PBC_KEY,
+            AtomicDataDict.R_MAX_KEY,
+            AtomicDataDict.DATASET_RAW_FILE_NAME,
+            AtomicDataDict.ENSEMBLE_INDEX_KEY,
+        }
+        return field not in excluded
+
+    def _select_distribution_fields(self, data_list: List[AtomicData], normalization_specs: Dict[str, Dict]) -> List[str]:
+        fields = set()
+        if len(data_list) == 0:
+            return []
+
+        # Always prioritize explicitly normalized targets.
+        for field in normalization_specs:
+            if field in data_list[0]:
+                fields.add(field)
+
+        # Include other floating non-structural fields as likely training targets.
+        for field in data_list[0].keys:
+            values = data_list[0][field]
+            if self._is_distribution_candidate(field, values):
+                fields.add(field)
+
+        return sorted(fields)
+
+    def _sample_flattened_tensor(self, values: torch.Tensor, max_points: int = 200000) -> torch.Tensor:
+        flat = values.reshape(-1).detach().to(dtype=torch.float32, device="cpu")
+        flat = flat[torch.isfinite(flat)]
+        if flat.numel() <= max_points:
+            return flat
+        step = max(1, flat.numel() // max_points)
+        return flat[::step][:max_points]
+
+    def _collect_data_list_distribution_samples(
+        self,
+        data_list: List[AtomicData],
+        fields: List[str],
+        max_points: int = 200000,
+    ) -> Dict[str, torch.Tensor]:
+        out = {}
+        for field in fields:
+            chunks = []
+            for entry in data_list:
+                if field not in entry:
+                    continue
+                values = entry[field]
+                if self._is_distribution_candidate(field, values):
+                    chunks.append(values)
+            if len(chunks) == 0:
+                continue
+            cat = torch.cat([c.reshape(-1) for c in chunks], dim=0)
+            sample = self._sample_flattened_tensor(cat, max_points=max_points)
+            if sample.numel() > 0:
+                out[field] = sample
+        return out
+
+    def _collect_batch_distribution_samples(
+        self,
+        data: Batch,
+        fields: List[str],
+        max_points: int = 200000,
+    ) -> Dict[str, torch.Tensor]:
+        out = {}
+        for field in fields:
+            if field not in data:
+                continue
+            values = data[field]
+            if not self._is_distribution_candidate(field, values):
+                continue
+            sample = self._sample_flattened_tensor(values, max_points=max_points)
+            if sample.numel() > 0:
+                out[field] = sample
+        return out
+
+    def _save_distribution_plots(
+        self,
+        raw_samples: Dict[str, torch.Tensor],
+        normalized_samples: Dict[str, torch.Tensor],
+    ) -> None:
+        if len(raw_samples) == 0 and len(normalized_samples) == 0:
+            return
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            logging.warning(f"Could not save target distribution plots (matplotlib unavailable): {exc}")
+            return
+
+        os.makedirs(self.processed_dir, exist_ok=True)
+
+        def _safe_name(name: str) -> str:
+            return name.replace("/", "_").replace(":", "_")
+
+        def _plot(values: torch.Tensor, title: str, out_path: str):
+            arr = values.numpy()
+            if arr.size == 0:
+                return
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.hist(arr, bins=100)
+            ax.set_title(title)
+            ax.set_xlabel("value")
+            ax.set_ylabel("count")
+            fig.tight_layout()
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+
+        for field, values in raw_samples.items():
+            _plot(
+                values,
+                title=f"{field} distribution (raw)",
+                out_path=os.path.join(self.processed_dir, f"target_dist_{_safe_name(field)}_raw.png"),
+            )
+        for field, values in normalized_samples.items():
+            _plot(
+                values,
+                title=f"{field} distribution (normalized)",
+                out_path=os.path.join(self.processed_dir, f"target_dist_{_safe_name(field)}_normalized.png"),
+            )
+
     def process(self):
         data = self.get_data()
         if len(data) == 5:
@@ -556,9 +843,145 @@ class AtomicInMemoryDataset(AtomicDataset):
         else:
             raise ValueError("Invalid return from `self.get_data()`")
 
+        normalization_specs = copy.deepcopy(self._normalization_specs)
+        distribution_fields = self._select_distribution_fields(data_list, normalization_specs)
+        raw_distribution_samples = self._collect_data_list_distribution_samples(
+            data_list,
+            distribution_fields,
+        )
+        for field, spec in normalization_specs.items():
+            if field not in data_list[0]:
+                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+
+            irreps_str = spec.get("irreps")
+            irreps = Irreps(irreps_str) if irreps_str else None
+            transform_cfg = fit_transform_parameters(
+                values=torch.cat([entry[field] for entry in data_list], dim=0),
+                transform_cfg=spec.get("transform", {"name": "none"}),
+                irreps=irreps,
+            )
+            spec["transform"] = transform_cfg
+
+            if transform_cfg.get("name", "none") != "none":
+                for entry in data_list:
+                    entry[field] = apply_forward_transform(
+                        entry[field],
+                        transform_cfg,
+                        irreps=irreps,
+                    ).to(entry[field].dtype)
+
+            fixed_fields.update(serialize_transform_params(field, transform_cfg))
+
         # Batch it for efficient saving
         # This limits an AtomicInMemoryDataset to a maximum of LONG_MAX atoms _overall_, but that is a very big number and any dataset that large is probably not "InMemory" anyway
         data = Batch.from_data_list(data_list, exclude_keys=fixed_fields.keys())
+
+        # Define prefixes for standardization keys
+        MEAN_KEY_PREFIX = "_mean_"
+        STD_KEY_PREFIX = "_std_"
+        PER_TYPE_PREFIX = "per_type"
+        GLOBAL_PREFIX = "global"
+
+        for field, spec in normalization_specs.items():
+            if field not in data:
+                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+
+            mode = spec.get("mode")
+            irreps_str = spec.get("irreps")
+            irreps = Irreps(irreps_str) if irreps_str else None
+
+            if mode not in [PER_TYPE_MODE, GLOBAL_MODE]:
+                raise ValueError(
+                    f"Invalid normalization mode '{mode}' for field '{field}'. "
+                    f"Must be one of: '{PER_TYPE_MODE}', '{GLOBAL_MODE}'."
+                )
+
+            if mode == PER_TYPE_MODE:
+                if len(data_list) == 0 or AtomicDataDict.NODE_TYPE_KEY not in data_list[0]:
+                    raise ValueError("`standardize_per_type` is True, but node types are not available in the data.")
+                num_types = self.node_attributes.get(AtomicDataDict.NODE_TYPE_KEY, {}).get('num_types')
+                if num_types is None:
+                    raise ValueError("`num_types` for node types must be provided in `node_attributes` for per-type standardization.")
+                
+                mean_vals, std_vals = compute_per_type_statistics(data_list, field, num_types, irreps=irreps)
+                # For l > 0 irreps, only std scaling is invertible on vectors.
+                # Keep per-type means only for scalar (l=0) components.
+                mean_vals_to_store = mean_vals
+                if irreps:
+                    mean_vals_to_store = mean_vals.clone()
+                    i = 0
+                    for mul, ir in irreps:
+                        if ir.l > 0:
+                            mean_vals_to_store[:, i:i + 1] = 0.0
+                        i += 1
+
+                self.means[field] = mean_vals_to_store.tolist()
+                self.stds[field] = std_vals.tolist()
+                
+                mean_tensor = mean_vals_to_store.to(dtype=data[field].dtype)
+                std_tensor = std_vals.to(dtype=data[field].dtype)
+                node_types = torch.cat(
+                    [d[AtomicDataDict.NODE_TYPE_KEY] for d in data_list], dim=0
+                ).squeeze().to(dtype=torch.long, device=data[field].device)
+
+                if node_types.shape[0] != data[field].shape[0]:
+                    raise ValueError(
+                        f"Per-type standardization for field '{field}' requires a node-level field "
+                        f"with first dimension matching the number of nodes, but got "
+                        f"{data[field].shape[0]} values and {node_types.shape[0]} node types."
+                    )
+
+                if irreps:
+                    means_expanded = mean_tensor[node_types]
+                    stds_expanded = std_tensor[node_types]
+                    i = 0
+                    for (mul, ir), slice in zip(irreps, irreps.slices()):
+                        if ir.l == 0:
+                            data[field][:, slice] -= means_expanded[:, i:i+1]
+                            data[field][:, slice] /= stds_expanded[:, i:i+1]
+                        else: # l > 0, std-only scaling to preserve invertibility
+                            data[field][:, slice] /= stds_expanded[:, i:i+1]
+                        i += 1
+                else:
+                    data[field] -= mean_tensor[node_types].view(data[field].shape)
+                    data[field] /= std_tensor[node_types].view(data[field].shape)
+                
+                # Store stats in fixed_fields
+                mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
+                std_key = f"{STD_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
+                fixed_fields[mean_key] = mean_vals_to_store
+                fixed_fields[std_key] = std_vals
+                logging.info(f"Standardized field '{field}' per type.")
+
+            elif mode == GLOBAL_MODE:
+                mean_val, std_val = compute_global_statistics(data_list, field, irreps=irreps)
+                self.means[field] = mean_val
+                self.stds[field] = std_val
+                
+                if std_val > 1e-8:
+                    if irreps:
+                        raise NotImplementedError("Global standardization for equivariant fields is not yet implemented.")
+                    else:
+                        data[field] -= mean_val
+                        data[field] /= std_val
+
+                    # Store stats in fixed_fields
+                    mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
+                    std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
+                    fixed_fields[mean_key] = torch.tensor(mean_val)
+                    fixed_fields[std_key] = torch.tensor(std_val)
+                    logging.info(f"Standardized field '{field}' globally with mean={mean_val:.4f} and std={std_val:.4f}.")                    
+                else:
+                    logging.warning(f"Standard deviation of field '{field}' is very small ({std_val:.4f}), skipping standardization.")
+
+        normalized_distribution_samples = {}
+        if len(normalization_specs) > 0:
+            normalized_distribution_samples = self._collect_batch_distribution_samples(
+                data,
+                [f for f in distribution_fields if f in normalization_specs],
+            )
+        self._save_distribution_plots(raw_distribution_samples, normalized_distribution_samples)
+
         del data_list
         del node_fields
         del edge_fields
@@ -650,6 +1073,7 @@ class NpzDataset(AtomicInMemoryDataset):
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
         extra_attributes: Dict = {},
+        normalization: Optional[Dict[str, Any]] = None,
         transforms: Optional[List[str]] = None,
     ):
         self.key_mapping = key_mapping
@@ -669,6 +1093,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 edge_attributes=edge_attributes,
                 graph_attributes=graph_attributes,
                 extra_attributes=extra_attributes,
+                normalization=normalization,
                 transforms=transforms,
             )
         except Exception as e:

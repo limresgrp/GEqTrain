@@ -14,6 +14,7 @@ from ._hooks import ForwardHookHandler, print_stats
 from .grokfast import gradfilter_ma, gradfilter_ema
 from ._model_utils import add_tags_to_module, add_tags_to_parameter
 from .evaluate_utils import AccuracyMetric
+from .hydra_config import load_config, load_hydra_config
 
 __all__ = [
     instantiate_from_cls_name,
@@ -36,4 +37,6 @@ __all__ = [
     add_tags_to_module,
     add_tags_to_parameter,
     AccuracyMetric,
+    load_config,
+    load_hydra_config,
 ]

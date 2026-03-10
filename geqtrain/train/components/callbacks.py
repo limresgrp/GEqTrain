@@ -12,6 +12,7 @@ from geqtrain.data import AtomicDataDict
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
+from geqtrain.utils.normalization import resolve_normalization_map
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
 from geqtrain.utils.wandb import init_n_update_wandb, resume_wandb_run
 from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
@@ -71,8 +72,10 @@ class Logger(Callback):
         if self.trainer.dist.is_master:
             self.trainer.validation_wall = perf_counter() - self.trainer._phase_start_time
             self.trainer.cumulative_wall += self.trainer.train_wall + self.trainer.validation_wall
-
-    def on_epoch_end(self, summary: EpochSummary):
+    
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
+        if not run_validation:
+            return
         if self.trainer.dist.is_master:
             self._log_epoch(summary)
 
@@ -159,6 +162,183 @@ class Logger(Callback):
         csv_values = [f"{v:.5g}" if isinstance(v, float) else str(v) for v in mae_dict.values()]
         epoch_logger.info(",".join(csv_values))
 
+class ValidationBatchPredictionLogger(Callback):
+    """Saves a single validation batch of predictions/targets to per-key CSVs."""
+    def __init__(self):
+        self._log_files = {}
+        self._header_written = {}
+        self._keys = []
+        self._loss_func_by_key = {}
+        self._capture_active = False
+        self._pred_cache = {}
+        self._ref_cache = {}
+        self._normalization_fields = {}
+
+    def on_trainer_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        loss = self.trainer.loss
+        seen = set()
+        for loss_key in loss.keys:
+            clean_key = loss.remove_suffix(loss_key)
+            if clean_key in seen:
+                continue
+            seen.add(clean_key)
+            self._keys.append(clean_key)
+            self._loss_func_by_key[clean_key] = loss.funcs[loss_key]
+            safe_key = clean_key.replace("/", "_")
+            log_path = self.trainer.output.open_logfile(
+                f"pred_target_batch_{ABBREV[VALIDATION]}_{safe_key}.csv",
+                propagate=False,
+            )
+            self._log_files[clean_key] = log_path
+            self._header_written[clean_key] = False
+
+        self._normalization_fields = resolve_normalization_map(
+            self.trainer.config.as_dict() if hasattr(self.trainer.config, "as_dict") else self.trainer.config,
+        )
+
+    def on_validation_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        self._capture_active = False
+        self._pred_cache = {key: [] for key in self._keys}
+        self._ref_cache = {key: [] for key in self._keys}
+
+    def on_batch_begin(self, **kwargs):
+        if not self.trainer.dist.is_master:
+            return
+        if self.trainer.batch_type != VALIDATION or self.trainer.ibatch != 0:
+            return
+        self._capture_active = True
+
+    def on_step_end(self, batch_output=None, ref_data=None, **kwargs):
+        if not self._capture_active or not self.trainer.dist.is_master:
+            return
+        if batch_output is None or ref_data is None:
+            return
+        for key in self._keys:
+            pred_key, ref_key = self._extract_pred_ref(key, batch_output, ref_data)
+            if pred_key is None or ref_key is None:
+                continue
+            self._pred_cache[key].append(pred_key.detach().cpu())
+            self._ref_cache[key].append(ref_key.detach().cpu())
+
+    def on_batch_end(self, **kwargs):
+        if not self._capture_active or not self.trainer.dist.is_master:
+            return
+        if self.trainer.batch_type != VALIDATION or self.trainer.ibatch != 0:
+            return
+        self._capture_active = False
+        self._flush_cache()
+
+    def _extract_pred_ref(self, key, batch_output, ref_data):
+        loss_func = self._loss_func_by_key.get(key)
+        pred_key_name = key
+        if loss_func is not None and hasattr(loss_func, "_get_pred_key_name"):
+            pred_key_name = loss_func._get_pred_key_name(key)
+
+        if pred_key_name not in batch_output or key not in ref_data:
+            return None, None
+
+        pred_copy = dict(batch_output)
+        ref_copy = dict(ref_data)
+        pred_copy[pred_key_name] = pred_copy[pred_key_name].detach().clone()
+        ref_copy[key] = ref_copy[key].detach().clone()
+
+        pred_key = pred_copy[pred_key_name]
+        ref_key = ref_copy[key]
+
+        if loss_func is not None and hasattr(loss_func, "_prepare_tensors"):
+            pred_key, ref_key = loss_func._prepare_tensors(
+                pred_copy,
+                ref_copy,
+                pred_key_name,
+                key,
+                mean=False,
+                normalization_fields=self._normalization_fields,
+            )
+
+        if loss_func is not None and hasattr(loss_func, "_handle_supervision_shapes"):
+            ref_key = loss_func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
+        elif ref_key.shape != pred_key.shape:
+            try:
+                ref_key = ref_key.reshape(pred_key.shape)
+            except: pass # This could happen when e.g. predicting logits for CrossEntropy
+
+        if loss_func is not None and hasattr(loss_func, "_apply_node_filter"):
+            pred_key, ref_key = loss_func._apply_node_filter(pred_key, ref_key, ref_copy, key)
+
+        return pred_key, ref_key
+
+    def _flush_cache(self):
+        epoch = self.trainer.iepoch + 1
+        batch = self.trainer.ibatch + 1
+
+        for key in self._keys:
+            pred_chunks = self._pred_cache.get(key, [])
+            ref_chunks = self._ref_cache.get(key, [])
+            if not pred_chunks or not ref_chunks:
+                continue
+
+            pred = self._concat_chunks(pred_chunks)
+            ref = self._concat_chunks(ref_chunks)
+            pred_2d = self._to_2d(pred)
+            ref_2d = self._to_2d(ref)
+
+            if pred_2d.shape != ref_2d.shape:
+                self.trainer.logger.warning(
+                    f"Skipping CSV log for '{key}': prediction shape {pred_2d.shape} "
+                    f"does not match target shape {ref_2d.shape}."
+                )
+                continue
+
+            n_cols = pred_2d.shape[1]
+            if n_cols == 1:
+                pred_headers = ["pred"]
+                ref_headers = ["target"]
+            else:
+                pred_headers = [f"pred_{i}" for i in range(n_cols)]
+                ref_headers = [f"target_{i}" for i in range(n_cols)]
+
+            if not self._header_written.get(key, False):
+                header = ["epoch", "batch"] + pred_headers + ref_headers
+                logging.getLogger(self._log_files[key]).info(",".join(header))
+                self._header_written[key] = True
+
+            logger = logging.getLogger(self._log_files[key])
+            pred_rows = pred_2d.tolist()
+            ref_rows = ref_2d.tolist()
+            for pred_row, ref_row in zip(pred_rows, ref_rows):
+                values = [epoch, batch] + pred_row + ref_row
+                logger.info(self._format_csv_row(values))
+
+    def _concat_chunks(self, tensors):
+        prepared = []
+        for tensor in tensors:
+            if tensor.dim() == 0:
+                tensor = tensor.unsqueeze(0)
+            prepared.append(tensor)
+        if len(prepared) == 1:
+            return prepared[0]
+        return torch.cat(prepared, dim=0)
+
+    def _to_2d(self, tensor):
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+        if tensor.dim() == 1:
+            return tensor.unsqueeze(1)
+        return tensor.reshape(tensor.shape[0], -1)
+
+    def _format_csv_row(self, values):
+        formatted = []
+        for value in values:
+            if isinstance(value, float):
+                formatted.append(f"{value:.6g}")
+            else:
+                formatted.append(str(value))
+        return ",".join(formatted)
+
 class WandbCallback(Callback):
     """Handles all logging and initialization for Weights & Biases."""
     def on_trainer_begin(self):
@@ -180,11 +360,13 @@ class WandbCallback(Callback):
         if self.trainer.config.get("wandb_watch", False):
             wandb.watch(self.trainer.model, **self.trainer.config.get("wandb_watch_kwargs", {}))
 
-    def on_epoch_end(self, summary: EpochSummary):
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
         """Log the epoch's metrics to WandB from the master rank only."""
+        if not run_validation:
+            return
         if self.trainer.dist.is_master and wandb.run is not None:
             wandb.log(summary.to_flat_dict())
-            
+
             # Log each individual norm value for more detailed plots
             for norm in summary.grad_norms:
                 wandb.log({"train_gradient_norm_step": norm})
@@ -224,8 +406,7 @@ class GradientClippingCallback(Callback):
             self.gradnorms_queue = None
 
     def on_before_step(self, summary: EpochSummary, **kwargs):
-        if self.max_gradient_norm == math.inf:
-            return
+        if self.max_gradient_norm == math.inf: return
 
         model_params = self.trainer.model.parameters()
 
@@ -249,8 +430,9 @@ class GradientClippingCallback(Callback):
         if self.trainer.dist.is_master:
             summary.add_grad_norm(grad_norm.item(), float(max_grad_norm_val))
 
-class CheckpointCallback(Callback):
-    def on_epoch_end(self, summary: EpochSummary):
+class CheckpointCallback(Callback):    
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
+        if not run_validation: return
         if not self.trainer.dist.is_master: return
         
         current_metrics = summary.get_target_metric(self.trainer.metrics_key)
@@ -272,8 +454,10 @@ class CheckpointCallback(Callback):
 
 class EarlyStoppingCallback(Callback):
     """Handles early stopping with proper DDP synchronization."""
-    def on_epoch_end(self, summary: EpochSummary):
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
         should_stop = False
+        if not run_validation:
+            return
         # 1. Only the master rank evaluates the stopping condition
         if self.trainer.dist.is_master:
             if self.trainer.early_stopping_conds is not None and summary is not None:
@@ -315,6 +499,10 @@ class GrokFastCallback(Callback):
             self.trainer.grads = gradfilter_ema(self.trainer.model, grads=self.trainer.grads)
 
 class ActivationNormCallback(Callback):
+    PARITY = {
+         1: 'e',
+        -1: 'o'
+    }
     """Tracks the norm of node activations at the end of a training batch."""
     def on_step_end(self, batch_output, summary: EpochSummary, **kwargs):
         # This callback only runs during training and at the specified frequency
@@ -330,14 +518,19 @@ class ActivationNormCallback(Callback):
             # The model might be wrapped in DDP, access the module
             model_to_inspect = model.module if self.trainer.dist.is_distributed else model
 
-            irreps_as_dict = {ir.l:mul for (mul, ir) in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]}
+            output_irreps = model_to_inspect.irreps_out.get(AtomicDataDict.NODE_FEATURES_KEY)
+            if output_irreps is None:
+                return # Nothing to do if the key is not in the output irreps
+
             node_reprs = batch_output[AtomicDataDict.NODE_FEATURES_KEY]
-            split_sizes = [mul*(2*l+1) for l,mul in irreps_as_dict.items()]
-            reshapers = [reshape_irreps(Irreps(str(ir))) for ir in model_to_inspect.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]]
+
+            # Correctly calculate split sizes and reshapers directly from the Irreps object
+            split_sizes = [mul * ir.dim for mul, ir in output_irreps]
+            reshapers = [reshape_irreps(Irreps(f"{mul}x{ir.l}{self.PARITY[ir.p]}")) for mul, ir in output_irreps]
             reprs = torch.split(node_reprs, split_sizes, dim=1)
             
-            for l, repr_ in enumerate(reprs):
-                norm = torch.mean(torch.norm(reshapers[l](repr_).squeeze(), p=1, dim=(1 if l == 0 else (1, 2)))) / irreps_as_dict[l]
-                batch_node_norms[f'node_repr_l_{l}_mean'] = norm
+            for i, (repr_chunk, (mul, ir)) in enumerate(zip(reprs, output_irreps)):
+                norm = torch.mean(torch.linalg.vector_norm(reshapers[i](repr_chunk), dim=(-1)))
+                batch_node_norms[f'node_repr_l_{ir.l}_p_{ir.p}_part_{i}_norm_mean'] = norm
             
             summary.add_node_feature_norms(batch_node_norms)

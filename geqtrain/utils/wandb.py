@@ -1,3 +1,4 @@
+import torch
 import wandb
 import logging
 from pathlib import Path
@@ -88,3 +89,15 @@ def resume_wandb_run(config):
         id=config.run_id,
         settings=wandb.Settings(_disable_stats=config.get("disable_wandb_sys_log", True)),
     )
+
+# Helper functions
+def log_feature_on_wandb(name: str, t: torch.Tensor, train: bool):
+    if not torch.jit.is_scripting() and wandb.run is not None:
+        s = "train" if train else "eval"
+        try:
+            wandb.log({
+                f"activations_dists/{s}/{name}.mean": t.mean().item(),
+                f"activations_dists/{s}/{name}.std":  t.std().item(),
+            })
+        except RuntimeError as e:
+            print(f"[WandB log error] Skipped logging {name}: {e}")

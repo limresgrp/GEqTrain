@@ -41,6 +41,7 @@ def assert_permutation_equivariant(
         func: the module or model to test
         data_in: the example input data to test with
     """
+    print("TESTING PERMUTATION EQUIVARIANCE")
     # Prevent pytest from showing this function in the traceback
     __tracebackhide__ = True
 
@@ -169,10 +170,24 @@ def assert_AtomicData_equivariant(
     # Prevent pytest from showing this function in the traceback
     __tracebackhide__ = True
 
-    device = next(func.parameters()).device
+    device = None
+    try:
+        device = next(func.parameters()).device
+    except StopIteration:
+        device = None
     if not isinstance(data_in, list):
         data_in = [data_in]
-    data_in = [AtomicData.to_AtomicDataDict(d.to(device)) for d in data_in]
+    
+    processed_data_in = []
+    for d in data_in:
+        if isinstance(d, dict):
+            d = AtomicData.from_dict(d)
+        if device is None:
+            target_device = d[AtomicDataDict.POSITIONS_KEY].device
+        else:
+            target_device = device
+        processed_data_in.append(AtomicData.to_AtomicDataDict(d.to(target_device)))
+    data_in = processed_data_in
 
     # == Test permutation of graph nodes ==
     # since permutation is discrete and should not be data dependent, run only on one frame.
@@ -183,13 +198,20 @@ def assert_AtomicData_equivariant(
     # == Test rotation, parity, and translation using e3nn ==
     irreps_in = {k: None for k in AtomicDataDict.ALLOWED_KEYS}
     irreps_in.update(func.irreps_in)
+    irreps_in.update({
+        'atom_rows': None,
+        'atom_cols': None,
+    })
     irreps_in = {k: v for k, v in irreps_in.items() if k in data_in[0]}
     irreps_out = func.irreps_out.copy()
     # for certain things, we don't care what the given irreps are...
     # make sure that we test correctly for equivariance:
-    cartesian_points_fields.extend([AtomicDataDict.POSITIONS_KEY])
+    # Make a copy to avoid modifying the default mutable argument, and ensure POSITIONS_KEY is only added once.
+    _cartesian_points_fields = list(cartesian_points_fields)
+    if AtomicDataDict.POSITIONS_KEY not in _cartesian_points_fields:
+        _cartesian_points_fields.append(AtomicDataDict.POSITIONS_KEY)
     for irps in (irreps_in, irreps_out):
-        for cartesian_points_field in cartesian_points_fields:
+        for cartesian_points_field in _cartesian_points_fields:
             if cartesian_points_field in irps:
                 # it should always have been 1o vectors
                 # since that's actually a valid Irreps
@@ -201,6 +223,7 @@ def assert_AtomicData_equivariant(
         output = func(arg_dict)
         return [output[k] for k in irreps_out]
 
+    print("TESTING ROTATION, PARITY, AND TRANSLATION")
     errs = [
         equivariance_error(
             wrapper,
@@ -224,9 +247,7 @@ def assert_AtomicData_equivariant(
     is_problem = [e[-1] > o3_tolerance for e in all_errs]
 
     message = (permutation_message + "\n") + "\n".join(
-        "   (parity_k={:1d}, did_translate={:5}, field={:20})     -> max error={:.3e}".format(
-            int(k[0]), str(bool(k[1])), str(k[2]), float(k[3])
-        )
+        f"   (parity_k={int(k[0])}, did_translate={str(bool(k[1]))}, field={str(k[2]):20})     -> max error={float(k[3]):.3e}{'  FAIL' if prob else ''}"
         for k, prob in zip(all_errs, is_problem)
     )
 

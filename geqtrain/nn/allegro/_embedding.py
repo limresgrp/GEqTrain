@@ -46,7 +46,7 @@ class AllegroEdgeEmbedding(BaseEmbedding):
         if self.has_edge_attr:
             edge_field = self.edge_field
             assert isinstance(edge_field, str)
-            edge_node_attrs_to_cat.append(data.pop(edge_field))
+            edge_node_attrs_to_cat.append(data.get(edge_field))
         edge_node_attrs_emb = torch.cat(edge_node_attrs_to_cat, dim=-1)
         if self.proj_to_latent:
             edge_node_attrs_emb = edge_node_attrs_emb @ self.linear_proj

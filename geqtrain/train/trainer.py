@@ -1,5 +1,6 @@
 # trainer.py
 import logging
+import math
 from pathlib import Path
 import shutil
 from time import perf_counter
@@ -18,9 +19,10 @@ from geqtrain.model import model_from_config
 
 # Import the new components
 from .components.distributed import DistributedManager
-from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger, 
-                                   CheckpointCallback, EarlyStoppingCallback, 
-                                   SanitizeGradCallback, GradientClippingCallback)
+from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger,
+                                   ValidationBatchPredictionLogger, CheckpointCallback,
+                                   EarlyStoppingCallback, SanitizeGradCallback,
+                                   GradientClippingCallback)
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -51,12 +53,16 @@ def check_for_config_updates(new_config):
         "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
         "device", "filepath", "ddp",
     ]
+    # Ignore certain mismatches to allow clean restarts (e.g., wandb sweeps overriding config).
+    ignored_restart_params = {"optimizer_params"}
     logging.info("Checking for updated user-modifiable parameters...")
     for key in new_config_dict:
         if key in final_config_dict and new_config_dict[key] != final_config_dict[key]:
             if key in modifiable_params:
                 logging.info(f'Updating parameter "{key}" from `{final_config_dict[key]}` to `{new_config_dict[key]}`')
                 final_config_dict[key] = new_config_dict[key]
+            elif key in ignored_restart_params:
+                logging.info(f'Ignoring updated parameter "{key}" on restart; keeping saved value `{final_config_dict[key]}`')
             else:
                 raise ValueError(f'Parameter "{key}" is not user-modifiable and cannot be changed during restart.')
 
@@ -160,6 +166,8 @@ class Trainer:
                 final_config = new_config
             
             final_config['restart'] = is_restart
+            if is_restart and not final_config.get('append'):
+                final_config['append'] = True
             
         else:
             # Non-master ranks wait to receive the final config
@@ -188,26 +196,39 @@ class Trainer:
                 VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
             }
             config_path = self.output.generate_file("config.yaml")
-            # Note: Must use the initial config's filepath to copy the *source* config.
-            shutil.copyfile(Path(self.config.filepath).resolve(), config_path) 
-            logging.info(f"Copied config file to {config_path}")
+            if self.config.get("_hydra_config", False):
+                self.config.save(config_path)
+                source_path = self.output.generate_file("config.source.yaml")
+                shutil.copyfile(Path(self.config.filepath).resolve(), source_path)
+                logging.info(f"Saved resolved config to {config_path}")
+                logging.info(f"Copied source config file to {source_path}")
+            else:
+                # Note: Must use the initial config's filepath to copy the *source* config.
+                shutil.copyfile(Path(self.config.filepath).resolve(), config_path)
+                logging.info(f"Copied config file to {config_path}")
         else:
             self.output = None; self.logfile = "dummy"
 
         self.logger = logging.getLogger(self.logfile)
         set_seed(self.config.get('seed'))
-        self.dataset_np_rng = np.random.default_rng(self.config.get('dataset_seed'))
-        self.dataset_torch_rng = torch.Generator().manual_seed(self.config.get('dataset_seed'))
+        dataset_seed = self.config.get('dataset_seed')
+        if dataset_seed is None:
+            self.dataset_np_rng = np.random.default_rng()
+            self.dataset_torch_rng = None
+        else:
+            self.dataset_np_rng = np.random.default_rng(dataset_seed)
+            self.dataset_torch_rng = torch.Generator().manual_seed(dataset_seed)
 
     def _extract_config_parameters(self):
         """Extract parameters from the config file to trainer attributes for easy access via self. """
         params_to_extract = [
-            ("learning_rate", 1e-3), ("metrics_key", "validation_loss"), ("metric_criteria", "decreasing"),
-            ("log_batch_freq", 10), ("log_epoch_freq", 1), ("save_checkpoint_freq", -1),
-            ("max_epochs", 1000), ("warmup_epochs", 0), ("report_init_validation", True),
-            ("use_ema", False), ("train_idcs", None), ("val_idcs", None), ("n_train", None),
-            ("n_val", None), ("train_val_split", "random"), ("shuffle", True),
-            ("metrics_metadata", {}),
+            ("learning_rate", 1e-3), ("metrics_key", "validation_loss"),
+            ("metric_criteria", "decreasing"), ("log_batch_freq", 10),
+            ("log_epoch_freq", 1), ("save_checkpoint_freq", -1), ("max_epochs", 1000),
+            ("warmup_epochs", 0), ("report_init_validation", True), ("use_ema", False),
+            ("train_idcs", None), ("val_idcs", None), ("n_train", None), ("n_val", None),
+            ("train_val_split", "random"), ("shuffle", True), ("metrics_metadata", {}),
+            ("validation_freq", 1),
         ]
         for param, default in params_to_extract:
             setattr(self, param, self.config.get(param, default))
@@ -284,13 +305,14 @@ class Trainer:
         self.loss = setup_loss(self.config)
         self.metrics = setup_metrics(self.config)
         self.optim = setup_optimizer(self.model, self.config)
-        self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, len(self.dl_train))
+        steps_per_epoch = self._get_steps_per_epoch()
+        self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, steps_per_epoch)
         self.ema = setup_ema(self.model, self.config)
         self.early_stopping_conds = setup_early_stopping(self.config)
 
     def _setup_callbacks(self):
         # Core callbacks
-        callbacks = [Logger(), CheckpointCallback(), EarlyStoppingCallback()]
+        callbacks = [Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
 
         # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):
@@ -319,6 +341,13 @@ class Trainer:
             cb.set_trainer(self)
         self.callbacks = callbacks
 
+    def _get_steps_per_epoch(self):
+        steps_per_epoch = len(self.dl_train)
+        accumulation_steps = self.config.get('accumulation_steps', 1)
+        if accumulation_steps > 1:
+            steps_per_epoch = math.ceil(steps_per_epoch / accumulation_steps)
+        return steps_per_epoch
+
     def _dispatch_callbacks(self, event: str, **kwargs):
         for cb in self.callbacks:
             getattr(cb, event)(**kwargs)
@@ -335,17 +364,23 @@ class Trainer:
 
             self._dispatch_callbacks('on_epoch_begin')
             
+            # Determine if validation should run this epoch
+            run_validation = (self.iepoch == -1) or ((self.iepoch + 1) % self.validation_freq == 0)
+
             # 2. Run epoch and pass the summary object to the loop to be populated
             self.training_loop.run_epoch(
                 summary=epoch_summary,
-                validation_only=(self.iepoch == -1)
+                # Only run validation if it's the initial check or if it's a validation epoch
+                run_validation=run_validation,
+                # If it's the initial check, don't run the training phase
+                train_phase=(self.iepoch > -1)
             )
             
             # 3. Finalize the summary with end-of-epoch data (timings, LR)
             epoch_summary.finalize(self)
             
             # 4. Pass the completed summary to the callbacks
-            self._dispatch_callbacks('on_epoch_end', summary=epoch_summary)
+            self._dispatch_callbacks('on_epoch_end', summary=epoch_summary, run_validation=run_validation)
             
             # 5. Next epoch
             self.iepoch += 1
