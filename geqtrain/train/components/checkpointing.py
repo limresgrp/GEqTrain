@@ -167,7 +167,18 @@ class CheckpointHandler:
         This is a static method and can be called without a Trainer instance.
         """
         traindir = Path(traindir)
-        config = Config.from_file(traindir / "config.yaml")
+        file_config = Config.from_file(traindir / "config.yaml")
+        config = file_config
+        trainer_path = traindir / "trainer.pth"
+        if trainer_path.is_file():
+            trainer_state = torch.load(trainer_path, map_location="cpu", weights_only=False)
+            trainer_config = trainer_state.get("config")
+            if trainer_config is not None:
+                config = Config(trainer_config)
+                for key, value in file_config.items():
+                    if key not in config:
+                        config[key] = value
+                logging.info("Loaded model config from trainer.pth and backfilled missing keys from config.yaml.")
         
         logging.info("Building model from training config...")
         model, _ = model_from_config(config=config, initialize=False)

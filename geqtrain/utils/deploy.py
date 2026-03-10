@@ -188,6 +188,10 @@ def build_deployment(
         model_name=model_path.name, 
         device="cpu",
     )
+    deployment_config = dict(model_config)
+    for key, value in config.items():
+        if key not in deployment_config:
+            deployment_config[key] = value
     _sanity_checks(model, model_config)
 
     # -- compile --
@@ -196,9 +200,9 @@ def build_deployment(
 
     # -- build metadata --
     metadata = {}
-    metadata[R_MAX_KEY] = str(float(config["r_max"]))
-    metadata[TF32_KEY] = str(int(config["allow_tf32"]))
-    metadata[CONFIG_KEY] = yaml.safe_dump(dict(config))
+    metadata[R_MAX_KEY] = str(float(deployment_config["r_max"]))
+    metadata[TF32_KEY] = str(int(deployment_config["allow_tf32"]))
+    metadata[CONFIG_KEY] = yaml.safe_dump(deployment_config, sort_keys=False)
     # ... other generic metadata ...
     
     # Add any extra metadata passed from the command line

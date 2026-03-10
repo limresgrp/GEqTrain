@@ -218,7 +218,7 @@ def save_file(
         elif format == "yaml":
             import yaml
 
-            yaml.dump(item, write_to)
+            yaml.dump(item, write_to, sort_keys=False)
         elif format == "torch":
             import torch
 
