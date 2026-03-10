@@ -6,8 +6,9 @@ import torch.nn.functional as F
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
-from geqtrain.data import AtomicDataDict
+from geqtrain.data import AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS, _GRAPH_FIELDS
 from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
+from geqtrain.nn._film import FiLMFunction
 from geqtrain.nn._fc import ScalarMLPFunction
 from geqtrain.nn._graph_mixin import GraphModuleMixin
 from geqtrain.nn._embedding import BaseEmbedding
@@ -225,10 +226,11 @@ class _MLP2(torch.nn.Module):
 @compile_mode("script")
 class _EQFF_Official(torch.nn.Module):
     """Matches official EQFF math and shapes. :contentReference[oaicite:7]{index=7}"""
-    def __init__(self, n_atom_basis: int, epsilon: float = 1e-8):
+    def __init__(self, n_atom_basis: int, epsilon: float = 1e-8, residual_updates: bool = True):
         super().__init__()
         self.n_atom_basis = int(n_atom_basis)
         self.epsilon = float(epsilon)
+        self.use_residual_updates = bool(residual_updates)
         # W_vu: linear map on channel dim (last dim)
         self.W_vu = torch.nn.Linear(self.n_atom_basis, self.n_atom_basis, bias=False)
         torch.nn.init.xavier_uniform_(self.W_vu.weight)
@@ -241,6 +243,29 @@ class _EQFF_Official(torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.gamma_m_2.weight)
         torch.nn.init.zeros_(self.gamma_m_2.bias)
 
+        # Residual update gates (sigmoid on learnable params; init=0 -> gate=0.5).
+        self.residual_gate_h = torch.nn.Parameter(torch.zeros(1))
+        self.residual_gate_x = torch.nn.Parameter(torch.zeros(1))
+        self.register_load_state_dict_pre_hook(self._load_residual_gates)
+
+    def _load_residual_gates(
+        self,
+        module,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key_h = prefix + "residual_gate_h"
+        if key_h not in state_dict:
+            state_dict[key_h] = torch.zeros_like(self.residual_gate_h)
+        key_x = prefix + "residual_gate_x"
+        if key_x not in state_dict:
+            state_dict[key_x] = torch.zeros_like(self.residual_gate_x)
+
     def forward(self, h: torch.Tensor, X: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # h: [N, 1, H], X: [N, equi_dim, H]
         X_p = self.W_vu(X)
@@ -248,8 +273,14 @@ class _EQFF_Official(torch.nn.Module):
         ctx = torch.cat([h, X_pn], dim=-1)  # [N, 1, 2H]
         x = self.gamma_m_2(F.silu(self.gamma_m_1(ctx)))  # [N, 1, 2H]
         m1, m2 = torch.split(x, self.n_atom_basis, dim=-1)
-        h = h + m1
-        X = X + m2 * X_p
+        if self.use_residual_updates:
+            gate_h = torch.sigmoid(self.residual_gate_h)
+            gate_x = torch.sigmoid(self.residual_gate_x)
+            h = h + gate_h * m1
+            X = X + gate_x * (m2 * X_p)
+        else:
+            h = h + m1
+            X = X + m2 * X_p
         return h, X
 
 
@@ -259,6 +290,7 @@ class _GATA_Official(torch.nn.Module):
     Implements the official GATA forward/message/edge_update logic, but in plain torch + scatter.
     See official message() and edge_update() blocks. 
     """
+    __constants__ = ["has_node_conditioning", "has_edge_conditioning", "use_residual_updates"]
     def __init__(
         self,
         n_atom_basis: int,
@@ -276,8 +308,10 @@ class _GATA_Official(torch.nn.Module):
         sep_tensor: bool = False,
         evec_dim: Optional[int] = None,
         emlp_dim: Optional[int] = None,
-        edge_ln: str = "",
         epsilon: float = 1e-8,
+        node_conditioning_dim: int = 0,
+        edge_conditioning_dim: int = 0,
+        residual_updates: bool = True,
     ):
         super().__init__()
         self.n_atom_basis = int(n_atom_basis)
@@ -290,6 +324,11 @@ class _GATA_Official(torch.nn.Module):
         self.sep_dir = bool(sep_dir)
         self.sep_tensor = bool(sep_tensor)
         self.epsilon = float(epsilon)
+        self.use_residual_updates = bool(residual_updates)
+        self.node_conditioning_dim = int(node_conditioning_dim)
+        self.edge_conditioning_dim = int(edge_conditioning_dim)
+        self.has_node_conditioning = self.node_conditioning_dim > 0
+        self.has_edge_conditioning = self.edge_conditioning_dim > 0
 
         # multiplier logic (matches official)
         multiplier = 3
@@ -325,6 +364,28 @@ class _GATA_Official(torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.W_rs.weight); torch.nn.init.zeros_(self.W_rs.bias)
 
         self.cutoff_fn = _CosineCutoff(cutoff)
+
+        # FiLM conditioning on scalar node/edge features (instantiate only when needed).
+        self.film_h = torch.nn.ModuleList()
+        self.film_t = torch.nn.ModuleList()
+        if self.has_node_conditioning:
+            self.film_h.append(
+                FiLMFunction(
+                    self.node_conditioning_dim,
+                    [],
+                    self.n_atom_basis,
+                    mlp_nonlinearity=None,
+                )
+            )
+        if self.has_edge_conditioning:
+            self.film_t.append(
+                FiLMFunction(
+                    self.edge_conditioning_dim,
+                    [],
+                    self.n_atom_basis,
+                    mlp_nonlinearity=None,
+                )
+            )
 
         # ---- edge update config parsing (matches official behavior) ----
         update_gated = ""
@@ -394,6 +455,33 @@ class _GATA_Official(torch.nn.Module):
         self.use_w_edp = self.edge_updates_active and self.update_lin_w > 0
         self.W_edp = torch.nn.Linear(self.edge_vec_dim, self.n_atom_basis, bias=True)
         torch.nn.init.xavier_uniform_(self.W_edp.weight); torch.nn.init.zeros_(self.W_edp.bias)
+
+        # Residual update gates (sigmoid on learnable params; init=0 -> gate=0.5).
+        self.residual_gate_h = torch.nn.Parameter(torch.zeros(1))
+        self.residual_gate_x = torch.nn.Parameter(torch.zeros(1))
+        self.residual_gate_t = torch.nn.Parameter(torch.zeros(1))
+        self.register_load_state_dict_pre_hook(self._load_residual_gates)
+
+    def _load_residual_gates(
+        self,
+        module,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key_h = prefix + "residual_gate_h"
+        if key_h not in state_dict:
+            state_dict[key_h] = torch.zeros_like(self.residual_gate_h)
+        key_x = prefix + "residual_gate_x"
+        if key_x not in state_dict:
+            state_dict[key_x] = torch.zeros_like(self.residual_gate_x)
+        key_t = prefix + "residual_gate_t"
+        if key_t not in state_dict:
+            state_dict[key_t] = torch.zeros_like(self.residual_gate_t)
 
     @staticmethod
     def _vector_rejection(rep: torch.Tensor, rl_ij: torch.Tensor) -> torch.Tensor:
@@ -526,10 +614,30 @@ class _GATA_Official(torch.nn.Module):
         gt = self._gamma_t(t_ij)  # [E, 1, H]
         return gt * gw.unsqueeze(1)  # [E, 1, H]
 
-    def forward(self, edge_index, h, X, rl_ij, t_ij, r_ij, n_edges, num_nodes: int):
+    def forward(
+        self,
+        edge_index,
+        h,
+        X,
+        rl_ij,
+        t_ij,
+        r_ij,
+        n_edges,
+        num_nodes: int,
+        node_conditioning: Optional[torch.Tensor] = None,
+        edge_conditioning: Optional[torch.Tensor] = None,
+    ):
         # normalize
         h = self.layernorm(h)
         X = self.tensor_layernorm(X)
+        if self.has_node_conditioning:
+            if node_conditioning is None:
+                raise RuntimeError("GATA node conditioning enabled but node_conditioning is missing.")
+            h = self.film_h[0](h.squeeze(1), node_conditioning).unsqueeze(1)
+        if self.has_edge_conditioning:
+            if edge_conditioning is None:
+                raise RuntimeError("GATA edge conditioning enabled but edge_conditioning is missing.")
+            t_ij = self.film_t[0](t_ij.squeeze(1), edge_conditioning).unsqueeze(1)
 
         # q,k: computed from h (node-wise)
         q = self.W_q(h).reshape(-1, self.num_heads, self.n_atom_basis // self.num_heads)
@@ -551,8 +659,14 @@ class _GATA_Official(torch.nn.Module):
         d_h = scatter_sum(o_s_ij, edge_center, dim=0, dim_size=num_nodes)
         d_X = scatter_sum(dX_ij, edge_center, dim=0, dim_size=num_nodes)
 
-        h = h + d_h
-        X = X + d_X
+        if self.use_residual_updates:
+            gate_h = torch.sigmoid(self.residual_gate_h)
+            gate_x = torch.sigmoid(self.residual_gate_x)
+            h = h + gate_h * d_h
+            X = X + gate_x * d_X
+        else:
+            h = h + d_h
+            X = X + d_X
 
         # edge updates (HTR)
         if (not self.last_layer) and self.edge_updates:
@@ -569,7 +683,11 @@ class _GATA_Official(torch.nn.Module):
             EQ_i = EQ[edge_center]
             EK_j = EK[edge_neighbor]
             dt_ij = self._edge_update(EQ_i, EK_j, rl_ij[..., None], t_ij)  # rl needs [...,1]
-            t_ij = t_ij + dt_ij
+            if self.use_residual_updates:
+                gate_t = torch.sigmoid(self.residual_gate_t)
+                t_ij = t_ij + gate_t * dt_ij
+            else:
+                t_ij = t_ij + dt_ij
 
         return h, X, t_ij
 
@@ -582,6 +700,10 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
       for each layer: GATA -> EQFF
     and writes scalar/vector reps back into AtomicDataDict.
     """
+    conditioning_fields: List[str]
+    graph_conditioning_fields: List[str]
+    node_conditioning_fields: List[str]
+    edge_conditioning_fields: List[str]
     def __init__(
         self,
         num_layers: int,
@@ -597,7 +719,6 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         sep_tensor: bool = False,
         evec_dim: Optional[int] = None,
         emlp_dim: Optional[int] = None,
-        edge_ln: str = "",
         epsilon: float = 1e-8,
         out_field_node: str = AtomicDataDict.NODE_FEATURES_KEY,
         out_field_node_eq: str = "vector_representation",
@@ -606,6 +727,8 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         out_irreps_node: Optional[Union[o3.Irreps, str]] = None,
         output_ls: Optional[List[int]] = None,
         output_mul: Optional[Union[int, List[int]]] = None,
+        conditioning_fields: Optional[List[str]] = None,
+        residual_updates: bool = True,
     ):
         super().__init__()
         assert num_layers >= 1
@@ -615,6 +738,10 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         self.out_field_node_eq = out_field_node_eq
         self.out_field_edge = out_field_edge
         cutoff = r_max
+        self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
+        self.graph_conditioning_fields: List[str] = []
+        self.node_conditioning_fields: List[str] = []
+        self.edge_conditioning_fields: List[str] = []
 
         self._init_irreps(
             irreps_in=irreps_in,
@@ -622,8 +749,35 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
                 AtomicDataDict.NODE_ATTRS_KEY,
                 AtomicDataDict.EDGE_ATTRS_KEY,
                 AtomicDataDict.EDGE_SPHARMS_EMB_KEY,
-            ],
+            ] + self.conditioning_fields,
         )
+        self.graph_conditioning_dim = 0
+        self.node_conditioning_dim = 0
+        self.edge_conditioning_dim = 0
+        for field in self.conditioning_fields:
+            if field not in self.irreps_in:
+                raise ValueError(f"Conditioning field '{field}' not found in irreps_in.")
+            cond_irreps = self.irreps_in[field]
+            if not all(ir.l == 0 for _, ir in cond_irreps):
+                raise ValueError(
+                    f"Conditioning field '{field}' must have scalar (0e) irreps, but got {cond_irreps}."
+                )
+            if field in _GRAPH_FIELDS:
+                self.graph_conditioning_fields.append(field)
+                self.graph_conditioning_dim += cond_irreps.dim
+            elif field in _NODE_FIELDS:
+                self.node_conditioning_fields.append(field)
+                self.node_conditioning_dim += cond_irreps.dim
+            elif field in _EDGE_FIELDS:
+                self.edge_conditioning_fields.append(field)
+                self.edge_conditioning_dim += cond_irreps.dim
+            else:
+                raise ValueError(
+                    f"Conditioning field '{field}' must be a registered graph/node/edge field."
+                )
+        # Graph conditioning is broadcast to both node and edge conditioning vectors.
+        self.node_conditioning_dim += self.graph_conditioning_dim
+        self.edge_conditioning_dim += self.graph_conditioning_dim
 
         # infer dims from irreps
         H = self.irreps_in[AtomicDataDict.NODE_ATTRS_KEY].dim
@@ -649,14 +803,16 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
                 sep_tensor=sep_tensor,
                 evec_dim=evec_dim,
                 emlp_dim=emlp_dim,
-                edge_ln=edge_ln,
                 epsilon=epsilon,
+                node_conditioning_dim=self.node_conditioning_dim,
+                edge_conditioning_dim=self.edge_conditioning_dim,
+                residual_updates=residual_updates,
             )
             for i in range(num_layers)
         ])
 
         self.eqff_list = torch.nn.ModuleList([
-            _EQFF_Official(n_atom_basis=H, epsilon=epsilon)
+            _EQFF_Official(n_atom_basis=H, epsilon=epsilon, residual_updates=residual_updates)
             for _ in range(num_layers)
         ])
 
@@ -699,6 +855,10 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         edge_index = data[AtomicDataDict.EDGE_INDEX_KEY]
         edge_center = edge_index[0]
         num_nodes = data[AtomicDataDict.NODE_ATTRS_KEY].shape[0]
+        if AtomicDataDict.BATCH_KEY in data:
+            batch = data[AtomicDataDict.BATCH_KEY]
+        else:
+            batch = None
 
         # inputs (already embedded by your EmbeddingAttrs stack)
         h0 = data[AtomicDataDict.NODE_ATTRS_KEY]      # [N, H]
@@ -727,6 +887,45 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         num_edges_per_node = scatter_sum(ones, edge_center, dim=0, dim_size=num_nodes)  # [N, 1]
         n_edges = num_edges_per_node[edge_center]  # [E, 1]
 
+        node_conditioning = torch.jit.annotate(Optional[torch.Tensor], None)
+        edge_conditioning = torch.jit.annotate(Optional[torch.Tensor], None)
+        if self.node_conditioning_dim > 0 or self.edge_conditioning_dim > 0:
+            if batch is None:
+                batch = torch.zeros((num_nodes,), device=h0.device, dtype=torch.long)
+            else:
+                batch = batch.to(device=h0.device, dtype=torch.long).squeeze(-1)
+            num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 1
+
+            graph_conditioning = torch.jit.annotate(Optional[torch.Tensor], None)
+            if len(self.graph_conditioning_fields) > 0:
+                graph_cond_list = [data[f] for f in self.graph_conditioning_fields]
+                graph_conditioning = torch.cat(graph_cond_list, dim=-1)
+                if graph_conditioning.dim() == 1:
+                    graph_conditioning = graph_conditioning.unsqueeze(0)
+                if graph_conditioning.shape[0] not in (1, num_graphs):
+                    raise ValueError(
+                        f"Graph conditioning fields are expected to be graph-level with shape [num_graphs, D]. "
+                        f"Got {graph_conditioning.shape}, num_graphs={num_graphs}."
+                    )
+                if graph_conditioning.shape[0] == 1 and num_graphs > 1:
+                    graph_conditioning = graph_conditioning.expand(num_graphs, -1)
+
+            if self.node_conditioning_dim > 0:
+                node_cond_parts = []
+                if graph_conditioning is not None:
+                    node_cond_parts.append(graph_conditioning[batch])
+                if len(self.node_conditioning_fields) > 0:
+                    node_cond_parts.extend([data[f] for f in self.node_conditioning_fields])
+                node_conditioning = torch.cat(node_cond_parts, dim=-1)
+
+            if self.edge_conditioning_dim > 0:
+                edge_cond_parts = []
+                if graph_conditioning is not None:
+                    edge_cond_parts.append(graph_conditioning[batch[edge_center]])
+                if len(self.edge_conditioning_fields) > 0:
+                    edge_cond_parts.extend([data[f] for f in self.edge_conditioning_fields])
+                edge_conditioning = torch.cat(edge_cond_parts, dim=-1)
+
         # init (official)
         H = h0.shape[-1]
         h = h0.unsqueeze(1)                   # [N, 1, H]
@@ -734,7 +933,18 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         X = torch.zeros((num_nodes, rl_ij.shape[1], H), device=h0.device, dtype=h0.dtype)  # [N, equi_dim, H]
 
         for gata, eqff in zip(self.gata_list, self.eqff_list):
-            h, X, t_ij = gata(edge_index, h, X, rl_ij, t_ij, r_ij, n_edges, num_nodes=num_nodes)
+            h, X, t_ij = gata(
+                edge_index,
+                h,
+                X,
+                rl_ij,
+                t_ij,
+                r_ij,
+                n_edges,
+                num_nodes=num_nodes,
+                node_conditioning=node_conditioning,
+                edge_conditioning=edge_conditioning,
+            )
             h, X = eqff(h, X)
 
         # write outputs
