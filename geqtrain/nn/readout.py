@@ -20,6 +20,8 @@ from geqtrain.utils._model_utils import build_concatenation_permutation
 @compile_mode("script")
 class ReadoutModule(GraphModuleMixin, nn.Module):
     conditioning_fields: List[str]
+    _equiv_flat_multiplicities: List[int]
+    _equiv_flat_dims: List[int]
     """
     This module takes a feature tensor (`field`) and computes an output tensor
     (`out_field`). It can optionally condition its internal transformations on a
@@ -46,6 +48,8 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         resnet: bool = False,
         ignore_amp: bool = False,
         bias: Optional[Union[float, List]] = None,
+        normalize_equivariant_output: bool = False,
+        normalize_equivariant_output_eps: float = 1e-8,
     ):
         super().__init__()
 
@@ -108,6 +112,10 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
         self.ignore_amp = ignore_amp
         self.resnet = resnet
+        self.normalize_equivariant_output = bool(normalize_equivariant_output)
+        self.normalize_equivariant_output_eps = float(normalize_equivariant_output_eps)
+        self._equiv_flat_multiplicities = []
+        self._equiv_flat_dims = []
 
         # --- Input/Output Irreps Determination ---
         required_irreps = []
@@ -176,6 +184,17 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             processor_out_irreps = (scalar_out_irreps_for_gm, equivariant_out_irreps_for_gm)
 
         self.irreps_out.update(gm_irreps_out)
+
+        equiv_irreps_for_normalization = (
+            processor_out_irreps_combined
+            if self.output_mode == "single"
+            else self.out_irreps_equiv
+        )
+        for mul, ir in o3.Irreps(equiv_irreps_for_normalization):
+            if ir.l == 0:
+                continue
+            self._equiv_flat_multiplicities.append(int(mul))
+            self._equiv_flat_dims.append(int(ir.dim))
         
         # --- Resnet ---
         self._resnet_update_coeff: Optional[nn.Parameter] = None
@@ -272,13 +291,54 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 coefficient_old = torch.rsqrt(coeff.square() + 1)
                 coefficient_new = coeff * coefficient_old
                 out_features = coefficient_old * old_features + coefficient_new * out_features
+            out_features = self._normalize_equivariant_tensor(out_features, scalar_offset=self.n_scalars_out)
             self._apply_bias_and_write_single(data, out_features)
         else: # "split"
             if not torch.jit.isinstance(out_features_or_tuple, Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]):
                 raise RuntimeError("ReadoutModule expected a (scalars, equivariants) tuple in split mode.")
-            self._apply_bias_and_write_split(data, out_features_or_tuple)
+            out_scalars, out_equiv = out_features_or_tuple
+            if out_equiv is not None:
+                out_equiv = self._normalize_equivariant_tensor(out_equiv, scalar_offset=0)
+            self._apply_bias_and_write_split(data, (out_scalars, out_equiv))
 
         return data
+
+    def _normalize_equivariant_tensor(self, values: torch.Tensor, scalar_offset: int) -> torch.Tensor:
+        if not self.normalize_equivariant_output:
+            return values
+        if len(self._equiv_flat_dims) == 0:
+            return values
+        if values.dim() != 2:
+            return values
+
+        chunks: List[torch.Tensor] = []
+        if scalar_offset > 0:
+            chunks.append(values[..., :scalar_offset])
+
+        cursor = scalar_offset
+        for idx in range(len(self._equiv_flat_dims)):
+            mul = int(self._equiv_flat_multiplicities[idx])
+            dim = int(self._equiv_flat_dims[idx])
+            block_size = mul * dim
+            block = values[..., cursor : cursor + block_size]
+            if block.shape[-1] != block_size:
+                raise RuntimeError(
+                    f"Expected equivariant block of width {block_size} at offset {cursor}, "
+                    f"got {block.shape[-1]}."
+                )
+            block = block.reshape(block.shape[0], mul, dim)
+            norms = torch.linalg.norm(block, dim=-1, keepdim=True)
+            normalized = torch.where(
+                norms > self.normalize_equivariant_output_eps,
+                block / torch.clamp(norms, min=self.normalize_equivariant_output_eps),
+                torch.zeros_like(block),
+            )
+            chunks.append(normalized.reshape(normalized.shape[0], block_size))
+            cursor += block_size
+
+        if cursor < values.shape[-1]:
+            chunks.append(values[..., cursor:])
+        return torch.cat(chunks, dim=-1)
 
     def _apply_bias_and_write_single(self, data: AtomicDataDict.Type, out_features: torch.Tensor):
         if self.bias is not None:
