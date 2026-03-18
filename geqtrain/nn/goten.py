@@ -26,6 +26,37 @@ def _split_to_components(tensor: torch.Tensor, lmax: int, start: int = 1, dim: i
     return list(torch.split(tensor, _get_split_sizes_from_lmax(lmax, start=start), dim=dim))
 
 
+def _flat_equivariants_to_internal_layout(
+    tensor: torch.Tensor,
+    lmax: int,
+    channels: int,
+) -> torch.Tensor:
+    parts = torch.jit.annotate(List[torch.Tensor], [])
+    start = 0
+    for l in range(1, lmax + 1):
+        width = channels * (2 * l + 1)
+        stop = start + width
+        part = tensor[:, start:stop].reshape(tensor.shape[0], channels, 2 * l + 1)
+        parts.append(part.transpose(1, 2))
+        start = stop
+    return torch.cat(parts, dim=1)
+
+
+def _internal_layout_to_flat_equivariants(
+    tensor: torch.Tensor,
+    lmax: int,
+) -> torch.Tensor:
+    parts = torch.jit.annotate(List[torch.Tensor], [])
+    start = 0
+    for l in range(1, lmax + 1):
+        width = 2 * l + 1
+        stop = start + width
+        part = tensor[:, start:stop, :].transpose(1, 2).reshape(tensor.shape[0], -1)
+        parts.append(part)
+        start = stop
+    return torch.cat(parts, dim=-1)
+
+
 class _CosineCutoff(torch.nn.Module):
     """Matches official CosineCutoff behavior."""
     def __init__(self, cutoff: float):
@@ -696,7 +727,7 @@ class _GATA_Official(torch.nn.Module):
 class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
     """
     A GotenInteractionModule that mirrors the official GotenNet interaction loop:
-      init X=0
+      init X=0 or from node equivariant attributes when available
       for each layer: GATA -> EQFF
     and writes scalar/vector reps back into AtomicDataDict.
     """
@@ -785,6 +816,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         lmax = max(ir.l for _, ir in sph_irreps)
         self.lmax = int(lmax)
         self.equi_dim = ((self.lmax + 1) ** 2) - 1
+        self.hidden_channels = int(H)
 
         self.gata_list = torch.nn.ModuleList([
             _GATA_Official(
@@ -818,6 +850,18 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # ---- declare outputs / irreps ----
         eq_irreps = o3.Irreps([(H, ir) for _, ir in sph_irreps if ir.l > 0])
+        self.use_node_eq_init = AtomicDataDict.NODE_EQ_ATTRS_KEY in self.irreps_in
+        self.node_eq_init_projection = torch.nn.Identity()
+        if self.use_node_eq_init:
+            node_eq_irreps = self.irreps_in[AtomicDataDict.NODE_EQ_ATTRS_KEY]
+            if node_eq_irreps != eq_irreps:
+                self.node_eq_init_projection = SO3_Linear(
+                    in_irreps=node_eq_irreps,
+                    out_irreps=eq_irreps,
+                    bias=False,
+                    internal_weights=True,
+                )
+
         default_out_irreps = o3.Irreps([(H, ir) for _, ir in sph_irreps])
         out_irreps_node = process_out_irreps(
             out_irreps=out_irreps_node,
@@ -931,6 +975,9 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
         h = h0.unsqueeze(1)                   # [N, 1, H]
         t_ij = t0.unsqueeze(1)                # [E, 1, H]
         X = torch.zeros((num_nodes, rl_ij.shape[1], H), device=h0.device, dtype=h0.dtype)  # [N, equi_dim, H]
+        if self.use_node_eq_init and AtomicDataDict.NODE_EQ_ATTRS_KEY in data:
+            node_eq_init = self.node_eq_init_projection(data[AtomicDataDict.NODE_EQ_ATTRS_KEY])
+            X = _flat_equivariants_to_internal_layout(node_eq_init, self.lmax, self.hidden_channels)
 
         for gata, eqff in zip(self.gata_list, self.eqff_list):
             h, X, t_ij = gata(
@@ -949,7 +996,7 @@ class GotenInteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # write outputs
         node_scalars = h.squeeze(1)  # [N, H]
-        node_equiv_flat = X.permute(0, 2, 1).reshape(num_nodes, -1)  # [N, H*equi_dim]
+        node_equiv_flat = _internal_layout_to_flat_equivariants(X, self.lmax)  # [N, eq_irreps.dim]
         if self.has_equivariant_output:
             projected = self.node_output_projection((node_scalars, node_equiv_flat))
         else:

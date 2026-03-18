@@ -44,7 +44,7 @@ def main(args=None):
     """The main entry point for training."""
     # 1. Parse config from current command line
     config = parse_command_line(args)
-    set_up_script_logger(config.verbose)
+    set_up_script_logger(config.get("verbose", "INFO"))
 
     # 2. Initialize Trainer
     trainer = None
