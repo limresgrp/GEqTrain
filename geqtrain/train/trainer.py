@@ -227,6 +227,7 @@ class Trainer:
             ("log_epoch_freq", 1), ("save_checkpoint_freq", -1), ("max_epochs", 1000),
             ("warmup_epochs", 0), ("report_init_validation", True), ("use_ema", False),
             ("train_idcs", None), ("val_idcs", None), ("n_train", None), ("n_val", None),
+            ("train_split_fraction", 0.8),
             ("train_val_split", "random"), ("shuffle", True), ("metrics_metadata", {}),
             ("validation_freq", 1),
         ]

@@ -39,6 +39,21 @@ class DatasetBuilder:
         self.output = output
         self.dataset_rng = dataset_rng
 
+    def _get_default_train_split_fraction(self) -> float:
+        train_split_fraction = self.config.get("train_split_fraction", 0.8)
+        try:
+            train_split_fraction = float(train_split_fraction)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "Config key 'train_split_fraction' must be a float strictly between 0 and 1."
+            ) from exc
+
+        if not (0.0 < train_split_fraction < 1.0):
+            raise ValueError(
+                f"Config key 'train_split_fraction' must be strictly between 0 and 1, got {train_split_fraction}."
+            )
+        return train_split_fraction
+
     # --- For generating indices efficiently ---
     def resolve_split_indices(self) -> Tuple[List[List[int]], List[List[int]]]:
         """
@@ -226,8 +241,14 @@ class DatasetBuilder:
             if n_train: return n_train
             if val_dset_provided: return train_dset.n_observations.tolist()
             if n_val: return [n - v for n, v in zip(train_dset.n_observations, n_val)]
-            
-            self.logger.warning("No 'n_train' or 'n_val' provided; using default 80/20 split on the total dataset size.")
+
+            train_split_fraction = self._get_default_train_split_fraction()
+            validation_split_fraction = 1.0 - train_split_fraction
+            self.logger.warning(
+                "No 'n_train' or 'n_val' provided; using the default "
+                f"{train_split_fraction:.0%}/{validation_split_fraction:.0%} "
+                "train/validation split on the total dataset size."
+            )
             
             n_observations_list = train_dset.n_observations.tolist()
             num_datasets = len(n_observations_list)
@@ -236,8 +257,8 @@ class DatasetBuilder:
             if total_observations == 0:
                 return [0] * num_datasets # Handle empty dataset case
 
-            # 1. Calculate the total number of training samples required (80% of the grand total)
-            target_n_train = int(total_observations * 0.8)
+            # 1. Calculate the total number of training samples required from the configured fraction.
+            target_n_train = int(total_observations * train_split_fraction)
 
             # 2. Distribute this total count across the sub-datasets
             # We "deal" one training sample to each dataset in a round-robin fashion
