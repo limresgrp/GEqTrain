@@ -1,7 +1,7 @@
 """ Adapted from https://github.com/mir-group/nequip
 """
 
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Dict, Any
 
 import torch
 from e3nn import o3
@@ -23,6 +23,63 @@ def _inverse_permutation(perm):
     inv = torch.empty_like(perm)
     inv[perm] = torch.arange(perm.size(0), device=perm.device)
     return inv
+
+
+def _classify_field_axis(
+    key: str,
+    value: Any,
+    num_nodes: int,
+    num_edges: int,
+    node_fields: set,
+    edge_fields: set,
+) -> str:
+    if key in node_fields:
+        return "node"
+    if key in edge_fields:
+        return "edge"
+    if key == AtomicDataDict.EDGE_INDEX_KEY:
+        return "edge_index"
+    if not isinstance(value, torch.Tensor) or value.ndim == 0:
+        return "other"
+    if value.shape[0] == num_nodes and value.shape[0] != num_edges:
+        return "node"
+    if value.shape[0] == num_edges and value.shape[0] != num_nodes:
+        return "edge"
+    return "other"
+
+
+def _infer_permutation_fields(
+    func: GraphModuleMixin,
+    data_dict: AtomicDataDict.Type,
+    num_nodes: int,
+    num_edges: int,
+):
+    node_fields = set(_NODE_FIELDS)
+    edge_fields = set(_EDGE_FIELDS)
+
+    declared_irreps: Dict[str, Any] = {}
+    declared_irreps.update(getattr(func, "irreps_in", {}))
+    declared_irreps.update(getattr(func, "irreps_out", {}))
+
+    for key, irrep in declared_irreps.items():
+        if key not in data_dict:
+            continue
+        if irrep is None:
+            continue
+        axis = _classify_field_axis(
+            key=key,
+            value=data_dict[key],
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            node_fields=node_fields,
+            edge_fields=edge_fields,
+        )
+        if axis == "node":
+            node_fields.add(key)
+        elif axis == "edge":
+            edge_fields.add(key)
+
+    return node_fields, edge_fields
 
 
 def assert_permutation_equivariant(
@@ -53,18 +110,24 @@ def assert_permutation_equivariant(
     data_in = data_in.copy()
     device = data_in[AtomicDataDict.POSITIONS_KEY].device
 
-    node_permute_fields = _NODE_FIELDS
-    edge_permute_fields = _EDGE_FIELDS
+    num_nodes: int = len(data_in[AtomicDataDict.POSITIONS_KEY])
+    num_edges: int = data_in[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
+    node_permute_fields, edge_permute_fields = _infer_permutation_fields(
+        func=func,
+        data_dict=data_in,
+        num_nodes=num_nodes,
+        num_edges=num_edges,
+    )
 
     # Make permutations and make sure they are not identities
-    n_node: int = len(data_in[AtomicDataDict.POSITIONS_KEY])
+    n_node: int = num_nodes
     while True:
         node_perm = torch.randperm(n_node, device=device)
         if n_node <= 1:
             break  # otherwise inf loop
         if not torch.all(node_perm == torch.arange(n_node, device=device)):
             break
-    n_edge: int = data_in[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
+    n_edge: int = num_edges
     while True:
         edge_perm = torch.randperm(n_edge, device=device)
         if n_edge <= 1:
@@ -78,9 +141,17 @@ def assert_permutation_equivariant(
 
     perm_data_in = {}
     for k in data_in.keys():
-        if k in node_permute_fields:
+        axis = _classify_field_axis(
+            key=k,
+            value=data_in[k],
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            node_fields=node_permute_fields,
+            edge_fields=edge_permute_fields,
+        )
+        if axis == "node":
             perm_data_in[k] = data_in[k][node_perm]
-        elif k in edge_permute_fields:
+        elif axis == "edge":
             perm_data_in[k] = data_in[k][edge_perm]
         else:
             perm_data_in[k] = data_in[k]
@@ -99,7 +170,15 @@ def assert_permutation_equivariant(
     messages = []
     num_problems: int = 0
     for k in out_orig.keys():
-        if k in node_permute_fields:
+        axis = _classify_field_axis(
+            key=k,
+            value=out_orig[k],
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            node_fields=node_permute_fields,
+            edge_fields=edge_permute_fields,
+        )
+        if axis == "node":
             if out_orig[k].dtype == torch.bool:
                 err = (out_orig[k][node_perm] != out_perm[k]).max()
             else:
@@ -110,7 +189,7 @@ def assert_permutation_equivariant(
             messages.append(
                 f"   node permutation equivariance of field {k:20}       -> max error={err:.3e}{'  FAIL' if fail else ''}"
             )
-        elif k in edge_permute_fields:
+        elif axis == "edge":
             err = (out_orig[k][edge_perm] - out_perm[k]).abs().max()
             fail = not torch.allclose(out_orig[k][edge_perm], out_perm[k], atol=atol)
             if fail:
@@ -150,6 +229,8 @@ def assert_AtomicData_equivariant(
     cartesian_points_fields: List[str] = [],
     permutation_tolerance: Optional[float] = None,
     o3_tolerance: Optional[float] = None,
+    input_irreps_overrides: Optional[Dict[str, Union[str, o3.Irreps]]] = None,
+    output_irreps_overrides: Optional[Dict[str, Union[str, o3.Irreps]]] = None,
     **kwargs,
 ) -> str:
     r"""Test the rotation, translation, parity, and permutation equivariance of ``func``.
@@ -199,11 +280,20 @@ def assert_AtomicData_equivariant(
     irreps_in = {k: None for k in AtomicDataDict.ALLOWED_KEYS}
     irreps_in.update(func.irreps_in)
     irreps_in.update({
-        'atom_rows': None,
-        'atom_cols': None,
+        "atom_rows": None,
+        "atom_cols": None,
     })
+    # Ensure wrapper() forwards all present inputs, even if a module did not
+    # explicitly expose them in irreps_in.
+    for k in data_in[0].keys():
+        if k not in irreps_in:
+            irreps_in[k] = None
+    if input_irreps_overrides is not None:
+        irreps_in.update(AtomicDataDict._fix_irreps_dict(input_irreps_overrides))
     irreps_in = {k: v for k, v in irreps_in.items() if k in data_in[0]}
     irreps_out = func.irreps_out.copy()
+    if output_irreps_overrides is not None:
+        irreps_out.update(AtomicDataDict._fix_irreps_dict(output_irreps_overrides))
     # for certain things, we don't care what the given irreps are...
     # make sure that we test correctly for equivariance:
     # Make a copy to avoid modifying the default mutable argument, and ensure POSITIONS_KEY is only added once.

@@ -98,10 +98,12 @@ def _test_equivariance(config, logger):
     final_model.eval()
     final_model.to(config.get('device', 'cpu'))
     indexes = torch.randperm(n_train)[:1]
+    input_irreps_overrides = _collect_input_irreps_overrides(config)
     errstr = assert_AtomicData_equivariant(
         final_model,
         [dataset[i] for i in indexes],
-        config.get("cartesian_fields", []),
+        input_irreps_overrides=input_irreps_overrides,
+        cartesian_points_fields=config.get("cartesian_fields", []),
         # do_parity=False,
         # do_translation=False,
         ntrials=1,
@@ -119,6 +121,21 @@ def _test_equivariance(config, logger):
     del errstr, indexes, n_train
 
     return
+
+
+def _collect_input_irreps_overrides(config):
+    overrides = {}
+    for section in ("eq_node_attributes", "eq_edge_attributes", "eq_graph_attributes"):
+        attributes = config.get(section, {})
+        if not isinstance(attributes, dict):
+            continue
+        for field, values in attributes.items():
+            if not isinstance(values, dict):
+                continue
+            irreps = values.get("irreps")
+            if irreps is not None:
+                overrides[field] = irreps
+    return overrides
 
 def _check_old_keys(config) -> None:
     """check ``config`` for old/depricated keys and emit corresponding errors/warnings"""

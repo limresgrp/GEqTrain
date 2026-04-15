@@ -11,7 +11,7 @@ from geqtrain.data import (
     _NODE_FIELDS,
     _GRAPH_FIELDS,
 )
-from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
+from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction, SO3_Linear
 from geqtrain.nn._heads import L0IndexedAttention
 from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 from geqtrain.utils._model_utils import build_concatenation_permutation
@@ -167,12 +167,14 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             
         # Prepare irreps_out for GraphModuleMixin, reflecting the actual output fields
         gm_irreps_out = {}
+        equiv_irreps_for_normalization = o3.Irreps("")
         if self.output_mode == "single":
             processor_out_irreps = processor_out_irreps_combined
             gm_irreps_out[self.out_field] = processor_out_irreps
             if self.scalar_out_field is not None:
                 scalar_part = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps if ir.l == 0])
                 if scalar_part.dim > 0: gm_irreps_out[self.scalar_out_field] = scalar_part
+            equiv_irreps_for_normalization = processor_out_irreps_combined
         else:
             # Split the combined output irreps into scalar and equivariant parts for GraphModuleMixin
             scalar_out_irreps_for_gm = o3.Irreps([(mul, ir) for mul, ir in processor_out_irreps_combined if ir.l == 0])
@@ -181,15 +183,11 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 gm_irreps_out[self.invariant_out_field] = scalar_out_irreps_for_gm
             if self.equivariant_out_field and len(equivariant_out_irreps_for_gm) > 0:
                 gm_irreps_out[self.equivariant_out_field] = equivariant_out_irreps_for_gm
+            equiv_irreps_for_normalization = equivariant_out_irreps_for_gm
             processor_out_irreps = (scalar_out_irreps_for_gm, equivariant_out_irreps_for_gm)
 
         self.irreps_out.update(gm_irreps_out)
 
-        equiv_irreps_for_normalization = (
-            processor_out_irreps_combined
-            if self.output_mode == "single"
-            else self.out_irreps_equiv
-        )
         for mul, ir in o3.Irreps(equiv_irreps_for_normalization):
             if ir.l == 0:
                 continue
@@ -224,6 +222,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             conditioning_dim=self.total_conditioning_dim,
             latent_module=readout_latent,
             latent_kwargs=readout_latent_kwargs,
+            equiv_linear_module=SO3_Linear,
             strict_irreps=strict_irreps,
             output_shape_spec="flat",
         )
