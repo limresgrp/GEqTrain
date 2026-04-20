@@ -8,6 +8,7 @@ from e3nn.util.jit import compile_mode
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn._graph_mixin import GraphModuleMixin
+from geqtrain.nn.t_embedders import CategoricalPositionalEmbedding
 
 
 @torch.jit.script
@@ -69,7 +70,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
         my_irreps_in = {}
         for field, values in attributes.items():
             attribute_type = values.get("attribute_type", "categorical")
-            embedding_mode = values.get("embedding_mode", "embedding")
+            embedding_mode = str(values.get("embedding_mode", "embedding")).lower()
             is_binned_numerical = attribute_type == "numerical" and _uses_binning(values)
 
             if attribute_type == "numerical" and not is_binned_numerical:
@@ -88,7 +89,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 self._numerical_attrs.append(field)
                 my_irreps_in[field] = Irreps(f"{embedding_dim}x0e")
             else:
-                if embedding_mode == "embedding" and "embedding_dimensionality" not in values:
+                if embedding_mode in ("embedding", "positional") and "embedding_dimensionality" not in values:
                     logging.warning(
                         f"Field {field} is missing 'embedding_dimensionality'. Not using as invariant input"
                     )
@@ -104,8 +105,7 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                 if embedding_mode == "one_hot":
                     emb_module = OneHotEncoding(n_types)
                     output_embedding_dim_incr = n_types
-                else:
-                    assert embedding_mode == "embedding"
+                elif embedding_mode == "embedding":
                     embedding_dim = int(values["embedding_dimensionality"])
                     if embedding_dim <= 0:
                         logging.warning(
@@ -115,6 +115,25 @@ class EmbeddingInputAttrs(GraphModuleMixin, torch.nn.Module):
                     emb_module = torch.nn.Embedding(n_types, embedding_dim)
                     torch.nn.init.xavier_uniform_(emb_module.weight)
                     output_embedding_dim_incr = embedding_dim
+                elif embedding_mode == "positional":
+                    embedding_dim = int(values["embedding_dimensionality"])
+                    if embedding_dim <= 0:
+                        logging.warning(
+                            f"Field {field} has non-positive embedding_dimensionality. Skipping categorical embedding."
+                        )
+                        continue
+                    positional_base = float(values.get("positional_base", 10000.0))
+                    emb_module = CategoricalPositionalEmbedding(
+                        num_types=n_types,
+                        embedding_dim=embedding_dim,
+                        base=positional_base,
+                    )
+                    output_embedding_dim_incr = embedding_dim
+                else:
+                    raise ValueError(
+                        f"Unsupported embedding_mode '{embedding_mode}' for attribute '{field}'. "
+                        "Expected one of: one_hot, embedding, positional."
+                    )
                 output_embedding_dim += output_embedding_dim_incr
                 self._categorical_attrs_modules[field] = emb_module
                 my_irreps_in[field] = None

@@ -41,6 +41,25 @@ def test_parse_attrs_numerical_binning():
     assert out == [0, 0, 0, 1, 2, 3, 3, 4]
 
 
+def test_parse_attrs_positional_mode_supported():
+    values = np.array([0.0, 2.0, np.nan], dtype=np.float32)
+    fields = {"cat_pos": values}
+    attrs = {
+        "cat_pos": {
+            "attribute_type": "categorical",
+            "embedding_mode": "positional",
+            "embedding_dimensionality": 6,
+            "num_types": 3,
+            "actual_num_types": 4,
+            "can_be_undefined": True,
+        }
+    }
+
+    node_fields, _ = parse_attrs(attrs, fields, {})
+    out = node_fields["cat_pos"].cpu().numpy().tolist()
+    assert out == [0, 2, 3]
+
+
 def test_embedding_input_attrs_node_mixed_equivariant():
     num_atoms = 5
     attributes = {
@@ -103,6 +122,39 @@ def test_embedding_input_attrs_node_mixed_equivariant():
     assert node_eq.shape == (num_atoms, 3)
     assert node_attrs.dtype == data[AtomicDataDict.POSITIONS_KEY].dtype
     assert node_eq.dtype == data[AtomicDataDict.POSITIONS_KEY].dtype
+
+
+def test_embedding_input_attrs_categorical_positional():
+    num_atoms = 6
+    attributes = {
+        "cat_pos": {
+            "attribute_type": "categorical",
+            "embedding_mode": "positional",
+            "embedding_dimensionality": 8,
+            "num_types": 4,
+            "actual_num_types": 4,
+        },
+    }
+
+    module = EmbeddingInputAttrs(
+        attributes=attributes,
+        out_field=AtomicDataDict.NODE_INPUT_ATTRS_KEY,
+        irreps_in=_make_irreps_in({"cat_pos": None}),
+    )
+
+    indices = torch.tensor([[0], [1], [2], [3], [1], [0]], dtype=torch.long)
+    data = {
+        AtomicDataDict.POSITIONS_KEY: torch.randn(num_atoms, 3),
+        "cat_pos": indices,
+    }
+
+    out = module(data)
+    node_attrs = out[AtomicDataDict.NODE_INPUT_ATTRS_KEY]
+    assert node_attrs.shape == (num_atoms, 8)
+    assert node_attrs.dtype == data[AtomicDataDict.POSITIONS_KEY].dtype
+    assert torch.allclose(node_attrs[0], node_attrs[5])
+    assert torch.allclose(node_attrs[1], node_attrs[4])
+    assert not torch.allclose(node_attrs[0], node_attrs[1])
 
 
 def test_embedding_input_attrs_binned_numerical_one_hot():

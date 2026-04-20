@@ -103,10 +103,10 @@ def parse_attrs(
 
     Attribute config schema (node/edge/graph/extra):
       - attribute_type: "categorical" (default) or "numerical"
-      - embedding_mode: "embedding" (default) or "one_hot"
+      - embedding_mode: "embedding" (default), "one_hot", or "positional"
       - num_types: number of categorical bins/classes (required for categorical or binned numerical)
       - can_be_undefined: if True, allows NaN and adds an "unknown" bin at index num_types
-      - embedding_dimensionality: used by embedding layers (only enforced downstream)
+      - embedding_dimensionality: used by embedding/positional layers (only enforced downstream)
 
     Binning for numerical attributes:
       - Provide attribute_type: numerical plus either:
@@ -126,15 +126,15 @@ def parse_attrs(
             input_val = val
             attribute_type = options.get('attribute_type', 'categorical')
             assert attribute_type in ['categorical', 'numerical']
-            embedding_mode = options.get('embedding_mode', 'embedding')
-            assert embedding_mode in ['embedding', 'one_hot']
+            embedding_mode = str(options.get('embedding_mode', 'embedding')).lower()
+            assert embedding_mode in ['embedding', 'one_hot', 'positional']
             is_binned_numerical = attribute_type == "numerical" and _has_binning(options)
 
             if attribute_type == 'numerical' and not is_binned_numerical:
                 if input_val is not None:
                     input_val = input_val.astype(np.float32)
             else:
-                if embedding_mode == "embedding" and "embedding_dimensionality" not in options:
+                if embedding_mode in ["embedding", "positional"] and "embedding_dimensionality" not in options:
                     continue  # skip if embedding is requested but dimensionality is missing
                 if val is None:
                     val = np.array([np.nan], dtype=np.float32)
