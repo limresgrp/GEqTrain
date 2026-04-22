@@ -107,18 +107,39 @@ class CheckpointHandler:
     def apply_state_for_restart(self, state: dict):
         """Apply a loaded state dictionary to the trainer's components."""
         logging.info("Applying loaded state to trainer components...")
-        
+
+        configured_group_lrs = self._get_configured_optimizer_lrs()
+
         # Load states into the already initialized components
         model_to_load = self.trainer.model.module if self.trainer.dist.is_distributed else self.trainer.model
         model_to_load.load_state_dict(state['model_state_dict'])
         self.trainer.optim.load_state_dict(state['optim_state_dict'])
-        
+
         if self.trainer.lr_sched and state.get('sched_state_dict') is not None:
             self.trainer.lr_sched.load_state_dict(state['sched_state_dict'])
-            
+
         if self.trainer.ema and state.get('ema_state_dict') is not None:
             self.trainer.ema.load_state_dict(state['ema_state_dict'])
-        
+
+        lr_overridden = self._is_learning_rate_overridden(state)
+        if lr_overridden:
+            target_group_lrs = configured_group_lrs
+            self._set_optimizer_group_lrs(target_group_lrs)
+            self._sync_scheduler_lrs(target_group_lrs)
+            logging.info(
+                "Detected updated `learning_rate` in restart config; warmup target LR "
+                "will use the configured optimizer LR values."
+            )
+        else:
+            target_group_lrs = [group["lr"] for group in self.trainer.optim.param_groups]
+
+        if self.trainer.warmup_sched is not None:
+            self._reset_warmup_scheduler(target_group_lrs)
+            logging.info(
+                "Restart warmup reset from step 0 with target LRs: %s",
+                [float(lr) for lr in target_group_lrs],
+            )
+
         # Load trainer metadata
         self.trainer.iepoch = state['iepoch']
         self.trainer.best_epoch = state['best_epoch']
@@ -126,6 +147,49 @@ class CheckpointHandler:
         self.trainer.cumulative_wall = state.get('cumulative_wall', 0)
         
         logging.info(f"Successfully applied state. Resuming from epoch {self.trainer.iepoch + 1}.")
+
+    def _get_configured_optimizer_lrs(self):
+        if self.trainer.warmup_sched is not None and hasattr(self.trainer.warmup_sched, "lrs"):
+            return [float(lr) for lr in self.trainer.warmup_sched.lrs]
+        return [float(group["lr"]) for group in self.trainer.optim.param_groups]
+
+    def _set_optimizer_group_lrs(self, lrs):
+        if len(lrs) != len(self.trainer.optim.param_groups):
+            raise ValueError(
+                f"Cannot assign {len(lrs)} learning rates to {len(self.trainer.optim.param_groups)} optimizer groups."
+            )
+        for group, lr in zip(self.trainer.optim.param_groups, lrs):
+            lr = float(lr)
+            group["lr"] = lr
+            if "initial_lr" in group:
+                group["initial_lr"] = lr
+
+    def _sync_scheduler_lrs(self, lrs):
+        lr_sched = self.trainer.lr_sched
+        if lr_sched is None:
+            return
+        if hasattr(lr_sched, "base_lrs"):
+            lr_sched.base_lrs = [float(lr) for lr in lrs]
+        if hasattr(lr_sched, "_last_lr"):
+            lr_sched._last_lr = [float(lr) for lr in lrs]
+
+    def _reset_warmup_scheduler(self, target_lrs):
+        warmup_sched = self.trainer.warmup_sched
+        if warmup_sched is None:
+            return
+        self._set_optimizer_group_lrs(target_lrs)
+        warmup_sched.lrs = [float(lr) for lr in target_lrs]
+        warmup_sched.last_step = -1
+        # Re-apply the first warmup dampening factor so the next optimizer step uses warm-start LR.
+        warmup_sched.dampen()
+
+    def _is_learning_rate_overridden(self, state: dict) -> bool:
+        checkpoint_config = state.get("config", None)
+        if checkpoint_config is None:
+            return False
+        saved_lr = checkpoint_config.get("learning_rate", None)
+        current_lr = self.trainer.config.get("learning_rate", None)
+        return current_lr != saved_lr
 
     def _load_indices_from_run(self, config, traindir):
         """
