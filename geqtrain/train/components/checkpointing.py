@@ -2,7 +2,7 @@
 import logging
 from pathlib import Path
 from os.path import isfile
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Mapping
 
 import torch
 
@@ -72,23 +72,127 @@ class CheckpointHandler:
             'val_idcs': self.trainer.val_idcs
         }
 
-    def load_model_for_resume(self):
-        """Handles the logic for `fine_tune` by calling the shared static method."""
-        config = self.trainer.config
-        fine_tune_path_str = config.get("fine_tune")
-        
-        fine_tune_path = Path(fine_tune_path_str)
-        traindir = fine_tune_path.parent if fine_tune_path.is_file() else fine_tune_path
-        model_name = fine_tune_path.name if fine_tune_path.is_file() else "last_model.pth"
-        
-        model, updated_config = CheckpointHandler.load_model_from_training_session(
-            traindir=traindir, 
-            model_name=model_name, 
-            device=self.trainer.dist.device,
+    def _resolve_fine_tune_checkpoint_path(self) -> Path:
+        fine_tune_path_str = self.trainer.config.get("fine_tune")
+        if fine_tune_path_str is None:
+            raise ValueError("`fine_tune` is not set in config.")
+        fine_tune_path = Path(str(fine_tune_path_str))
+        return fine_tune_path if fine_tune_path.is_file() else fine_tune_path / "last_model.pth"
+
+    @staticmethod
+    def _unwrap_model_state_dict(raw_state):
+        if isinstance(raw_state, Mapping) and "model_state_dict" in raw_state:
+            return raw_state["model_state_dict"]
+        return raw_state
+
+    @staticmethod
+    def _format_key_list(keys, max_items: int = 20) -> str:
+        keys = sorted(list(keys))
+        if len(keys) <= max_items:
+            return ", ".join(keys)
+        head = ", ".join(keys[:max_items])
+        return f"{head}, ... (+{len(keys) - max_items} more)"
+
+    def apply_fine_tune_weights(self):
+        """
+        Load fine-tune weights into the current model architecture defined by the current config.
+
+        Behavior:
+          - Unexpected checkpoint keys (present in checkpoint, absent in model):
+              fail by default; can be ignored with `fine_tune_ignore_unexpected_keys: true`.
+          - Missing model keys (present in model, absent in checkpoint):
+              always allowed with warning.
+          - Same-name keys with mismatched tensor shapes:
+              fail.
+        """
+        checkpoint_path = self._resolve_fine_tune_checkpoint_path()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Fine-tune checkpoint not found: {checkpoint_path}")
+
+        model_to_load = self.trainer.model.module if self.trainer.dist.is_distributed else self.trainer.model
+        model_state = model_to_load.state_dict()
+        device = self.trainer.dist.device
+        raw_state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        checkpoint_state = self._unwrap_model_state_dict(raw_state)
+        if not isinstance(checkpoint_state, Mapping):
+            raise TypeError(
+                f"Unsupported fine-tune checkpoint format at {checkpoint_path}: "
+                f"expected a mapping, got {type(checkpoint_state)}"
+            )
+        checkpoint_state = dict(checkpoint_state)
+
+        # Handle common DDP prefix mismatch.
+        if (
+            len(checkpoint_state) > 0
+            and all(k.startswith("module.") for k in checkpoint_state.keys())
+            and not any(k.startswith("module.") for k in model_state.keys())
+        ):
+            checkpoint_state = {k[len("module."):]: v for k, v in checkpoint_state.items()}
+
+        model_keys = set(model_state.keys())
+        checkpoint_keys = set(checkpoint_state.keys())
+        unexpected_keys = checkpoint_keys - model_keys
+        missing_keys = model_keys - checkpoint_keys
+
+        shared_keys = checkpoint_keys & model_keys
+        shape_mismatch_keys = sorted(
+            [k for k in shared_keys if checkpoint_state[k].shape != model_state[k].shape]
         )
-        
-        updated_config = self._load_indices_from_run(updated_config, traindir)
-        return model, updated_config
+        if shape_mismatch_keys:
+            mismatch_details = ", ".join(
+                f"{k}: ckpt{tuple(checkpoint_state[k].shape)} vs model{tuple(model_state[k].shape)}"
+                for k in shape_mismatch_keys[:20]
+            )
+            if len(shape_mismatch_keys) > 20:
+                mismatch_details += f", ... (+{len(shape_mismatch_keys) - 20} more)"
+            raise ValueError(
+                "Fine-tune checkpoint has same-name parameters with incompatible shapes: "
+                f"{mismatch_details}"
+            )
+
+        ignore_unexpected = bool(self.trainer.config.get("fine_tune_ignore_unexpected_keys", False))
+        if unexpected_keys and not ignore_unexpected:
+            raise ValueError(
+                "Fine-tune checkpoint contains keys not present in current model architecture: "
+                f"{self._format_key_list(unexpected_keys)}. "
+                "Set `fine_tune_ignore_unexpected_keys: true` to ignore these keys."
+            )
+        if unexpected_keys and ignore_unexpected:
+            logging.warning(
+                "Ignoring %d unexpected fine-tune checkpoint keys not present in current model: %s",
+                len(unexpected_keys),
+                self._format_key_list(unexpected_keys),
+            )
+
+        filtered_state = {k: v for k, v in checkpoint_state.items() if k in model_state}
+        load_result = model_to_load.load_state_dict(filtered_state, strict=False)
+        if len(load_result.unexpected_keys) > 0:
+            raise RuntimeError(
+                "Internal error: unexpected keys remained after fine-tune filtering: "
+                f"{self._format_key_list(load_result.unexpected_keys)}"
+            )
+        if len(load_result.missing_keys) > 0:
+            logging.warning(
+                "Current model has %d parameters/buffers with no counterpart in fine-tune checkpoint. "
+                "They keep their initialized values. Missing keys: %s",
+                len(load_result.missing_keys),
+                self._format_key_list(load_result.missing_keys),
+            )
+        elif missing_keys:
+            # Fallback in case load_result format changes.
+            logging.warning(
+                "Current model has %d parameters/buffers with no counterpart in fine-tune checkpoint. "
+                "They keep their initialized values. Missing keys: %s",
+                len(missing_keys),
+                self._format_key_list(missing_keys),
+            )
+
+        loaded_count = len(filtered_state)
+        logging.info(
+            "Loaded %d tensors from fine-tune checkpoint %s into current model.",
+            loaded_count,
+            checkpoint_path,
+        )
     
     def load_raw_state_for_restart(self):
         """Load the trainer state dictionary from the checkpoint file without applying it."""

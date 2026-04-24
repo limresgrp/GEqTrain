@@ -127,9 +127,8 @@ class Trainer:
         # 8. Initialize training state variables
         self._initialize_training_state()
 
-        # 9. Handle fine-tuning (only if it's a new run, not a restart).
-        if self.config.get('fine_tune') and not self.config.get('restart'):
-            model, self.config = self.checkpoint_handler.load_model_for_resume()
+        # 9. For fine-tuning, keep the current config/model architecture.
+        # We only load weights later into the current model (after model construction).
 
         # 10. Setup dataset and dataloaders
         # This will use the restored indices on a restart.
@@ -138,6 +137,8 @@ class Trainer:
 
         # 11. Setup model and training-related objects
         self._setup_model(model)
+        if self.config.get('fine_tune') and not self.config.get('restart'):
+            self.checkpoint_handler.apply_fine_tune_weights()
         self._setup_training_components()
 
         # 12. If restarting, APPLY the rest of the state to the components we just built.
