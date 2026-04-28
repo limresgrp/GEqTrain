@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import shutil
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 import torch
@@ -27,6 +28,25 @@ from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
 from .components.loop import TrainingLoop
+
+
+def _to_canonical_form(obj: Any) -> Any:
+    """Recursively remove empty entries so {} / [] / None and missing are treated equivalently."""
+    if isinstance(obj, dict):
+        cleaned = {}
+        for key, value in obj.items():
+            cleaned_value = _to_canonical_form(value)
+            if cleaned_value not in (None, {}, []):
+                cleaned[key] = cleaned_value
+        return cleaned
+    if isinstance(obj, list):
+        return [_to_canonical_form(item) for item in obj]
+    return obj
+
+
+def _canonically_equal(a: Any, b: Any) -> bool:
+    return _to_canonical_form(a) == _to_canonical_form(b)
+
 
 def check_for_config_updates(new_config):
     """
@@ -57,7 +77,7 @@ def check_for_config_updates(new_config):
     ignored_restart_params = {"optimizer_params"}
     logging.info("Checking for updated user-modifiable parameters...")
     for key in new_config_dict:
-        if key in final_config_dict and new_config_dict[key] != final_config_dict[key]:
+        if key in final_config_dict and not _canonically_equal(new_config_dict[key], final_config_dict[key]):
             if key in modifiable_params:
                 logging.info(f'Updating parameter "{key}" from `{final_config_dict[key]}` to `{new_config_dict[key]}`')
                 final_config_dict[key] = new_config_dict[key]

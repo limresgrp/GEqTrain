@@ -8,7 +8,7 @@ from geqtrain.train._key import TRAIN
 from geqtrain.train.components.inference import prepare_chunked_input_data
 from geqtrain.train.components.loop import TrainingLoop
 from geqtrain.train.metrics import Metrics
-from geqtrain.train.trainer import Trainer
+from geqtrain.train.trainer import Trainer, check_for_config_updates
 from geqtrain.utils.config import Config
 from geqtrain.utils.torch_geometric import Data, Batch
 
@@ -227,3 +227,36 @@ def test_restart_sets_append(tmp_path):
 
     final_config = Trainer._resolve_config_and_restart_status(trainer, new_config)
     assert final_config.get("append") is True
+
+
+def test_restart_config_comparison_ignores_missing_vs_empty_nested_fields(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    saved_config = Config.from_dict(
+        {
+            "root": str(tmp_path),
+            "run_name": "run",
+            "some_complex": {
+                "name": "graph_input_attrs",
+                "attributes": {},
+                "eq_attributes": {},
+                "nested": {"deep_empty": None},
+            },
+        }
+    )
+    torch.save({"config": saved_config}, run_dir / "trainer.pth")
+
+    new_config = Config.from_dict(
+        {
+            "root": str(tmp_path),
+            "run_name": "run",
+            "some_complex": {
+                "name": "graph_input_attrs",
+            },
+        }
+    )
+    new_config.filepath = str(tmp_path / "config.yaml")
+
+    final_config = check_for_config_updates(new_config)
+    assert final_config["some_complex"]["name"] == "graph_input_attrs"
