@@ -9,6 +9,7 @@ from geqtrain.train._loss import LogCoshLoss, LossWrapper
 from geqtrain.train.components.inference import run_inference
 from geqtrain.train.components.setup import setup_metrics
 from geqtrain.utils.config import Config
+from geqtrain.utils.inference_metadata import build_inference_metadata_bundle
 from geqtrain.utils.normalization import get_transform_param_key, resolve_normalization_map
 from geqtrain.utils.torch_geometric import Batch
 
@@ -307,6 +308,40 @@ def test_run_inference_denormalizes_outputs_when_loss_fn_missing(tmp_path):
         data=batch,
         device=torch.device("cpu"),
         config={"normalization": {"energy": "global"}},
+        loss_fn=None,
+        is_train=False,
+        current_epoch=0,
+    )
+    expected = torch.from_numpy(raw_energy).reshape(-1, 1).to(out["energy"].dtype)
+    assert torch.allclose(out["energy"], expected, atol=1e-5)
+
+
+def test_run_inference_uses_inference_metadata_when_batch_stats_missing(tmp_path):
+    dataset, raw_energy, _ = _build_toy_dataset(tmp_path, normalization={})
+    batch = Batch.from_data_list([dataset.get(0), dataset.get(1)])
+
+    mean_val = 2.0
+    std_val = 4.0
+    normalized = (torch.from_numpy(raw_energy).reshape(-1, 1) - mean_val) / std_val
+    batch["energy"] = normalized.to(batch["energy"].dtype)
+
+    model = _InferenceEchoEnergy()
+    config = {"normalization": {"energy": "global"}}
+    inference_metadata = build_inference_metadata_bundle(
+        config=config,
+        normalization_stats_by_ensemble={
+            0: {
+                "_mean_.global.energy": mean_val,
+                "_std_.global.energy": std_val,
+            }
+        },
+    )
+    out, _, _, _ = run_inference(
+        model=model,
+        data=batch,
+        device=torch.device("cpu"),
+        config=config,
+        inference_metadata=inference_metadata,
         loss_fn=None,
         is_train=False,
         current_epoch=0,

@@ -5,12 +5,27 @@ import pathlib
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Final, Tuple, Union
+from typing import Dict, Optional, Final, Tuple, Union, Mapping, Any
 
 import torch
 from geqtrain.train.components.checkpointing import CheckpointHandler
 from geqtrain.utils._global_options import set_global_options as set_global_options_func, apply_global_config
 from e3nn.util.jit import script
+from geqtrain.data._build import dataset_from_config
+from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
+from geqtrain.utils.normalization import (
+    resolve_normalization_map,
+    get_global_stat_keys,
+    get_per_type_stat_keys,
+    get_transform_param_key,
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+)
+from geqtrain.utils.inference_metadata import (
+    INFERENCE_METADATA_KEY,
+    build_inference_metadata_bundle,
+    dump_inference_metadata_bundle,
+)
 
 CONFIG_KEY: Final[str] = "config"
 TORCH_VERSION_KEY: Final[str] = "torch_version"
@@ -31,7 +46,76 @@ _ALL_METADATA_KEYS = [
     TYPE_NAMES_KEY,
     JIT_FUSION_STRATEGY,
     TF32_KEY,
+    INFERENCE_METADATA_KEY,
 ]
+
+
+def _collect_required_normalization_stat_keys(
+    normalization_specs: Mapping[str, Mapping[str, Any]],
+) -> set:
+    keys = set()
+    for field, spec in normalization_specs.items():
+        mode = spec.get("mode")
+        if mode == PER_TYPE_MODE:
+            mean_key, std_key = get_per_type_stat_keys(field)
+            keys.update([mean_key, std_key])
+        elif mode == GLOBAL_MODE:
+            mean_key, std_key = get_global_stat_keys(field)
+            keys.update([mean_key, std_key])
+        else:
+            per_type_mean_key, per_type_std_key = get_per_type_stat_keys(field)
+            global_mean_key, global_std_key = get_global_stat_keys(field)
+            keys.update([per_type_mean_key, per_type_std_key, global_mean_key, global_std_key])
+
+        transform_cfg = spec.get("transform", {})
+        if transform_cfg.get("name", "none") == "yeo_johnson":
+            keys.add(get_transform_param_key(field, "lambda"))
+    return keys
+
+
+def _extract_normalization_stats_from_dataset(
+    dataset_obj,
+    required_keys: set,
+) -> Dict[str, Any]:
+    fixed_fields = getattr(dataset_obj, "fixed_fields", None)
+    if not isinstance(fixed_fields, Mapping):
+        return {}
+    out = {}
+    for key in required_keys:
+        if key in fixed_fields:
+            out[key] = fixed_fields[key]
+    return out
+
+
+def _collect_normalization_stats_by_ensemble(config: Mapping[str, Any]) -> Dict[int, Dict[str, Any]]:
+    normalization_specs = resolve_normalization_map(config)
+    if len(normalization_specs) == 0:
+        return {}
+    required_keys = _collect_required_normalization_stat_keys(normalization_specs)
+    if len(required_keys) == 0:
+        return {}
+
+    train_dset = dataset_from_config(config, prefix="train")
+    stats_by_ensemble: Dict[int, Dict[str, Any]] = {}
+
+    if isinstance(train_dset, InMemoryConcatDataset):
+        for idx, ds in enumerate(train_dset.datasets):
+            ensemble = int(getattr(ds, "ensemble_index", idx))
+            stats = _extract_normalization_stats_from_dataset(ds, required_keys)
+            if len(stats) > 0:
+                stats_by_ensemble[ensemble] = stats
+        return stats_by_ensemble
+
+    if isinstance(train_dset, LazyLoadingConcatDataset):
+        for idx in range(len(train_dset.datasets)):
+            ds = train_dset.__getdataset__(idx)
+            ensemble = int(getattr(ds, "ensemble_index", idx))
+            stats = _extract_normalization_stats_from_dataset(ds, required_keys)
+            if len(stats) > 0:
+                stats_by_ensemble[ensemble] = stats
+        return stats_by_ensemble
+
+    return {}
 
 def check_submodules_scripting(sequential_module_to_test):
     print(f"Found {len(sequential_module_to_test)} modules in model.")
@@ -203,7 +287,21 @@ def build_deployment(
     metadata[R_MAX_KEY] = str(float(deployment_config["r_max"]))
     metadata[TF32_KEY] = str(int(deployment_config["allow_tf32"]))
     metadata[CONFIG_KEY] = yaml.safe_dump(deployment_config, sort_keys=False)
-    # ... other generic metadata ...
+    try:
+        stats_by_ensemble = _collect_normalization_stats_by_ensemble(deployment_config)
+    except Exception as exc:
+        logging.warning(
+            "Could not collect train normalization statistics for deployment metadata. "
+            "Deployed inference can still run, but automatic denormalization may require batch-level stats. "
+            "Underlying error: %s",
+            exc,
+        )
+        stats_by_ensemble = {}
+    inference_bundle = build_inference_metadata_bundle(
+        deployment_config,
+        normalization_stats_by_ensemble=stats_by_ensemble,
+    )
+    metadata[INFERENCE_METADATA_KEY] = dump_inference_metadata_bundle(inference_bundle)
     
     # Add any extra metadata passed from the command line
     if extra_metadata:

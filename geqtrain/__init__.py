@@ -8,3 +8,4 @@ except ImportError:
     )
 
 from ._version import __version__  # noqa: F401
+from .inference import InferenceSession, load_model_for_inference  # noqa: F401

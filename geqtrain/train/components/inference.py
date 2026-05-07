@@ -6,6 +6,7 @@ from geqtrain.data import AtomicData, AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS
 from geqtrain.train.loss import Loss
 from geqtrain.utils.torch_geometric import Batch
 from geqtrain.utils.normalization import denormalize_prediction_dict, resolve_normalization_map
+from geqtrain.utils.inference_metadata import inject_inference_metadata_into_ref_data
 
 
 def get_output_keys(loss_fn: Loss):
@@ -166,6 +167,7 @@ def run_inference(
     data: Batch,
     device,
     config: dict,
+    inference_metadata: Optional[Dict[str, Any]] = None,
     loss_fn: Optional[Loss] = None,
     already_computed_nodes=None,
     is_train: bool=False,
@@ -218,6 +220,11 @@ def run_inference(
         for k, v in batch.__slices__.items():
             input_data[f"{k}_slices"] = torch.tensor(v, device=device, dtype=torch.long)
     ref_data = batch.to_dict()
+    ref_data = inject_inference_metadata_into_ref_data(
+        ref_data=ref_data,
+        batch_data=ref_data,
+        inference_metadata=inference_metadata,
+    )
 
     # Remove target keys from input_data
     for key in output_keys:

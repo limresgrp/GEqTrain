@@ -18,13 +18,18 @@ from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train.components.checkpointing import CheckpointHandler
 from geqtrain.utils._global_options import apply_global_config
 from geqtrain.utils.normalization import denormalize_tensor, resolve_normalization_map
+from geqtrain.utils.inference_metadata import (
+    INFERENCE_METADATA_KEY,
+    build_inference_metadata_bundle,
+    load_inference_metadata_bundle,
+)
 
 
 class Evaluator:
     """
     Encapsulates the entire evaluation process for a trained model.
     """
-    def __init__(self, model, dataloader, loss_fn, metrics, device, config, loggers):
+    def __init__(self, model, dataloader, loss_fn, metrics, device, config, loggers, inference_metadata=None):
         self.model = model
         self.dataloader = dataloader
         self.loss_fn = loss_fn
@@ -33,6 +38,7 @@ class Evaluator:
         self.config = config
         self.logger, self.csv_loggers = loggers
         self.model.eval()
+        self.inference_metadata = inference_metadata or {}
         self.normalization_fields = resolve_normalization_map(
             self.config.as_dict() if hasattr(self.config, "as_dict") else self.config,
         )
@@ -59,7 +65,8 @@ class Evaluator:
         for data in pbar:
             out, ref_data, _, _ = run_inference(
                 model=self.model, data=data, device=self.device,
-                loss_fn=self.loss_fn or self.metrics, config=self.config.as_dict()
+                loss_fn=self.loss_fn or self.metrics, config=self.config.as_dict(),
+                inference_metadata=self.inference_metadata,
             )
             
             loss_contrib = {}
@@ -178,8 +185,9 @@ def main(args=None):
     args = parser.parse_args(args)
 
     # 1. Load Model and its original training config
-    model, train_config = CheckpointHandler.load_model_from_training_session(
-        traindir=args.model.parent, model_name=args.model.name, device=args.device
+    model, train_config, model_metadata = CheckpointHandler.load_model(
+        model_path_str=str(args.model),
+        device=args.device,
     )
 
     # 2. Load Test Dataset Config and merge it to original training config
@@ -188,6 +196,9 @@ def main(args=None):
     config.update(test_config)
     config['extra_fields_to_log'] = args.extra_fields_to_log
     apply_global_config(config)
+    inference_metadata = load_inference_metadata_bundle(model_metadata.get(INFERENCE_METADATA_KEY, ""))
+    if len(inference_metadata) == 0:
+        inference_metadata = build_inference_metadata_bundle(config.as_dict())
 
     # 2. Create the dataset
     builder = DatasetBuilder(config, np.random.default_rng(config.get('dataset_seed')))
@@ -202,7 +213,16 @@ def main(args=None):
     loggers = init_loggers(args.log, loss_fn, metrics, config.get('extra_fields_to_log', []))
     
     # 5. Create and run the Evaluator
-    evaluator = Evaluator(model, dataloader, loss_fn, metrics, args.device, config, loggers)
+    evaluator = Evaluator(
+        model,
+        dataloader,
+        loss_fn,
+        metrics,
+        args.device,
+        config,
+        loggers,
+        inference_metadata=inference_metadata,
+    )
     evaluator.run()
 
 def init_loggers(log_dir: str = None, loss_fn=None, metrics=None, extra_fields=[]):

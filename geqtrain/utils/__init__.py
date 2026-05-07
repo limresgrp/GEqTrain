@@ -15,6 +15,14 @@ from .grokfast import gradfilter_ma, gradfilter_ema
 from ._model_utils import add_tags_to_module, add_tags_to_parameter
 from .evaluate_utils import AccuracyMetric
 from .hydra_config import load_config, load_hydra_config
+from .inference_metadata import (
+    INFERENCE_METADATA_KEY,
+    INFERENCE_METADATA_VERSION,
+    build_inference_metadata_bundle,
+    dump_inference_metadata_bundle,
+    load_inference_metadata_bundle,
+    inject_inference_metadata_into_ref_data,
+)
 
 __all__ = [
     instantiate_from_cls_name,
@@ -39,4 +47,10 @@ __all__ = [
     AccuracyMetric,
     load_config,
     load_hydra_config,
+    INFERENCE_METADATA_KEY,
+    INFERENCE_METADATA_VERSION,
+    build_inference_metadata_bundle,
+    dump_inference_metadata_bundle,
+    load_inference_metadata_bundle,
+    inject_inference_metadata_into_ref_data,
 ]

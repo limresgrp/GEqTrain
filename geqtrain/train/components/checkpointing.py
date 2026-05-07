@@ -9,12 +9,27 @@ import torch
 from geqtrain.utils import load_file, save_file, atomic_write
 from geqtrain.model import model_from_config
 from geqtrain.utils.config import Config
+from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
+from geqtrain.utils.normalization import (
+    resolve_normalization_map,
+    get_global_stat_keys,
+    get_per_type_stat_keys,
+    get_transform_param_key,
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+)
+from geqtrain.utils.inference_metadata import (
+    INFERENCE_METADATA_KEY,
+    build_inference_metadata_bundle,
+    dump_inference_metadata_bundle,
+)
 
 
 class CheckpointHandler:
     """Handles saving and loading of trainer and model states."""
     def __init__(self, trainer):
         self.trainer = trainer
+        self._cached_inference_metadata = None
         self._init_paths()
 
     def _init_paths(self):
@@ -58,6 +73,7 @@ class CheckpointHandler:
     def _get_state_dict(self):
         """Collects the current state of the trainer."""
         model_to_save = self.trainer.model.module if self.trainer.dist.is_distributed else self.trainer.model
+        inference_metadata = self._build_inference_metadata_from_training_state()
         return {
             'config': self.trainer.config,
             'model_state_dict': model_to_save.state_dict(),
@@ -69,8 +85,69 @@ class CheckpointHandler:
             'best_metrics': self.trainer.best_metrics,
             'cumulative_wall': self.trainer.cumulative_wall,
             'train_idcs': self.trainer.train_idcs,
-            'val_idcs': self.trainer.val_idcs
+            'val_idcs': self.trainer.val_idcs,
+            'inference_metadata': inference_metadata,
         }
+
+    def _collect_required_normalization_stat_keys(self):
+        normalization_specs = resolve_normalization_map(self.trainer.config)
+        keys = set()
+        for field, spec in normalization_specs.items():
+            mode = spec.get("mode")
+            if mode == PER_TYPE_MODE:
+                mean_key, std_key = get_per_type_stat_keys(field)
+                keys.update([mean_key, std_key])
+            elif mode == GLOBAL_MODE:
+                mean_key, std_key = get_global_stat_keys(field)
+                keys.update([mean_key, std_key])
+            else:
+                pt_mean, pt_std = get_per_type_stat_keys(field)
+                g_mean, g_std = get_global_stat_keys(field)
+                keys.update([pt_mean, pt_std, g_mean, g_std])
+            transform_cfg = spec.get("transform", {})
+            if transform_cfg.get("name", "none") == "yeo_johnson":
+                keys.add(get_transform_param_key(field, "lambda"))
+        return keys
+
+    def _extract_stats_from_dataset_obj(self, dataset_obj, required_keys):
+        fixed_fields = getattr(dataset_obj, "fixed_fields", None)
+        if not isinstance(fixed_fields, Mapping):
+            return {}
+        return {k: fixed_fields[k] for k in required_keys if k in fixed_fields}
+
+    def _collect_train_normalization_stats_by_ensemble(self):
+        required_keys = self._collect_required_normalization_stat_keys()
+        if len(required_keys) == 0:
+            return {}
+        train_dset = self.trainer.train_dset
+        if train_dset is None:
+            return {}
+        stats_by_ensemble = {}
+        if isinstance(train_dset, InMemoryConcatDataset):
+            datasets = train_dset.datasets
+            for idx, ds in enumerate(datasets):
+                ensemble = int(getattr(ds, "ensemble_index", idx))
+                stats = self._extract_stats_from_dataset_obj(ds, required_keys)
+                if len(stats) > 0:
+                    stats_by_ensemble[ensemble] = stats
+        elif isinstance(train_dset, LazyLoadingConcatDataset):
+            for idx in range(len(train_dset.datasets)):
+                ds = train_dset.__getdataset__(idx)
+                ensemble = int(getattr(ds, "ensemble_index", idx))
+                stats = self._extract_stats_from_dataset_obj(ds, required_keys)
+                if len(stats) > 0:
+                    stats_by_ensemble[ensemble] = stats
+        return stats_by_ensemble
+
+    def _build_inference_metadata_from_training_state(self):
+        if self._cached_inference_metadata is not None:
+            return self._cached_inference_metadata
+        stats_by_ensemble = self._collect_train_normalization_stats_by_ensemble()
+        self._cached_inference_metadata = build_inference_metadata_bundle(
+            self.trainer.config.as_dict(),
+            normalization_stats_by_ensemble=stats_by_ensemble,
+        )
+        return self._cached_inference_metadata
 
     def _resolve_fine_tune_checkpoint_path(self) -> Path:
         fine_tune_path_str = self.trainer.config.get("fine_tune")
@@ -391,5 +468,15 @@ class CheckpointHandler:
                 model_name=model_path.name, 
                 device=device,
             )
-            metadata = {} # No metadata available for simple training checkpoints
+            metadata = {}
+            trainer_path = model_path.parent / "trainer.pth"
+            if trainer_path.is_file():
+                trainer_state = torch.load(trainer_path, map_location="cpu", weights_only=False)
+                saved_bundle = trainer_state.get("inference_metadata", None)
+                if isinstance(saved_bundle, Mapping):
+                    metadata[INFERENCE_METADATA_KEY] = dump_inference_metadata_bundle(saved_bundle)
+            if INFERENCE_METADATA_KEY not in metadata:
+                metadata[INFERENCE_METADATA_KEY] = dump_inference_metadata_bundle(
+                    build_inference_metadata_bundle(model_config.as_dict()),
+                )
         return model, model_config, metadata
