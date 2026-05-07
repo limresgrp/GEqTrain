@@ -1,10 +1,22 @@
 # geqtrain/train/components/dataset_builder.py
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import torch
 import logging
 import numpy as np
 from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
+from e3nn.o3 import Irreps
 from geqtrain.data._build import dataset_from_config
+from geqtrain.data import AtomicDataDict
+from geqtrain.utils.normalization import (
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+    apply_forward_transform,
+    denormalize_tensor,
+    get_global_stat_keys,
+    get_per_type_stat_keys,
+    get_transform_param_key,
+    resolve_normalization_map,
+)
 
 def save_txt_file(filename, arrays):
     with open(filename, "w") as f:
@@ -86,6 +98,9 @@ class DatasetBuilder:
             val_dset = dataset_from_config(self.config, prefix="validation")
         except KeyError:
             val_dset = None
+
+        if val_dset is not None:
+            self._align_target_normalization_to_train(train_dset=train_dset, target_dset=val_dset, target_name="validation")
         
         final_train_dset = self._index_dataset(train_dset, train_idcs)
         final_val_dset = self._index_dataset(val_dset if val_dset else train_dset, val_idcs)
@@ -96,6 +111,21 @@ class DatasetBuilder:
         # 1. Instantiate the raw datasets
         self.logger.info("Building test dataset...")
         test_dset = dataset_from_config(self.config, prefix="test")
+        train_dset = None
+        try:
+            train_dset = dataset_from_config(self.config, prefix="train")
+        except Exception as exc:
+            self.logger.warning(
+                "Could not load train dataset for test normalization alignment; "
+                "test data will keep its own fitted normalization. Error: %s",
+                exc,
+            )
+        if train_dset is not None:
+            self._align_target_normalization_to_train(
+                train_dset=train_dset,
+                target_dset=test_dset,
+                target_name="test",
+            )
 
         test_idcs = self.config.get("test_idcs")
         n_test = self.config.get("n_test")
@@ -320,3 +350,231 @@ class DatasetBuilder:
             if not any(len(i) > 0 for i in indices): return None
             return dataset.from_indexed_dataset(indices)
         raise TypeError(f"Unsupported dataset type for indexing: {type(dataset)}")
+
+    def _align_target_normalization_to_train(self, train_dset, target_dset, target_name: str):
+        if not bool(self.config.get("share_train_normalization_across_splits", True)):
+            return
+        normalization_specs = resolve_normalization_map(self.config)
+        if len(normalization_specs) == 0:
+            return
+        if not isinstance(train_dset, InMemoryConcatDataset) or not isinstance(target_dset, InMemoryConcatDataset):
+            self.logger.warning(
+                "Skipping normalization alignment for %s dataset because only InMemoryConcatDataset is currently supported.",
+                target_name,
+            )
+            return
+        if len(train_dset.datasets) == 0 or len(target_dset.datasets) == 0:
+            return
+
+        train_by_ensemble = {getattr(ds, "ensemble_index", idx): ds for idx, ds in enumerate(train_dset.datasets)}
+        fallback_train_ds = train_dset.datasets[0]
+
+        for idx, target_ds in enumerate(target_dset.datasets):
+            ensemble_id = getattr(target_ds, "ensemble_index", idx)
+            train_ref_ds = train_by_ensemble.get(ensemble_id, fallback_train_ds)
+            if ensemble_id not in train_by_ensemble:
+                self.logger.warning(
+                    "No train normalization reference found for %s ensemble %s; falling back to first train dataset.",
+                    target_name,
+                    ensemble_id,
+                )
+            self._restandardize_dataset_to_reference(
+                target_ds=target_ds,
+                reference_fixed_fields=train_ref_ds.fixed_fields,
+                normalization_specs=normalization_specs,
+                target_name=target_name,
+            )
+
+    def _resolve_reference_transform_cfg(
+        self,
+        field: str,
+        spec: Dict[str, Any],
+        reference_fixed_fields: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cfg = dict(spec.get("transform", {"name": "none"}))
+        if cfg.get("name", "none") == "yeo_johnson":
+            lam_key = get_transform_param_key(field, "lambda")
+            lam_val = reference_fixed_fields.get(lam_key, None)
+            if lam_val is None:
+                cfg["lambda"] = 1.0
+            elif torch.is_tensor(lam_val):
+                cfg["lambda"] = float(lam_val.reshape(-1)[0].item())
+            else:
+                cfg["lambda"] = float(lam_val)
+        return cfg
+
+    def _apply_standardization_with_reference(
+        self,
+        values: torch.Tensor,
+        field: str,
+        spec: Dict[str, Any],
+        reference_fixed_fields: Dict[str, Any],
+        node_types: torch.Tensor,
+    ) -> torch.Tensor:
+        mode = spec.get("mode")
+        irreps_str = spec.get("irreps")
+        irreps = Irreps(irreps_str) if irreps_str else None
+
+        if mode == PER_TYPE_MODE:
+            mean_key, std_key = get_per_type_stat_keys(field)
+            if mean_key not in reference_fixed_fields or std_key not in reference_fixed_fields:
+                raise KeyError(
+                    f"Reference normalization for field '{field}' is missing per-type stats keys "
+                    f"'{mean_key}' and/or '{std_key}'."
+                )
+            means = reference_fixed_fields[mean_key]
+            stds = reference_fixed_fields[std_key]
+            if not torch.is_tensor(means):
+                means = torch.as_tensor(means, device=values.device, dtype=values.dtype)
+            else:
+                means = means.to(device=values.device, dtype=values.dtype)
+            if not torch.is_tensor(stds):
+                stds = torch.as_tensor(stds, device=values.device, dtype=values.dtype)
+            else:
+                stds = stds.to(device=values.device, dtype=values.dtype)
+
+            means_expanded = means[node_types]
+            stds_expanded = stds[node_types]
+            out = values.clone()
+
+            if irreps is not None:
+                i = 0
+                for (_, ir), slc in zip(irreps, irreps.slices()):
+                    if ir.l == 0:
+                        out[:, slc] -= means_expanded[:, i:i + 1]
+                        out[:, slc] /= stds_expanded[:, i:i + 1]
+                    else:
+                        out[:, slc] /= stds_expanded[:, i:i + 1]
+                    i += 1
+                return out
+
+            mean_bc = means_expanded
+            std_bc = stds_expanded
+            if mean_bc.dim() == 1:
+                mean_bc = mean_bc.unsqueeze(-1)
+            if std_bc.dim() == 1:
+                std_bc = std_bc.unsqueeze(-1)
+            while mean_bc.dim() < out.dim():
+                mean_bc = mean_bc.unsqueeze(-1)
+            while std_bc.dim() < out.dim():
+                std_bc = std_bc.unsqueeze(-1)
+            return (out - mean_bc) / std_bc
+
+        if mode == GLOBAL_MODE:
+            mean_key, std_key = get_global_stat_keys(field)
+            if mean_key not in reference_fixed_fields or std_key not in reference_fixed_fields:
+                raise KeyError(
+                    f"Reference normalization for field '{field}' is missing global stats keys "
+                    f"'{mean_key}' and/or '{std_key}'."
+                )
+            mean = reference_fixed_fields[mean_key]
+            std = reference_fixed_fields[std_key]
+            if not torch.is_tensor(mean):
+                mean = torch.as_tensor(mean, device=values.device, dtype=values.dtype)
+            else:
+                mean = mean.to(device=values.device, dtype=values.dtype)
+            if not torch.is_tensor(std):
+                std = torch.as_tensor(std, device=values.device, dtype=values.dtype)
+            else:
+                std = std.to(device=values.device, dtype=values.dtype)
+
+            if mean.numel() != 1:
+                mean = mean.reshape(-1).mean()
+            if std.numel() != 1:
+                std = std.reshape(-1).mean()
+            if abs(float(std.item())) <= 1e-8:
+                return values
+            return (values - mean) / std
+
+        raise ValueError(
+            f"Invalid normalization mode '{mode}' for field '{field}'. "
+            f"Expected '{PER_TYPE_MODE}' or '{GLOBAL_MODE}'."
+        )
+
+    def _copy_reference_normalization_keys(
+        self,
+        field: str,
+        spec: Dict[str, Any],
+        reference_fixed_fields: Dict[str, Any],
+        target_fixed_fields: Dict[str, Any],
+    ):
+        mode = spec.get("mode")
+        if mode == PER_TYPE_MODE:
+            mean_key, std_key = get_per_type_stat_keys(field)
+        elif mode == GLOBAL_MODE:
+            mean_key, std_key = get_global_stat_keys(field)
+        else:
+            return
+        if mean_key in reference_fixed_fields:
+            target_fixed_fields[mean_key] = reference_fixed_fields[mean_key]
+        if std_key in reference_fixed_fields:
+            target_fixed_fields[std_key] = reference_fixed_fields[std_key]
+
+        if spec.get("transform", {}).get("name", "none") == "yeo_johnson":
+            lam_key = get_transform_param_key(field, "lambda")
+            if lam_key in reference_fixed_fields:
+                target_fixed_fields[lam_key] = reference_fixed_fields[lam_key]
+
+    def _restandardize_dataset_to_reference(
+        self,
+        target_ds,
+        reference_fixed_fields: Dict[str, Any],
+        normalization_specs: Dict[str, Dict[str, Any]],
+        target_name: str,
+    ):
+        if getattr(target_ds, "data", None) is None or getattr(target_ds, "fixed_fields", None) is None:
+            return
+        if AtomicDataDict.NODE_TYPE_KEY not in target_ds.data:
+            return
+
+        # Build a ref mapping that denormalize_tensor can consume (stats + node types).
+        current_ref = dict(target_ds.fixed_fields)
+        current_ref[AtomicDataDict.NODE_TYPE_KEY] = target_ds.data[AtomicDataDict.NODE_TYPE_KEY]
+        node_types = target_ds.data[AtomicDataDict.NODE_TYPE_KEY].to(dtype=torch.long).squeeze(-1)
+
+        for field, spec in normalization_specs.items():
+            if field not in target_ds.data:
+                continue
+
+            irreps_str = spec.get("irreps")
+            irreps = Irreps(irreps_str) if irreps_str else None
+            # 1) Recover raw-space values from current (possibly split-specific) normalization.
+            raw_values = denormalize_tensor(
+                target_ds.data[field].clone(),
+                current_ref,
+                field,
+                spec,
+            )
+            # 2) Apply reference transform (fitted on train).
+            reference_transform_cfg = self._resolve_reference_transform_cfg(
+                field=field,
+                spec=spec,
+                reference_fixed_fields=reference_fixed_fields,
+            )
+            transformed = apply_forward_transform(
+                raw_values,
+                reference_transform_cfg,
+                irreps=irreps,
+            ).to(target_ds.data[field].dtype)
+            # 3) Apply reference standardization (fitted on train).
+            target_ds.data[field] = self._apply_standardization_with_reference(
+                values=transformed,
+                field=field,
+                spec=spec,
+                reference_fixed_fields=reference_fixed_fields,
+                node_types=node_types,
+            ).to(target_ds.data[field].dtype)
+
+            # 4) Replace fixed fields for inverse transform/denormalization at eval time.
+            self._copy_reference_normalization_keys(
+                field=field,
+                spec=spec,
+                reference_fixed_fields=reference_fixed_fields,
+                target_fixed_fields=target_ds.fixed_fields,
+            )
+
+        self.logger.info(
+            "Aligned %s dataset normalization to train-fitted statistics for ensemble %s.",
+            target_name,
+            getattr(target_ds, "ensemble_index", "unknown"),
+        )
