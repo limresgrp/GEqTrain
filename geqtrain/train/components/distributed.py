@@ -18,6 +18,8 @@ class DistributedManager:
             self.world_size, self.rank, self.local_rank = 1, 0, 0
             self.is_distributed = False
             self.device = torch.device(self.config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+            if self.device.type == "cuda":
+                torch.cuda.set_device(self.device)
             return
         else:
             assert dist.is_available()
