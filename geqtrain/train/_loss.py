@@ -153,8 +153,28 @@ class LossWrapper:
                 except: pass
         return ref_key
 
-    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, pred: dict, ref: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _apply_node_filter(
+        self,
+        pred_key: torch.Tensor,
+        ref_key: torch.Tensor,
+        pred: dict,
+        ref: dict = None,
+        key: str = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Filters tensors to include only center nodes if the key is a node-level property."""
+        if key is None:
+            if isinstance(ref, str):
+                key = ref
+                ref = pred
+                pred = {}
+            else:
+                raise TypeError(
+                    "_apply_node_filter expected either (pred_key, ref_key, pred, ref, key) "
+                    "or legacy (pred_key, ref_key, ref, key) arguments."
+                )
+
+        ref = {} if ref is None else ref
+
         species_mask = None
         node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
         if self.node_type_indices is not None and AtomicDataDict.NODE_TYPE_KEY in node_type_source:
