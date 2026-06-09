@@ -36,6 +36,12 @@ def test_metrics_stateless_node_type_names_filters_selected_species():
 
     assert torch.allclose(result, torch.tensor([3.0]))
 
+    flat = metrics.flatten_metrics(
+        {"cs_iso_0": metrics.metrics["cs_iso_0"].accumulator.current_result()},
+        {"type_names": ["X", "H", "C"]},
+    )
+    assert flat == {"H_cs_iso_L1Loss_mean": 3.0}
+
 
 class _RecordingStatefulMetric(StatefulMetric):
     def __init__(self):

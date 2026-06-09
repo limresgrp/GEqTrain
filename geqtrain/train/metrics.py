@@ -61,9 +61,9 @@ class _Metric:
 
     def _apply_node_filter(self, pred: dict, ref: dict, key: str):
         if self.node_type_indices is None:
-            return pred, ref
+            return pred, ref, None
         if AtomicDataDict.NODE_TYPE_KEY not in pred and AtomicDataDict.NODE_TYPE_KEY not in ref:
-            return pred, ref
+            return pred, ref, None
 
         node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
         node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
@@ -75,11 +75,11 @@ class _Metric:
         if key in _NODE_FIELDS or (key in ref and ref[key].ndim > 0 and ref[key].shape[0] == species_mask.shape[0]):
             ref = dict(ref)
             ref[key] = ref[key][species_mask]
-        return pred, ref
+        return pred, ref, species_mask
 
     def accumulate(self, pred: dict, ref: dict, key: str, normalization_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
-        pred, ref = self._apply_node_filter(pred, ref, key)
+        pred, ref, species_mask = self._apply_node_filter(pred, ref, key)
         if isinstance(self.accumulator, StatefulMetric):
             self.accumulator.update(pred, ref, key)
             return self.accumulator.compute()  # Return partial result for batch logs
@@ -101,7 +101,7 @@ class _Metric:
         if self.accumulator is None:
             self._init_runstat(error)
 
-        accum_params = self._prepare_accumulation_params(error, ref)
+        accum_params = self._prepare_accumulation_params(error, ref, species_mask)
         return self.accumulator.accumulate_batch(error, **accum_params)
 
     def get_final_result(self) -> torch.Tensor:
@@ -125,12 +125,14 @@ class _Metric:
         self.accumulator = RunningStats(**init_kwargs)
         self.accumulator.to(error.device)
 
-    def _prepare_accumulation_params(self, error: torch.Tensor, ref: dict) -> dict:
+    def _prepare_accumulation_params(self, error: torch.Tensor, ref: dict, species_mask: torch.Tensor = None) -> dict:
         """Prepares the `accumulate_by` tensor for PerSpecies or PerTarget logic."""
         accum_params = {}
         if self.params.get("PerSpecies"):
             node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
             center_nodes_idx = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+            if species_mask is not None:
+                center_nodes_idx = center_nodes_idx[species_mask[center_nodes_idx]]
             # This logic assumes the error is per-node. A check might be needed.
             accum_params["accumulate_by"] = node_types[center_nodes_idx]
 
@@ -216,9 +218,22 @@ class Metrics(Loss):
             metric_key = f"{metric_name}_{loss_name}_{reduction_name}"
 
             # This complex formatting logic remains, as it's required for detailed logging
-            if params.get("PerSpecies"):
-                for idx, value_row in enumerate(value):
-                    species_name = type_names[idx] if type_names and idx < len(type_names) else f"type_{idx}"
+            if params.get("PerSpecies") or handler.node_type_indices is not None:
+                species_indices = (
+                    handler.node_type_indices.tolist()
+                    if handler.node_type_indices is not None
+                    else list(range(len(value)))
+                )
+                if len(value) == len(species_indices):
+                    species_pairs = list(enumerate(species_indices))
+                    value_lookup = lambda local_idx, species_idx: value[local_idx]
+                else:
+                    species_pairs = [(species_idx, species_idx) for species_idx in species_indices if species_idx < len(value)]
+                    value_lookup = lambda local_idx, species_idx: value[species_idx]
+
+                for local_idx, species_idx in species_pairs:
+                    species_name = type_names[species_idx] if type_names and species_idx < len(type_names) else f"type_{species_idx}"
+                    value_row = value_lookup(local_idx, species_idx)
                     base_key = f"{species_name}_{metric_key}"
                     if params.get("PerTarget"):
                         for target_idx, item in enumerate(value_row):
