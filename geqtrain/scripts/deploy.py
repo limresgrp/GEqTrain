@@ -6,10 +6,26 @@ import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from e3nn.o3 import Irreps
 from geqtrain.utils._global_options import set_global_options
 from geqtrain.utils.deploy import build_deployment, get_base_deploy_parser
 from geqtrain.utils import Config
+from geqtrain.utils.inference_metadata import (
+    INFERENCE_METADATA_KEY,
+    build_inference_metadata_bundle,
+    dump_inference_metadata_bundle,
+)
+from geqtrain.utils.normalization import (
+    fit_transform_parameters,
+    GLOBAL_MODE,
+    PER_TYPE_MODE,
+    get_global_stat_keys,
+    get_per_type_stat_keys,
+    get_transform_param_key,
+    resolve_normalization_map,
+)
 import numpy as np
+import torch
 
 
 def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
@@ -147,11 +163,118 @@ def _collect_interactive_metadata() -> Dict[str, str]:
         metadata.update(_collect_custom_metadata())
     return metadata
 
+
+def _required_normalization_metadata_keys(config: Config) -> List[str]:
+    keys = []
+    for field, spec in resolve_normalization_map(config.as_dict()).items():
+        mode = spec.get("mode")
+        if mode == PER_TYPE_MODE:
+            keys.extend(get_per_type_stat_keys(field))
+        elif mode == GLOBAL_MODE:
+            keys.extend(get_global_stat_keys(field))
+
+        transform_cfg = spec.get("transform", {})
+        if transform_cfg.get("name", "none") == "yeo_johnson":
+            keys.append(get_transform_param_key(field, "lambda"))
+
+    seen = set()
+    return [key for key in keys if not (key in seen or seen.add(key))]
+
+
+def _fit_missing_transform_param(
+    config: Config,
+    npz: np.lib.npyio.NpzFile,
+    field: str,
+    param: str,
+):
+    if param != "lambda" or field not in npz.files:
+        return None
+    normalization = resolve_normalization_map(config.as_dict()).get(field, {})
+    transform_cfg = normalization.get("transform", {})
+    if transform_cfg.get("name", "none") != "yeo_johnson":
+        return None
+
+    values = npz[field]
+    mask_key = f"{field}__mask__"
+    if mask_key in npz.files:
+        mask = npz[mask_key].astype(bool)
+        values = values[~mask]
+    values = np.asarray(values, dtype=np.float32).reshape(-1, 1)
+    fitted = fit_transform_parameters(
+        values=torch.from_numpy(values),
+        transform_cfg=transform_cfg,
+        irreps=Irreps(normalization["irreps"]) if normalization.get("irreps") else None,
+    )
+    return float(fitted["lambda"])
+
+
+def _load_normalization_stats_from_npz(config: Config, npz_path: Path) -> Dict[str, object]:
+    required_keys = _required_normalization_metadata_keys(config)
+    if not required_keys:
+        return {}
+    if not npz_path.is_file():
+        raise FileNotFoundError(f"Normalization stats NPZ not found: {npz_path}")
+
+    stats = {}
+    with np.load(npz_path, allow_pickle=True) as npz:
+        for key in required_keys:
+            if key not in npz.files:
+                if key.startswith("_transform_."):
+                    parts = key.split(".")
+                    if len(parts) == 3:
+                        fitted_value = _fit_missing_transform_param(
+                            config=config,
+                            npz=npz,
+                            field=parts[1],
+                            param=parts[2],
+                        )
+                        if fitted_value is not None:
+                            logging.info(
+                                "Fitted missing transform metadata '%s' from %s.",
+                                key,
+                                npz_path,
+                            )
+                            stats[key] = fitted_value
+                            continue
+                logging.warning(
+                    "Normalization stats NPZ is missing optional metadata key '%s'; "
+                    "continuing without it.",
+                    key,
+                )
+                continue
+            value = npz[key]
+            if value.ndim == 0:
+                stats[key] = value.item()
+            elif value.dtype.kind in ("i", "u", "f", "b"):
+                stats[key] = torch.from_numpy(value)
+            else:
+                stats[key] = value.tolist()
+    return stats
+
+
+def _build_inference_metadata_from_npz(config: Config, npz_path: Path) -> Dict[str, str]:
+    stats = _load_normalization_stats_from_npz(config, npz_path)
+    bundle = build_inference_metadata_bundle(
+        config,
+        normalization_stats_by_ensemble={0: stats} if stats else {},
+    )
+    return {INFERENCE_METADATA_KEY: dump_inference_metadata_bundle(bundle)}
+
 def main():
     parser = argparse.ArgumentParser(description="Deploy a GEqTrain model.")
     parser.add_argument("--verbose", default="INFO", type=str)
     # Get all the common arguments
     parser = get_base_deploy_parser(parser)
+    parser.add_argument(
+        "--normalization-stats-npz",
+        type=Path,
+        default=None,
+        help=(
+            "Processed training NPZ containing normalization metadata keys "
+            "such as _mean_.per_type.cs_iso and _std_.per_type.cs_iso. "
+            "When provided, these stats are embedded in inference_metadata_v1."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.verbose.upper()))
@@ -173,6 +296,13 @@ def main():
     extra_metadata = {}
     extra_metadata.update(interactive_metadata)
     extra_metadata.update(cli_metadata)
+    if args.normalization_stats_npz is not None:
+        extra_metadata.update(
+            _build_inference_metadata_from_npz(
+                config,
+                args.normalization_stats_npz.expanduser().resolve(),
+            )
+        )
 
     # Call the core build function
     build_deployment(

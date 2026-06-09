@@ -1,6 +1,6 @@
 # geqtrain/train/_loss.py
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
 import logging
 import math
 import torch
@@ -46,6 +46,7 @@ class LossWrapper:
 
         self.ignore_nan = self.params.pop("ignore_nan", False)
         self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
+        self.node_type_indices = self._resolve_node_type_indices()
 
         # New: Handle deep supervision parameters
         self.supervision_weights = self.params.pop("supervision_weights", None)
@@ -70,6 +71,39 @@ class LossWrapper:
             torch.nn, class_name=func_name, prefix="",
             positional_args=dict(reduction="none"), optional_args=torch_params, all_args={},
         )
+
+    def _resolve_node_type_indices(self) -> Optional[torch.Tensor]:
+        node_type_indices = self.params.pop("node_type_indices", None)
+        node_type_names = self.params.pop("node_type_names", None)
+        type_names = self.params.pop("type_names", None)
+
+        if node_type_indices is not None and node_type_names is not None:
+            raise ValueError("Specify only one of `node_type_indices` or `node_type_names`.")
+
+        if node_type_indices is not None:
+            if isinstance(node_type_indices, (int, str)):
+                node_type_indices = [node_type_indices]
+            return torch.tensor([int(v) for v in node_type_indices], dtype=torch.long)
+
+        if node_type_names is not None:
+            if type_names is None:
+                raise ValueError(
+                    "`node_type_names` was provided for a loss, but no `type_names` list was found in the loss parameters. "
+                    "Add `type_names` next to the loss entry or use `node_type_indices` instead."
+                )
+            if isinstance(node_type_names, str):
+                node_type_names = [node_type_names]
+            if isinstance(type_names, str):
+                type_names = [type_names]
+            type_name_to_idx = {str(name): idx for idx, name in enumerate(type_names)}
+            missing = [name for name in node_type_names if str(name) not in type_name_to_idx]
+            if missing:
+                raise ValueError(
+                    f"Unknown node type names in loss filter: {missing}. Available type names: {list(type_name_to_idx.keys())}"
+                )
+            return torch.tensor([type_name_to_idx[str(name)] for name in node_type_names], dtype=torch.long)
+
+        return None
     
     def _get_pred_key_name(self, base_key: str) -> str:
         """Determines the correct prediction key based on whether deep supervision is used."""
@@ -119,20 +153,33 @@ class LossWrapper:
                 except: pass
         return ref_key
 
-    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, pred: dict, ref: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Filters tensors to include only center nodes if the key is a node-level property."""
+        species_mask = None
+        node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
+        if self.node_type_indices is not None and AtomicDataDict.NODE_TYPE_KEY in node_type_source:
+            node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+            species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
+
+        if species_mask is not None:
+            if pred_key.ndim > 0 and pred_key.shape[0] == species_mask.shape[0]:
+                pred_key = pred_key[species_mask]
+            if ref_key.ndim > 0 and ref_key.shape[0] == species_mask.shape[0]:
+                ref_key = ref_key[species_mask]
+            return pred_key, ref_key
+
         apply_filter = False
         if self.node_level_filter is True:
             apply_filter = True
         elif self.node_level_filter == 'auto' and key in _NODE_FIELDS:
             apply_filter = True
 
-        if apply_filter:
-            num_atoms = data.get(AtomicDataDict.POSITIONS_KEY).shape[0]
-            center_nodes_idx = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-            if pred_key.shape[0] == num_atoms:
+        node_data = pred if AtomicDataDict.EDGE_INDEX_KEY in pred else ref
+        if apply_filter and AtomicDataDict.EDGE_INDEX_KEY in node_data:
+            center_nodes_idx = node_data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+            if pred_key.ndim > 0 and pred_key.shape[0] >= center_nodes_idx.numel():
                 pred_key = pred_key[center_nodes_idx]
-            if ref_key.shape[0] == num_atoms:
+            if ref_key.ndim > 0 and ref_key.shape[0] >= center_nodes_idx.numel():
                 ref_key = ref_key[center_nodes_idx]
         return pred_key, ref_key
 
@@ -192,7 +239,7 @@ class LossWrapper:
         ref_key = self._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
 
         # 4. Apply node-level filtering if necessary
-        pred_key, ref_key = self._apply_node_filter(pred_key, ref_key, pred, key)
+        pred_key, ref_key = self._apply_node_filter(pred_key, ref_key, pred, ref, key)
 
         # 5. Calculate and return the loss
         return self._calculate_loss(pred_key, ref_key, mean)
