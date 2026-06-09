@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from geqtrain.data import AtomicDataDict
+from geqtrain.data import _NODE_FIELDS
 from geqtrain.train.loss import Loss
 from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
 from ._key import ABBREV
@@ -19,13 +20,66 @@ class _Metric:
         self.func = func
         self.params = params
         self.accumulator: Union[RunningStats, StatefulMetric, None] = None
+        self.node_type_indices = self._resolve_node_type_indices()
 
         # If the metric is stateful, it acts as its own accumulator
         if isinstance(self.func, StatefulMetric):
             self.accumulator = self.func
 
+    def _resolve_node_type_indices(self):
+        node_type_indices = self.params.pop("node_type_indices", None)
+        node_type_names = self.params.pop("node_type_names", None)
+        type_names = self.params.pop("type_names", None)
+
+        if node_type_indices is not None and node_type_names is not None:
+            raise ValueError("Specify only one of `node_type_indices` or `node_type_names`.")
+
+        if node_type_indices is not None:
+            if isinstance(node_type_indices, (int, str)):
+                node_type_indices = [node_type_indices]
+            return torch.tensor([int(v) for v in node_type_indices], dtype=torch.long)
+
+        if node_type_names is not None:
+            if type_names is None:
+                raise ValueError(
+                    "`node_type_names` was provided for a metric, but no `type_names` list was found in the metric parameters. "
+                    "Add `type_names` next to the metric entry or use `node_type_indices` instead."
+                )
+            if isinstance(node_type_names, str):
+                node_type_names = [node_type_names]
+            if isinstance(type_names, str):
+                type_names = [type_names]
+            type_name_to_idx = {str(name): idx for idx, name in enumerate(type_names)}
+            missing = [name for name in node_type_names if str(name) not in type_name_to_idx]
+            if missing:
+                raise ValueError(
+                    f"Unknown node type names in metric filter: {missing}. Available type names: {list(type_name_to_idx.keys())}"
+                )
+            return torch.tensor([type_name_to_idx[str(name)] for name in node_type_names], dtype=torch.long)
+
+        return None
+
+    def _apply_node_filter(self, pred: dict, ref: dict, key: str):
+        if self.node_type_indices is None:
+            return pred, ref
+        if AtomicDataDict.NODE_TYPE_KEY not in pred and AtomicDataDict.NODE_TYPE_KEY not in ref:
+            return pred, ref
+
+        node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
+        node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+        species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
+
+        if key in _NODE_FIELDS or (key in pred and pred[key].ndim > 0 and pred[key].shape[0] == species_mask.shape[0]):
+            pred = dict(pred)
+            pred[key] = pred[key][species_mask]
+        if key in _NODE_FIELDS or (key in ref and ref[key].ndim > 0 and ref[key].shape[0] == species_mask.shape[0]):
+            ref = dict(ref)
+            ref[key] = ref[key][species_mask]
+        return pred, ref
+
     def accumulate(self, pred: dict, ref: dict, key: str, normalization_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
+        pred, ref = self._apply_node_filter(pred, ref, key)
         if isinstance(self.accumulator, StatefulMetric):
             self.accumulator.update(pred, ref, key)
             return self.accumulator.compute()  # Return partial result for batch logs

@@ -46,6 +46,8 @@ What it does:
 
 Use this when the model should see the full molecular environment, but supervision should be restricted to a subset of species.
 
+The same flags are also accepted in `metrics_components`, so you can report metrics on the same atom subset without changing the graph.
+
 ## Practical difference
 
 - `keep_type_names` answers: "which atoms exist in the graph?"
@@ -54,5 +56,6 @@ Use this when the model should see the full molecular environment, but supervisi
 ## Notes
 
 - The loss-side filter currently works for node-level targets.
+- The metric-side filter uses the same node-level convention.
 - Use `node_type_indices` if you already know the integer atom type ids.
 - Use `node_type_names` together with `type_names` if you want to write species labels instead of indices.
