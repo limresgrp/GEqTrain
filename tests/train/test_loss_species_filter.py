@@ -3,6 +3,7 @@ import torch
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.AtomicData import register_fields
 from geqtrain.train._loss import LossWrapper
+from geqtrain.train.components.setup import setup_loss
 
 
 def _make_ref():
@@ -37,4 +38,27 @@ def test_loss_wrapper_node_type_names_requires_type_names_list():
     out = loss(pred=pred, ref=ref, key="cs_iso", mean=False)
 
     assert out.shape == torch.Size([1, 1])
+    assert torch.allclose(out, torch.tensor([[3.0]]))
+
+
+def test_setup_loss_injects_global_type_names():
+    loss = setup_loss(
+        {
+            "type_names": ["X", "H", "C"],
+            "loss_coeffs": [
+                {
+                    "cs_iso": [
+                        1.0,
+                        "L1Loss",
+                        {"node_type_names": ["H"]},
+                    ]
+                }
+            ],
+        }
+    )
+
+    pred = {"cs_iso": torch.tensor([[1.0], [5.0], [3.0]], dtype=torch.float32)}
+    ref = _make_ref()
+    out = loss.funcs["cs_iso_0"](pred=pred, ref=ref, key="cs_iso", mean=False)
+
     assert torch.allclose(out, torch.tensor([[3.0]]))
