@@ -21,6 +21,7 @@ class _Metric:
         self.params = params
         self.accumulator: Union[RunningStats, StatefulMetric, None] = None
         self.node_type_indices = self._resolve_node_type_indices()
+        self.node_mask_field = self.params.pop("node_mask_field", self.params.pop("node_mask_key", None))
 
         # If the metric is stateful, it acts as its own accumulator
         if isinstance(self.func, StatefulMetric):
@@ -59,27 +60,48 @@ class _Metric:
 
         return None
 
+    def _resolve_node_mask(self, pred: dict, ref: dict):
+        if self.node_mask_field is None:
+            return None
+
+        mask_source = pred if self.node_mask_field in pred else ref
+        if self.node_mask_field not in mask_source:
+            return None
+
+        node_mask = mask_source[self.node_mask_field]
+        if not torch.is_tensor(node_mask):
+            node_mask = torch.as_tensor(node_mask)
+        node_mask = node_mask.to(dtype=torch.bool)
+        if node_mask.ndim > 1:
+            node_mask = node_mask.squeeze(-1)
+        return node_mask
+
     def _apply_node_filter(self, pred: dict, ref: dict, key: str):
-        if self.node_type_indices is None:
-            return pred, ref, None
-        if AtomicDataDict.NODE_TYPE_KEY not in pred and AtomicDataDict.NODE_TYPE_KEY not in ref:
-            return pred, ref, None
+        species_mask = None
+        if self.node_type_indices is not None and (AtomicDataDict.NODE_TYPE_KEY in pred or AtomicDataDict.NODE_TYPE_KEY in ref):
+            node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
+            node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
+            species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
 
-        node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
-        node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-        species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
+        node_mask = self._resolve_node_mask(pred, ref)
+        combined_mask = None
+        if species_mask is not None:
+            combined_mask = species_mask
+        if node_mask is not None:
+            combined_mask = node_mask if combined_mask is None else (combined_mask & node_mask)
 
-        if key in _NODE_FIELDS or (key in pred and pred[key].ndim > 0 and pred[key].shape[0] == species_mask.shape[0]):
-            pred = dict(pred)
-            pred[key] = pred[key][species_mask]
-        if key in _NODE_FIELDS or (key in ref and ref[key].ndim > 0 and ref[key].shape[0] == species_mask.shape[0]):
-            ref = dict(ref)
-            ref[key] = ref[key][species_mask]
-        return pred, ref, species_mask
+        if combined_mask is not None:
+            if key in _NODE_FIELDS or (key in pred and pred[key].ndim > 0 and pred[key].shape[0] == combined_mask.shape[0]):
+                pred = dict(pred)
+                pred[key] = pred[key][combined_mask]
+            if key in _NODE_FIELDS or (key in ref and ref[key].ndim > 0 and ref[key].shape[0] == combined_mask.shape[0]):
+                ref = dict(ref)
+                ref[key] = ref[key][combined_mask]
+        return pred, ref, combined_mask
 
     def accumulate(self, pred: dict, ref: dict, key: str, normalization_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
-        pred, ref, species_mask = self._apply_node_filter(pred, ref, key)
+        pred, ref, node_mask = self._apply_node_filter(pred, ref, key)
         if isinstance(self.accumulator, StatefulMetric):
             self.accumulator.update(pred, ref, key)
             return self.accumulator.compute()  # Return partial result for batch logs
@@ -101,7 +123,7 @@ class _Metric:
         if self.accumulator is None:
             self._init_runstat(error)
 
-        accum_params = self._prepare_accumulation_params(error, ref, species_mask)
+        accum_params = self._prepare_accumulation_params(error, ref, node_mask)
         return self.accumulator.accumulate_batch(error, **accum_params)
 
     def get_final_result(self) -> torch.Tensor:
@@ -125,14 +147,14 @@ class _Metric:
         self.accumulator = RunningStats(**init_kwargs)
         self.accumulator.to(error.device)
 
-    def _prepare_accumulation_params(self, error: torch.Tensor, ref: dict, species_mask: torch.Tensor = None) -> dict:
+    def _prepare_accumulation_params(self, error: torch.Tensor, ref: dict, node_mask: torch.Tensor = None) -> dict:
         """Prepares the `accumulate_by` tensor for PerSpecies or PerTarget logic."""
         accum_params = {}
         if self.params.get("PerSpecies"):
             node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
             center_nodes_idx = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-            if species_mask is not None:
-                center_nodes_idx = center_nodes_idx[species_mask[center_nodes_idx]]
+            if node_mask is not None and node_mask.shape[0] == node_types.shape[0]:
+                center_nodes_idx = center_nodes_idx[node_mask[center_nodes_idx]]
             # This logic assumes the error is per-node. A check might be needed.
             accum_params["accumulate_by"] = node_types[center_nodes_idx]
 

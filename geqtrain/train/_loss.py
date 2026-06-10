@@ -46,6 +46,7 @@ class LossWrapper:
 
         self.ignore_nan = self.params.pop("ignore_nan", False)
         self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
+        self.node_mask_field = self.params.pop("node_mask_field", self.params.pop("node_mask_key", None))
         self.node_type_indices = self._resolve_node_type_indices()
 
         # New: Handle deep supervision parameters
@@ -153,6 +154,22 @@ class LossWrapper:
                 except: pass
         return ref_key
 
+    def _resolve_node_mask(self, pred: dict, ref: dict):
+        if self.node_mask_field is None:
+            return None
+
+        mask_source = pred if self.node_mask_field in pred else ref
+        if self.node_mask_field not in mask_source:
+            return None
+
+        node_mask = mask_source[self.node_mask_field]
+        if not torch.is_tensor(node_mask):
+            node_mask = torch.as_tensor(node_mask)
+        node_mask = node_mask.to(dtype=torch.bool)
+        if node_mask.ndim > 1:
+            node_mask = node_mask.squeeze(-1)
+        return node_mask
+
     def _apply_node_filter(
         self,
         pred_key: torch.Tensor,
@@ -181,11 +198,18 @@ class LossWrapper:
             node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
             species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
 
+        node_mask = self._resolve_node_mask(pred, ref)
+        combined_mask = None
         if species_mask is not None:
-            if pred_key.ndim > 0 and pred_key.shape[0] == species_mask.shape[0]:
-                pred_key = pred_key[species_mask]
-            if ref_key.ndim > 0 and ref_key.shape[0] == species_mask.shape[0]:
-                ref_key = ref_key[species_mask]
+            combined_mask = species_mask
+        if node_mask is not None:
+            combined_mask = node_mask if combined_mask is None else (combined_mask & node_mask)
+
+        if combined_mask is not None:
+            if pred_key.ndim > 0 and pred_key.shape[0] == combined_mask.shape[0]:
+                pred_key = pred_key[combined_mask]
+            if ref_key.ndim > 0 and ref_key.shape[0] == combined_mask.shape[0]:
+                ref_key = ref_key[combined_mask]
             return pred_key, ref_key
 
         apply_filter = False
