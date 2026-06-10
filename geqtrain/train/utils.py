@@ -16,18 +16,22 @@ def parse_loss_metrics_dict(components: dict):
         elif isinstance(value, str) or callable(value):
             func = value
         elif isinstance(value, (list, tuple)):
-            # list of [func], [func, param], [coeff, func], [coeff, func, params]
+            # list of [func], [func, param...], [coeff, func], [coeff, func, params...]
+            idx = 0
             if isinstance(value[0], (float, int)):
                 coeff = value[0]
-                if len(value) > 1:
-                    func = value[1]
-                if len(value) > 2:
-                    assert isinstance(value[2], dict)
-                    func_params = value[2]
-            else:
-                func = value[0]
-                if len(value) > 1:
-                    func_params = value[1]
+                idx = 1
+            if idx < len(value) and (isinstance(value[idx], str) or callable(value[idx])):
+                func = value[idx]
+                idx += 1
+            merged_params = {}
+            for item in value[idx:]:
+                if not isinstance(item, dict):
+                    raise AssertionError(
+                        "loss/metric component lists may only contain dict fragments after the function entry"
+                    )
+                merged_params.update(item)
+            func_params = merged_params
         else:
             raise NotImplementedError(
                 f"expected float, list or tuple, but get {type(value)}"

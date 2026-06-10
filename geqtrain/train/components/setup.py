@@ -31,35 +31,24 @@ def _inject_type_names_into_components(components, type_names):
         return components
 
     def _inject(value):
-        if isinstance(value, list):
-            if len(value) >= 2 and isinstance(value[1], str):
-                func_params = value[2] if len(value) > 2 and isinstance(value[2], dict) else {}
-                if "node_type_names" in func_params and "type_names" not in func_params:
-                    new_value = list(value)
-                    new_params = dict(func_params)
-                    new_params["type_names"] = type_names
-                    if len(new_value) > 2:
-                        new_value[2] = new_params
-                    else:
-                        new_value.append(new_params)
-                    return new_value
-                return value
-            return [_inject(item) for item in value]
         if isinstance(value, dict):
             new_dict = {}
             for key, item in value.items():
-                if isinstance(item, list) and len(item) >= 2:
+                if isinstance(item, dict):
+                    child = _inject(item)
+                    if "node_type_names" in child and "type_names" not in child:
+                        child = dict(child)
+                        child["type_names"] = type_names
+                    new_dict[key] = child
+                elif isinstance(item, list):
                     new_dict[key] = _inject(item)
-                elif isinstance(item, dict):
-                    if "node_type_names" in item and "type_names" not in item:
-                        new_item = dict(item)
-                        new_item["type_names"] = type_names
-                        new_dict[key] = new_item
-                    else:
-                        new_dict[key] = item
                 else:
                     new_dict[key] = item
+            if "node_type_names" in new_dict and "type_names" not in new_dict:
+                new_dict["type_names"] = type_names
             return new_dict
+        if isinstance(value, list):
+            return [_inject(item) for item in value]
         return value
 
     if isinstance(components, list):
