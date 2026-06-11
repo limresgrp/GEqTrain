@@ -152,11 +152,14 @@ class _Metric:
         accum_params = {}
         if self.params.get("PerSpecies"):
             node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-            center_nodes_idx = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
             if node_mask is not None and node_mask.shape[0] == node_types.shape[0]:
-                center_nodes_idx = center_nodes_idx[node_mask[center_nodes_idx]]
-            # This logic assumes the error is per-node. A check might be needed.
-            accum_params["accumulate_by"] = node_types[center_nodes_idx]
+                # `node_mask` already encodes the final node selection applied to
+                # pred/ref, so using it keeps the accumulation bins aligned with the
+                # filtered error tensor.
+                accum_params["accumulate_by"] = node_types[node_mask]
+            else:
+                center_nodes_idx = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+                accum_params["accumulate_by"] = node_types[center_nodes_idx]
 
         if self.params.get("PerTarget"):
             num_rows, num_targets = error.shape
