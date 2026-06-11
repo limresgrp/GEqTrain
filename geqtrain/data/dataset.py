@@ -16,6 +16,7 @@ import inspect
 import yaml
 import hashlib
 import torch
+import torch.multiprocessing as mp
 import copy
 import os
 from os.path import dirname, basename, abspath
@@ -59,6 +60,50 @@ def fix_batch_dim(arr):
     if len(arr.shape) == 0:
         return arr.reshape(1)
     return arr
+
+
+_NPZ_FRAME_BUILD_CONTEXT = {}
+
+
+def _set_npz_frame_build_context(
+    *,
+    node_fields,
+    edge_fields,
+    graph_fields,
+    extra_fields,
+    fixed_fields,
+    constructor,
+    ignore_fields,
+):
+    global _NPZ_FRAME_BUILD_CONTEXT
+    _NPZ_FRAME_BUILD_CONTEXT = {
+        "node_fields": node_fields,
+        "edge_fields": edge_fields,
+        "graph_fields": graph_fields,
+        "extra_fields": extra_fields,
+        "fixed_fields": fixed_fields,
+        "constructor": constructor,
+        "ignore_fields": ignore_fields,
+    }
+
+
+def _build_npz_frame_chunk(frame_indices):
+    ctx = _NPZ_FRAME_BUILD_CONTEXT
+    data_list = []
+    for i in frame_indices:
+        data_list.append(
+            ctx["constructor"](
+                **{
+                    **{f: v[i] for f, v in ctx["node_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["edge_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["graph_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["extra_fields"].items() if v is not None},
+                    **ctx["fixed_fields"],
+                },
+                ignore_fields=ctx["ignore_fields"],
+            )
+        )
+    return data_list
 
 
 def _has_binning(options: Dict) -> bool:
@@ -422,6 +467,7 @@ class AtomicDataset(Dataset):
         IGNORE_KEYS = {
             "embedding_dimensionality",
             "transforms",
+            "frame_num_workers",
         }
 
         def filter_attributes(self, pnames, IGNORE_KEYS):
@@ -503,6 +549,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
         target_key: Optional[str] = None,
+        frame_num_workers: int = 1,
         node_attributes: Dict = {},
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
@@ -519,6 +566,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.include_frames = include_frames
         self.target_indices = target_indices
         self.target_key = target_key
+        self.frame_num_workers = max(1, int(frame_num_workers))
 
         self.data: Optional[Batch] = None
         self.fixed_fields = None
@@ -828,17 +876,34 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.R_MAX_KEY in all_keys
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
-            data_list = [  # list of AtomicData-pyg-object objects
-                constructor(
-                    **{
-                        **{f: v[i] for f, v in node_fields.items()  if v is not None},
-                        **{f: v[i] for f, v in edge_fields.items()  if v is not None},
-                        **{f: v[i] for f, v in graph_fields.items() if v is not None},
-                        **{f: v[i] for f, v in extra_fields.items() if v is not None},
-                        **fixed_fields,
-                    }, ignore_fields=self.ignore_fields)
-                for i in include_frames
-            ]
+            frame_indices = list(include_frames)
+            if self.frame_num_workers > 1 and len(frame_indices) > 1:
+                chunk_size = max(1, (len(frame_indices) + self.frame_num_workers - 1) // self.frame_num_workers)
+                frame_chunks = [frame_indices[i:i + chunk_size] for i in range(0, len(frame_indices), chunk_size)]
+                _set_npz_frame_build_context(
+                    node_fields=node_fields,
+                    edge_fields=edge_fields,
+                    graph_fields=graph_fields,
+                    extra_fields=extra_fields,
+                    fixed_fields=fixed_fields,
+                    constructor=constructor,
+                    ignore_fields=self.ignore_fields,
+                )
+                with mp.Pool(processes=min(self.frame_num_workers, len(frame_chunks))) as pool:
+                    data_chunks = pool.map(_build_npz_frame_chunk, frame_chunks)
+                data_list = [item for chunk in data_chunks for item in chunk]
+            else:
+                data_list = [  # list of AtomicData-pyg-object objects
+                    constructor(
+                        **{
+                            **{f: v[i] for f, v in node_fields.items()  if v is not None},
+                            **{f: v[i] for f, v in edge_fields.items()  if v is not None},
+                            **{f: v[i] for f, v in graph_fields.items() if v is not None},
+                            **{f: v[i] for f, v in extra_fields.items() if v is not None},
+                            **fixed_fields,
+                        }, ignore_fields=self.ignore_fields)
+                    for i in frame_indices
+                ]
 
         else:
             raise ValueError("Invalid return from `self.get_data()`")
@@ -1069,6 +1134,7 @@ class NpzDataset(AtomicInMemoryDataset):
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
         target_key: Optional[str] = None,
+        frame_num_workers: int = 1,
         node_attributes: Dict = {},
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
@@ -1089,6 +1155,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 include_frames=include_frames,
                 target_indices=target_indices,
                 target_key=target_key,
+                frame_num_workers=frame_num_workers,
                 node_attributes=node_attributes,
                 edge_attributes=edge_attributes,
                 graph_attributes=graph_attributes,

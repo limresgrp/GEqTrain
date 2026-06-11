@@ -131,13 +131,31 @@ def dataset_from_config(
         is_inmemory = instance_config.get('inmemory', True)
         key_clean_list = _get_key_clean(instance_config, loss_key)
 
+        explicit_frame_workers = instance_config.get(
+            f"{prefix}_frame_num_workers",
+            instance_config.get("frame_num_workers", None),
+        )
+        if len(files_to_process) == 1:
+            frame_num_workers = explicit_frame_workers
+            if frame_num_workers is None:
+                frame_num_workers = instance_config.get('dataset_num_workers', 1)
+            frame_num_workers = max(1, int(frame_num_workers))
+            instance_config_dict[f"{prefix}_frame_num_workers"] = frame_num_workers
+            n_workers = 1
+        else:
+            # Keep a single spawn level: when parallelizing across files, do not
+            # also parallelize frame construction inside each file.
+            instance_config_dict[f"{prefix}_frame_num_workers"] = 1
+            n_workers = int(min(len(files_to_process), instance_config.get('dataset_num_workers', 1)))
+
+        instance_config = Config(instance_config_dict)
+
         worker_func = partial(
             _handle_single_file,
             config_dict=instance_config.as_dict(), prefix=prefix, class_name=class_name,
             inmemory=is_inmemory, key_clean_list=key_clean_list
         )
-        
-        n_workers = int(min(len(files_to_process), instance_config.get('dataset_num_workers', 1)))
+
         if n_workers > 1:
             with mp.Pool(processes=n_workers) as pool:
                 results = pool.map(worker_func, files_to_process)
