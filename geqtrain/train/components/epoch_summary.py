@@ -21,6 +21,7 @@ class EpochSummary:
         self.grad_norms = []
         self.grad_norms_clip = []
         self.node_feature_norms = defaultdict(list)
+        self.diagnostic_stats = defaultdict(list)
         
         # Placeholders for final data
         self.lr = None
@@ -45,6 +46,13 @@ class EpochSummary:
         """Adds node feature norm measurements from a batch."""
         for key, norm in norms_dict.items():
             self.node_feature_norms[key].append(norm)
+
+    def add_diagnostic_stats(self, stats_dict: dict):
+        """Adds generic lightweight diagnostic statistics from a batch."""
+        for key, value in stats_dict.items():
+            if torch.is_tensor(value):
+                value = value.detach().float().mean().item()
+            self.diagnostic_stats[key].append(float(value))
 
     def finalize(self, trainer):
         """Finalizes the summary by adding data available only at the end of the epoch."""
@@ -110,5 +118,9 @@ class EpochSummary:
              for key, norms in self.node_feature_norms.items():
                 if norms:
                     flat_dict[f'train_{key}_norm'] = torch.stack(norms).mean().item()
+        if self.diagnostic_stats:
+            for key, values in self.diagnostic_stats.items():
+                if values:
+                    flat_dict[f'diag_{key}'] = torch.tensor(values, dtype=torch.float32).mean().item()
         self._flat_dict = flat_dict
         return self._flat_dict

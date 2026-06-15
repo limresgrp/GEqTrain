@@ -11,6 +11,7 @@ from geqtrain.train.components.setup import setup_metrics
 from geqtrain.utils.config import Config
 from geqtrain.utils.inference_metadata import build_inference_metadata_bundle
 from geqtrain.utils.normalization import get_transform_param_key, resolve_normalization_map
+from geqtrain.utils.normalization import get_per_type_stat_keys
 from geqtrain.utils.torch_geometric import Batch
 
 
@@ -183,6 +184,40 @@ def test_metrics_use_normalization_map():
     out = metrics(pred=pred, ref=ref)
     value = next(iter(out.values())).item()
     assert value == pytest.approx(3.0)
+
+
+def test_metrics_with_species_filter_still_denormalize_per_type():
+    register_fields(node_fields=["cs_iso"])
+    mean_key, std_key = get_per_type_stat_keys("cs_iso")
+    config = Config.from_dict(
+        {
+            "type_names": ["X", "H", "C"],
+            "metrics_components": [
+                {
+                    "cs_iso": [
+                        "L1Loss",
+                        {"node_type_names": ["H"]},
+                    ]
+                }
+            ],
+            "normalization": {"cs_iso": "per_type:1x0e"},
+        }
+    )
+    metrics = setup_metrics(config)
+
+    pred = {
+        "cs_iso": torch.tensor([[0.5], [0.5], [0.5]], dtype=torch.float32),
+        AtomicDataDict.NODE_TYPE_KEY: torch.tensor([[0], [1], [2]], dtype=torch.long),
+    }
+    ref = {
+        "cs_iso": torch.tensor([[0.0], [0.0], [0.0]], dtype=torch.float32),
+        AtomicDataDict.NODE_TYPE_KEY: torch.tensor([[0], [1], [2]], dtype=torch.long),
+        mean_key: torch.tensor([[0.0], [10.0], [20.0]], dtype=torch.float32),
+        std_key: torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32),
+    }
+    out = metrics(pred=pred, ref=ref)
+    value = next(iter(out.values())).item()
+    assert value == pytest.approx(1.0)
 
 
 def test_legacy_normalization_keys_raise():

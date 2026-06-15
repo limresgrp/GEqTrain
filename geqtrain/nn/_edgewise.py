@@ -2,9 +2,10 @@ import torch
 import math
 from typing import Optional
 from einops.layers.torch import Rearrange
-from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
+from geqtrain.utils.pytorch_scatter import scatter_sum
 from geqtrain.data import AtomicDataDict
 from geqtrain.nn import GraphModuleMixin, ScalarMLPFunction
+from geqtrain.nn._edge_attention import edge_group_self_attention_weights
 
 
 class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
@@ -42,15 +43,14 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         irreps = self.irreps_in[field]
         self.node_attr_to_query = None
+        self.edge_feat_to_query = None
         self.edge_feat_to_key = None
 
         if self.use_attention:
             self.edge_block_slices = []
             self.edge_scalar_slices = []
-            self.node_scalar_slices = []
             self.attention_num_heads = 0
             self.n_scalars = 0
-            self.n_node_scalars = 0
 
             max_mul = 0
             offset = 0
@@ -63,19 +63,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                 max_mul = max(max_mul, mul)
                 offset += block_dim
 
-            node_irreps = self.irreps_in[AtomicDataDict.NODE_ATTRS_KEY]
-            node_offset = 0
-            for mul, ir in node_irreps:
-                block_dim = mul * ir.dim
-                if ir.l == 0 and ir.p == 1:
-                    self.node_scalar_slices.append((node_offset, node_offset + block_dim))
-                    self.n_node_scalars += block_dim
-                node_offset += block_dim
-
             if self.n_scalars == 0:
                 raise ValueError("EdgewiseReduce attention requires parity-even scalar edge features.")
-            if self.n_node_scalars == 0:
-                raise ValueError("EdgewiseReduce attention requires parity-even scalar node attributes.")
 
             self.attention_num_heads = max_mul
 
@@ -87,8 +76,8 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
             self.attention_head_dim = attention_head_dim
             self.isqrtd = 1 / math.sqrt(attention_head_dim)
 
-            self.node_attr_to_query = readout_latent(
-                mlp_input_dimension=self.n_node_scalars,
+            self.edge_feat_to_query = readout_latent(
+                mlp_input_dimension=self.n_scalars,
                 mlp_output_dimension=self.attention_num_heads * self.attention_head_dim,
                 **readout_latent_kwargs,
             )
@@ -115,19 +104,7 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
 
         num_nodes = data[AtomicDataDict.POSITIONS_KEY].shape[0]
 
-        if self.use_attention and self.node_attr_to_query is not None:
-            node_attrs = data[AtomicDataDict.NODE_ATTRS_KEY]
-            if len(self.node_scalar_slices) == 1:
-                node_start, node_end = self.node_scalar_slices[0]
-                node_scalars = node_attrs[:, node_start:node_end]
-            else:
-                node_scalars = torch.cat(
-                    [node_attrs[:, start:end] for start, end in self.node_scalar_slices],
-                    dim=-1,
-                )
-            Q = self.node_attr_to_query(node_scalars[edge_center])
-            Q = self.rearrange_qk(Q)
-
+        if self.use_attention and self.edge_feat_to_query is not None:
             if len(self.edge_scalar_slices) == 1:
                 edge_start, edge_end = self.edge_scalar_slices[0]
                 edge_scalars = edge_feat[:, edge_start:edge_end]
@@ -136,11 +113,18 @@ class EdgewiseReduce(GraphModuleMixin, torch.nn.Module):
                     [edge_feat[:, start:end] for start, end in self.edge_scalar_slices],
                     dim=-1,
                 )
+            Q = self.edge_feat_to_query(edge_scalars)
+            Q = self.rearrange_qk(Q)
             K = self.edge_feat_to_key(edge_scalars)
             K = self.rearrange_qk(K)
 
-            W = torch.einsum('ehd,ehd -> eh', Q, K) * self.isqrtd
-            attn_weights = scatter_softmax(W, edge_center, dim=0)
+            attn_weights = edge_group_self_attention_weights(
+                queries=Q,
+                keys=K,
+                edge_center=edge_center,
+                num_nodes=num_nodes,
+                inv_sqrtd=self.isqrtd,
+            )
             weighted_blocks = []
             for start, end, mul, dim in self.edge_block_slices:
                 block = edge_feat[:, start:end].reshape(edge_feat.shape[0], mul, dim)

@@ -134,6 +134,35 @@ TEST_CONFIGS = [
         "expected_out_irreps": "16x0e+4x1o+4x2e",
     },
     {
+        "name": "with_node_feature_query_attention",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_attention": True,
+            "attention_mode": "node_feature_query",
+            "attention_head_dim": 4,
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+        "expected_node_state_irreps": "16x0e",
+    },
+    {
+        "name": "with_node_feature_query_attention_pooling",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "use_attention": True,
+            "attention_mode": "node_feature_query",
+            "attention_head_dim": 4,
+            "node_state_pooling": "attention",
+        },
+        "irreps_in": BASE_IRREPS_IN,
+        "expected_out_irreps": "16x0e+4x1o+4x2e",
+        "expected_node_state_irreps": "16x0e",
+    },
+    {
         "name": "with_mace_product",
         "params": {
             "num_layers": 2,
@@ -209,6 +238,11 @@ def test_interaction_module(config):
     expected_shape = (NUM_EDGES, model.irreps_out[out_field].dim)
     assert output_tensor.shape == expected_shape, \
         f"Output shape mismatch for '{config['name']}'. Expected {expected_shape}, got {output_tensor.shape}"
+    expected_node_state_irreps = config.get("expected_node_state_irreps") # type: ignore
+    if expected_node_state_irreps:
+        assert AtomicDataDict.NODE_FEATURES_KEY in data_out
+        assert str(model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY]) == expected_node_state_irreps
+        assert data_out[AtomicDataDict.NODE_FEATURES_KEY].shape == (NUM_ATOMS, model.irreps_out[AtomicDataDict.NODE_FEATURES_KEY].dim)
 
     # 5. Test Equivariance
     try:
@@ -220,7 +254,11 @@ def test_interaction_module(config):
         pytest.fail(f"Equivariance test failed for config '{config['name']}': {e}")
 
 
-@pytest.mark.parametrize("config", [TEST_CONFIGS[0], SCALAR_ONLY_OUTPUT_CONFIG], ids=["base_case", "scalar_only_output"])
+@pytest.mark.parametrize(
+    "config",
+    [TEST_CONFIGS[0], SCALAR_ONLY_OUTPUT_CONFIG, TEST_CONFIGS[5]],
+    ids=["base_case", "scalar_only_output", "node_feature_query_attention"],
+)
 def test_interaction_module_deployable(config, tmp_path):
     """Smoke-test that InteractionModule can be scripted/frozen/saved and reloaded."""
     device = "cpu"

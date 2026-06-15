@@ -3,6 +3,7 @@ import torch
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.AtomicData import register_fields
 from geqtrain.train._loss import LossWrapper
+from geqtrain.train.loss import Loss
 from geqtrain.train.components.setup import setup_loss
 
 
@@ -62,3 +63,73 @@ def test_setup_loss_injects_global_type_names():
     out = loss.funcs["cs_iso_0"](pred=pred, ref=ref, key="cs_iso", mean=False)
 
     assert torch.allclose(out, torch.tensor([[3.0]]))
+
+
+class _CustomMeanAbsLoss:
+    def __init__(self, **kwargs):
+        self.last_shape = None
+
+    def __call__(self, pred, ref, key, mean=True, **kwargs):
+        self.last_shape = pred[key].shape
+        out = torch.abs(pred[key] - ref[key])
+        return out.mean() if mean else out
+
+
+def test_loss_framework_filters_before_custom_loss():
+    loss = Loss(
+        components=[
+            {
+                "cs_iso": [
+                    1.0,
+                    _CustomMeanAbsLoss,
+                    {"node_type_names": ["H"], "type_names": ["X", "H", "C"]},
+                ]
+            }
+        ]
+    )
+    pred = {"cs_iso": torch.tensor([[1.0], [5.0], [3.0]], dtype=torch.float32)}
+    ref = _make_ref()
+
+    total, contrib = loss(pred=pred, ref=ref)
+
+    assert torch.allclose(total, torch.tensor(3.0))
+    assert torch.allclose(contrib["cs_iso_0"], torch.tensor(3.0))
+    assert loss.funcs["cs_iso_0"].last_shape == torch.Size([1, 1])
+
+
+def test_loss_wrapper_empty_species_filter_returns_graph_connected_zero():
+    loss = LossWrapper("L1Loss", params={"node_type_indices": [2]})
+    pred = {"cs_iso": torch.tensor([[1.0], [5.0], [3.0]], dtype=torch.float32, requires_grad=True)}
+    ref = _make_ref()
+
+    out = loss(pred=pred, ref=ref, key="cs_iso", mean=True)
+    out.backward()
+
+    assert out.requires_grad
+    assert torch.allclose(out.detach(), torch.tensor(0.0))
+    assert torch.allclose(pred["cs_iso"].grad, torch.zeros_like(pred["cs_iso"]))
+
+
+def test_loss_framework_empty_species_filter_returns_graph_connected_zero_for_custom_loss():
+    loss = Loss(
+        components=[
+            {
+                "cs_iso": [
+                    1.0,
+                    _CustomMeanAbsLoss,
+                    {"node_type_names": ["C"], "type_names": ["X", "H", "C"]},
+                ]
+            }
+        ]
+    )
+    pred = {"cs_iso": torch.tensor([[1.0], [5.0], [3.0]], dtype=torch.float32, requires_grad=True)}
+    ref = _make_ref()
+
+    total, contrib = loss(pred=pred, ref=ref)
+    total.backward()
+
+    assert total.requires_grad
+    assert torch.allclose(total.detach(), torch.tensor(0.0))
+    assert torch.allclose(contrib["cs_iso_0"], torch.tensor(0.0))
+    assert torch.allclose(pred["cs_iso"].grad, torch.zeros_like(pred["cs_iso"]))
+    assert loss.funcs["cs_iso_0"].last_shape is None

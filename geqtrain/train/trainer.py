@@ -23,7 +23,7 @@ from .components.distributed import DistributedManager
 from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger,
                                    ValidationBatchPredictionLogger, CheckpointCallback,
                                    EarlyStoppingCallback, SanitizeGradCallback,
-                                   GradientClippingCallback)
+                                   GradientClippingCallback, EpochDiagnosticsCallback)
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -334,7 +334,7 @@ class Trainer:
 
     def _setup_callbacks(self):
         # Core callbacks
-        callbacks = [Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
+        callbacks = [EpochDiagnosticsCallback(), Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
 
         # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):

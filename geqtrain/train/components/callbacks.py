@@ -14,6 +14,7 @@ from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import atomic_write_group
 from geqtrain.utils.normalization import resolve_normalization_map
 from geqtrain.train._key import TRAIN, VALIDATION, ABBREV
+from geqtrain.train._loss import prepare_target
 from geqtrain.utils.wandb import init_n_update_wandb, resume_wandb_run
 from geqtrain.train.grad_clipping_utils import gradient_clipping, Queue
 
@@ -249,16 +250,6 @@ class ValidationBatchPredictionLogger(Callback):
         pred_key = pred_copy[pred_key_name]
         ref_key = ref_copy[key]
 
-        if loss_func is not None and hasattr(loss_func, "_prepare_tensors"):
-            pred_key, ref_key = loss_func._prepare_tensors(
-                pred_copy,
-                ref_copy,
-                pred_key_name,
-                key,
-                mean=False,
-                normalization_fields=self._normalization_fields,
-            )
-
         if loss_func is not None and hasattr(loss_func, "_handle_supervision_shapes"):
             ref_key = loss_func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
         elif ref_key.shape != pred_key.shape:
@@ -266,8 +257,20 @@ class ValidationBatchPredictionLogger(Callback):
                 ref_key = ref_key.reshape(pred_key.shape)
             except: pass # This could happen when e.g. predicting logits for CrossEntropy
 
-        if loss_func is not None and hasattr(loss_func, "_apply_node_filter"):
-            pred_key, ref_key = loss_func._apply_node_filter(pred_key, ref_key, ref_copy, key)
+        prepared = prepare_target(
+            pred=pred_copy,
+            ref=ref_copy,
+            key=key,
+            pred_key_name=pred_key_name,
+            pred_key=pred_key,
+            ref_key=ref_key,
+            node_type_indices=getattr(loss_func, "node_type_indices", None),
+            node_mask_field=getattr(loss_func, "node_mask_field", None),
+            ignore_nan=getattr(loss_func, "ignore_nan", False),
+            denormalize=True,
+            normalization_fields=self._normalization_fields,
+        )
+        pred_key, ref_key = prepared.pred_key, prepared.ref_key
 
         return pred_key, ref_key
 
@@ -534,3 +537,69 @@ class ActivationNormCallback(Callback):
                 batch_node_norms[f'node_repr_l_{ir.l}_p_{ir.p}_part_{i}_norm_mean'] = norm
             
             summary.add_node_feature_norms(batch_node_norms)
+
+
+class EpochDiagnosticsCallback(Callback):
+    """Captures lightweight tensor diagnostics on the first validation batch of each epoch."""
+    def __init__(self):
+        self.enabled = False
+        self.fields = []
+        self.stats = ("mean_abs", "rms", "max_abs")
+        self._capture_active = False
+        self._cache = {}
+        self._epoch_stats = {}
+
+    def on_trainer_begin(self, **kwargs):
+        cfg = self.trainer.config
+        self.enabled = bool(cfg.get("activation_diagnostics", False))
+        fields = cfg.get("activation_diagnostics_fields", [
+            AtomicDataDict.NODE_FEATURES_KEY,
+            AtomicDataDict.EDGE_FEATURES_KEY,
+            "cs_iso",
+            "cs_tensor",
+        ])
+        self.fields = [str(field) for field in fields]
+        stats = cfg.get("activation_diagnostics_stats", list(self.stats))
+        self.stats = tuple(str(stat) for stat in stats)
+
+    def on_validation_begin(self, **kwargs):
+        self._capture_active = self.enabled
+        self._cache = {field: [] for field in self.fields}
+        self._epoch_stats = {}
+
+    def on_batch_begin(self, **kwargs):
+        if not self.enabled or self.trainer.batch_type != VALIDATION or self.trainer.ibatch != 0:
+            self._capture_active = False
+
+    def on_step_end(self, batch_output=None, **kwargs):
+        if not self.enabled or not self._capture_active or batch_output is None:
+            return
+        for field in self.fields:
+            value = batch_output.get(field)
+            if torch.is_tensor(value):
+                self._cache[field].append(value.detach().float().cpu())
+
+    def on_batch_end(self, **kwargs):
+        if not self.enabled or not self._capture_active:
+            return
+        self._epoch_stats = {}
+        for field, tensors in self._cache.items():
+            if not tensors:
+                continue
+            tensor = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
+            flat = tensor.reshape(-1).float()
+            if flat.numel() == 0:
+                continue
+            abs_flat = flat.abs()
+            if "mean_abs" in self.stats:
+                self._epoch_stats[f"{field}_mean_abs"] = abs_flat.mean()
+            if "rms" in self.stats:
+                self._epoch_stats[f"{field}_rms"] = torch.sqrt((flat * flat).mean())
+            if "max_abs" in self.stats:
+                self._epoch_stats[f"{field}_max_abs"] = abs_flat.max()
+        self._capture_active = False
+
+    def on_epoch_end(self, summary: EpochSummary, run_validation: bool, **kwargs):
+        if not self.enabled or not run_validation or summary is None or not self._epoch_stats:
+            return
+        summary.add_diagnostic_stats(self._epoch_stats)

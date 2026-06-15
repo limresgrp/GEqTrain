@@ -7,11 +7,9 @@ import torch
 import torch.distributed as dist
 
 from geqtrain.data import AtomicDataDict
-from geqtrain.data import _NODE_FIELDS
-from geqtrain.train.loss import Loss
 from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
 from ._key import ABBREV
-from ._loss import StatefulMetric
+from ._loss import LossWrapper, PreparedTarget, StatefulMetric, prepare_target, resolve_node_type_indices
 from .loss import Loss
 
 class _Metric:
@@ -28,102 +26,80 @@ class _Metric:
             self.accumulator = self.func
 
     def _resolve_node_type_indices(self):
-        node_type_indices = self.params.pop("node_type_indices", None)
-        node_type_names = self.params.pop("node_type_names", None)
-        type_names = self.params.pop("type_names", None)
-
-        if node_type_indices is not None and node_type_names is not None:
-            raise ValueError("Specify only one of `node_type_indices` or `node_type_names`.")
-
-        if node_type_indices is not None:
-            if isinstance(node_type_indices, (int, str)):
-                node_type_indices = [node_type_indices]
-            return torch.tensor([int(v) for v in node_type_indices], dtype=torch.long)
-
-        if node_type_names is not None:
-            if type_names is None:
-                raise ValueError(
-                    "`node_type_names` was provided for a metric, but no `type_names` list was found in the metric parameters. "
-                    "Add `type_names` next to the metric entry or use `node_type_indices` instead."
-                )
-            if isinstance(node_type_names, str):
-                node_type_names = [node_type_names]
-            if isinstance(type_names, str):
-                type_names = [type_names]
-            type_name_to_idx = {str(name): idx for idx, name in enumerate(type_names)}
-            missing = [name for name in node_type_names if str(name) not in type_name_to_idx]
-            if missing:
-                raise ValueError(
-                    f"Unknown node type names in metric filter: {missing}. Available type names: {list(type_name_to_idx.keys())}"
-                )
-            return torch.tensor([type_name_to_idx[str(name)] for name in node_type_names], dtype=torch.long)
-
-        return None
-
-    def _resolve_node_mask(self, pred: dict, ref: dict):
-        if self.node_mask_field is None:
-            return None
-
-        mask_source = pred if self.node_mask_field in pred else ref
-        if self.node_mask_field not in mask_source:
-            return None
-
-        node_mask = mask_source[self.node_mask_field]
-        if not torch.is_tensor(node_mask):
-            node_mask = torch.as_tensor(node_mask)
-        node_mask = node_mask.to(dtype=torch.bool)
-        if node_mask.ndim > 1:
-            node_mask = node_mask.squeeze(-1)
-        return node_mask
-
-    def _apply_node_filter(self, pred: dict, ref: dict, key: str):
-        species_mask = None
-        if self.node_type_indices is not None and (AtomicDataDict.NODE_TYPE_KEY in pred or AtomicDataDict.NODE_TYPE_KEY in ref):
-            node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
-            node_types = node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-            species_mask = torch.isin(node_types, self.node_type_indices.to(node_types.device))
-
-        node_mask = self._resolve_node_mask(pred, ref)
-        combined_mask = None
-        if species_mask is not None:
-            combined_mask = species_mask
-        if node_mask is not None:
-            combined_mask = node_mask if combined_mask is None else (combined_mask & node_mask)
-
-        if combined_mask is not None:
-            if key in _NODE_FIELDS or (key in pred and pred[key].ndim > 0 and pred[key].shape[0] == combined_mask.shape[0]):
-                pred = dict(pred)
-                pred[key] = pred[key][combined_mask]
-            if key in _NODE_FIELDS or (key in ref and ref[key].ndim > 0 and ref[key].shape[0] == combined_mask.shape[0]):
-                ref = dict(ref)
-                ref[key] = ref[key][combined_mask]
-        return pred, ref, combined_mask
+        out = resolve_node_type_indices(self.params, "metric")
+        self.params.pop("node_type_indices", None)
+        self.params.pop("node_type_names", None)
+        self.params.pop("type_names", None)
+        return out
 
     def accumulate(self, pred: dict, ref: dict, key: str, normalization_fields: dict) -> torch.Tensor:
         """Calculates and accumulates the metric for the current batch."""
-        pred, ref, node_mask = self._apply_node_filter(pred, ref, key)
-        if isinstance(self.accumulator, StatefulMetric):
-            self.accumulator.update(pred, ref, key)
-            return self.accumulator.compute()  # Return partial result for batch logs
-        
-        # --- Logic for stateless (RunningStats) metrics ---
-        error = self.func(
+        pred_key_name = key
+        if isinstance(self.func, LossWrapper):
+            pred_key_name = self.func._get_pred_key_name(key)
+
+        if pred_key_name not in pred or key not in ref:
+            return None
+
+        pred_key = pred[pred_key_name]
+        ref_key = ref[key]
+        if isinstance(self.func, LossWrapper):
+            self.func._initialize_supervision_weights(pred_key.device, pred_key.dtype)
+            ref_key = self.func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
+            ignore_nan = self.func.ignore_nan
+        else:
+            if ref_key.shape != pred_key.shape:
+                try:
+                    ref_key = ref_key.reshape(pred_key.shape)
+                except Exception:
+                    pass
+            ignore_nan = bool(self.params.get("ignore_nan", False))
+
+        prepared = prepare_target(
             pred=pred,
             ref=ref,
             key=key,
-            mean=False,
+            pred_key_name=pred_key_name,
+            pred_key=pred_key,
+            ref_key=ref_key,
+            node_type_indices=self.node_type_indices,
+            node_mask_field=self.node_mask_field,
+            ignore_nan=ignore_nan,
+            denormalize=True,
             normalization_fields=normalization_fields,
         )
+
+        if isinstance(self.accumulator, StatefulMetric):
+            self.accumulator.update(prepared.pred, prepared.ref, key)
+            return self.accumulator.compute()  # Return partial result for batch logs
+        
+        # --- Logic for stateless (RunningStats) metrics ---
+        if isinstance(self.func, LossWrapper):
+            error = self.func._calculate_loss(prepared.pred_key, prepared.ref_key, mean=False)
+        else:
+            error = self.func(
+                pred=prepared.pred,
+                ref=prepared.ref,
+                key=key,
+                mean=False,
+                normalization_fields={},
+            )
         
         # If per-target metrics are not requested, average over the feature dimension
         if error.dim() > 1 and not self.params.get("PerTarget"):
             error = error.mean(dim=tuple(range(1, error.dim())))
+
+        # If filtering removed all relevant samples from this chunk/batch, do not
+        # update the running statistics. This happens with chunked validation when
+        # a chunk contains no atoms matching the requested species/mask filter.
+        if error.numel() == 0:
+            return None
         
         # Lazily initialize the RunningStats accumulator on the first batch
         if self.accumulator is None:
             self._init_runstat(error)
 
-        accum_params = self._prepare_accumulation_params(error, ref, node_mask)
+        accum_params = self._prepare_accumulation_params(error, prepared)
         return self.accumulator.accumulate_batch(error, **accum_params)
 
     def get_final_result(self) -> torch.Tensor:
@@ -147,19 +123,12 @@ class _Metric:
         self.accumulator = RunningStats(**init_kwargs)
         self.accumulator.to(error.device)
 
-    def _prepare_accumulation_params(self, error: torch.Tensor, ref: dict, node_mask: torch.Tensor = None) -> dict:
+    def _prepare_accumulation_params(self, error: torch.Tensor, prepared: PreparedTarget) -> dict:
         """Prepares the `accumulate_by` tensor for PerSpecies or PerTarget logic."""
         accum_params = {}
         if self.params.get("PerSpecies"):
-            node_types = ref[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1)
-            if node_mask is not None and node_mask.shape[0] == node_types.shape[0]:
-                # `node_mask` already encodes the final node selection applied to
-                # pred/ref, so using it keeps the accumulation bins aligned with the
-                # filtered error tensor.
-                accum_params["accumulate_by"] = node_types[node_mask]
-            else:
-                center_nodes_idx = ref[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-                accum_params["accumulate_by"] = node_types[center_nodes_idx]
+            if prepared.node_types is not None:
+                accum_params["accumulate_by"] = prepared.node_types.to(error.device)
 
         if self.params.get("PerTarget"):
             num_rows, num_targets = error.shape
@@ -200,12 +169,14 @@ class Metrics(Loss):
         batch_metrics = {}
         for key, metric_handler in self.metrics.items():
             clean_key = self.remove_suffix(key)
-            batch_metrics[key] = metric_handler.accumulate(
+            value = metric_handler.accumulate(
                 pred,
                 ref,
                 clean_key,
                 self.normalization_fields,
             )
+            if value is not None:
+                batch_metrics[key] = value
         return batch_metrics
 
     def reset(self):
@@ -233,6 +204,8 @@ class Metrics(Loss):
         flat_dict = {}
 
         for key, value in metrics.items():
+            if value is None or (torch.is_tensor(value) and value.numel() == 0):
+                continue
             handler = self.metrics[key]
             params = handler.params
             
@@ -241,6 +214,9 @@ class Metrics(Loss):
             loss_name = str(handler.func)
             reduction_name = params.get('reduction', Reduction.MEAN).name.lower()
             metric_key = f"{metric_name}_{loss_name}_{reduction_name}"
+            counts = None
+            if isinstance(handler.accumulator, RunningStats) and hasattr(handler.accumulator, "_n"):
+                counts = handler.accumulator._n
 
             # This complex formatting logic remains, as it's required for detailed logging
             if params.get("PerSpecies") or handler.node_type_indices is not None:
@@ -257,6 +233,10 @@ class Metrics(Loss):
                     value_lookup = lambda local_idx, species_idx: value[species_idx]
 
                 for local_idx, species_idx in species_pairs:
+                    bin_idx = local_idx if len(value) == len(species_indices) else species_idx
+                    if counts is not None and torch.is_tensor(counts) and bin_idx < counts.shape[0]:
+                        if torch.as_tensor(counts[bin_idx]).sum().item() == 0:
+                            continue
                     species_name = type_names[species_idx] if type_names and species_idx < len(type_names) else f"type_{species_idx}"
                     value_row = value_lookup(local_idx, species_idx)
                     base_key = f"{species_name}_{metric_key}"
