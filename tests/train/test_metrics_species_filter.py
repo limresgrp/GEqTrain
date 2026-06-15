@@ -23,7 +23,11 @@ def test_metrics_stateless_node_type_names_filters_selected_species():
                 "cs_iso": [
                     1.0,
                     "L1Loss",
-                    {"node_type_names": ["H"], "type_names": ["X", "H", "C"]},
+                    {
+                        "node_type_names": ["H"],
+                        "type_names": ["X", "H", "C"],
+                        "node_level_filter": False,
+                    },
                 ]
             }
         ]
@@ -64,7 +68,11 @@ class _RecordingStatefulMetric(StatefulMetric):
 def test_metrics_stateful_node_type_names_filters_selected_species():
     metric = _Metric(
         _RecordingStatefulMetric(),
-        {"node_type_names": ["H"], "type_names": ["X", "H", "C"]},
+        {
+            "node_type_names": ["H"],
+            "type_names": ["X", "H", "C"],
+            "node_level_filter": False,
+        },
     )
     pred = {"cs_iso": torch.tensor([[1.0], [5.0], [3.0]], dtype=torch.float32)}
     ref = _make_ref()
@@ -84,6 +92,7 @@ def test_metrics_per_species_node_type_names_uses_selected_species_even_if_not_c
                     "L1Loss",
                     {"PerSpecies": True},
                     {"node_type_names": ["H"], "type_names": ["X", "H", "C"]},
+                    {"node_level_filter": False},
                 ]
             }
         ]
@@ -100,6 +109,30 @@ def test_metrics_per_species_node_type_names_uses_selected_species_even_if_not_c
         {"type_names": ["X", "H", "C"]},
     )
     assert flat == {"H_cs_iso_L1Loss_mean": 3.0}
+
+
+def test_metrics_default_node_filter_uses_only_edge_centers():
+    metrics = Metrics(
+        components=[
+            {
+                "cs_iso": [
+                    1.0,
+                    "L1Loss",
+                    {"PerSpecies": True},
+                ]
+            }
+        ]
+    )
+    pred = {"cs_iso": torch.tensor([[2.0], [50.0], [5.0]], dtype=torch.float32)}
+    ref = _make_ref()
+
+    metrics(pred=pred, ref=ref)
+    flat = metrics.flatten_metrics(
+        {"cs_iso_0": metrics.metrics["cs_iso_0"].accumulator.current_result()},
+        {"type_names": ["X", "H", "C"]},
+    )
+
+    assert flat == {"X_cs_iso_L1Loss_mean": 1.5}
 
 
 def test_metrics_node_mask_center_length_aligns_species_filter():

@@ -127,6 +127,7 @@ def prepare_target(
     ref_key: torch.Tensor,
     node_type_indices: Optional[torch.Tensor] = None,
     node_mask_field: Optional[str] = None,
+    node_level_filter: object = "auto",
     ignore_nan: bool = False,
     denormalize: bool = False,
     normalization_fields: Optional[Dict[str, Dict]] = None,
@@ -153,6 +154,21 @@ def prepare_target(
 
     masks = []
     node_types = None
+    apply_center_filter = (
+        key in _NODE_FIELDS
+        and (node_level_filter is True or node_level_filter == "auto")
+    )
+    if (
+        apply_center_filter
+        and center_nodes is not None
+        and center_nodes.numel() < row_count
+        and center_nodes.numel() > 0
+        and int(center_nodes.max().item()) < row_count
+    ):
+        center_mask = torch.zeros(row_count, dtype=torch.bool, device=pred_key.device)
+        center_mask[center_nodes.to(device=pred_key.device)] = True
+        masks.append(center_mask)
+
     if key in _NODE_FIELDS and (AtomicDataDict.NODE_TYPE_KEY in pred or AtomicDataDict.NODE_TYPE_KEY in ref):
         node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
         node_types = _align_rows(
@@ -377,6 +393,7 @@ class LossWrapper:
             ref_key=ref_key,
             node_type_indices=self.node_type_indices,
             node_mask_field=self.node_mask_field,
+            node_level_filter=self.node_level_filter,
             ignore_nan=False,
             denormalize=False,
         )
@@ -441,6 +458,7 @@ class LossWrapper:
                 ref_key=ref_key,
                 node_type_indices=self.node_type_indices,
                 node_mask_field=self.node_mask_field,
+                node_level_filter=self.node_level_filter,
                 ignore_nan=self.ignore_nan,
                 denormalize=not mean,
                 normalization_fields=normalization_fields,

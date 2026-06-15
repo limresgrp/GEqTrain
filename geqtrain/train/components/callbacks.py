@@ -266,6 +266,7 @@ class ValidationBatchPredictionLogger(Callback):
             ref_key=ref_key,
             node_type_indices=getattr(loss_func, "node_type_indices", None),
             node_mask_field=getattr(loss_func, "node_mask_field", None),
+            node_level_filter=getattr(loss_func, "node_level_filter", "auto"),
             ignore_nan=getattr(loss_func, "ignore_nan", False),
             denormalize=True,
             normalization_fields=self._normalization_fields,

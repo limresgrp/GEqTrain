@@ -289,7 +289,19 @@ def _filter_dataset(
     data: Batch = dataset.data
     if data is None or data.num_graphs == 0:
         return None
-    if keep_node_types is None and exclude_node_types_from_edge_center is None and exclude_node_types_from_edge_neigh is None:
+    has_nan_target_filter = any(
+        key in _NODE_FIELDS
+        and key in data
+        and torch.is_floating_point(data[key])
+        and torch.isnan(data[key]).any()
+        for key in key_clean_list
+    )
+    if (
+        keep_node_types is None
+        and exclude_node_types_from_edge_center is None
+        and exclude_node_types_from_edge_neigh is None
+        and not has_nan_target_filter
+    ):
         return dataset
 
     # --- 1. Compute the final node mask based on all conditions ---

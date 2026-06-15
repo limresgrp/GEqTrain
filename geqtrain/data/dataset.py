@@ -19,6 +19,7 @@ import torch
 import torch.multiprocessing as mp
 import copy
 import os
+import tempfile
 from os.path import dirname, basename, abspath
 from e3nn.o3 import Irreps
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
@@ -104,6 +105,19 @@ def _build_npz_frame_chunk(frame_indices):
             )
         )
     return data_list
+
+
+def _initialize_npz_frame_worker(context):
+    global _NPZ_FRAME_BUILD_CONTEXT
+    _NPZ_FRAME_BUILD_CONTEXT = context
+    torch.set_num_threads(1)
+
+
+def _build_npz_frame_chunk_to_file(task):
+    frame_indices, output_path = task
+    data_list = _build_npz_frame_chunk(frame_indices)
+    torch.save(data_list, output_path)
+    return output_path
 
 
 def _has_binning(options: Dict) -> bool:
@@ -889,8 +903,27 @@ class AtomicInMemoryDataset(AtomicDataset):
                     constructor=constructor,
                     ignore_fields=self.ignore_fields,
                 )
-                with mp.Pool(processes=min(self.frame_num_workers, len(frame_chunks))) as pool:
-                    data_chunks = pool.map(_build_npz_frame_chunk, frame_chunks)
+                worker_context = dict(_NPZ_FRAME_BUILD_CONTEXT)
+                num_workers = min(self.frame_num_workers, len(frame_chunks))
+                spawn_context = mp.get_context("spawn")
+                with tempfile.TemporaryDirectory(
+                    prefix="frame_chunks_",
+                    dir=self.processed_dir,
+                ) as temp_dir:
+                    tasks = [
+                        (chunk, os.path.join(temp_dir, f"chunk_{chunk_idx}.pth"))
+                        for chunk_idx, chunk in enumerate(frame_chunks)
+                    ]
+                    with spawn_context.Pool(
+                        processes=num_workers,
+                        initializer=_initialize_npz_frame_worker,
+                        initargs=(worker_context,),
+                    ) as pool:
+                        chunk_paths = pool.map(_build_npz_frame_chunk_to_file, tasks)
+                    data_chunks = [
+                        torch.load(path, map_location="cpu", weights_only=False)
+                        for path in chunk_paths
+                    ]
                 data_list = [item for chunk in data_chunks for item in chunk]
             else:
                 data_list = [  # list of AtomicData-pyg-object objects

@@ -20,6 +20,10 @@ class _Metric:
         self.accumulator: Union[RunningStats, StatefulMetric, None] = None
         self.node_type_indices = self._resolve_node_type_indices()
         self.node_mask_field = self.params.pop("node_mask_field", self.params.pop("node_mask_key", None))
+        self.node_level_filter = self.params.pop(
+            "node_level_filter",
+            getattr(self.func, "node_level_filter", "auto"),
+        )
 
         # If the metric is stateful, it acts as its own accumulator
         if isinstance(self.func, StatefulMetric):
@@ -64,6 +68,7 @@ class _Metric:
             ref_key=ref_key,
             node_type_indices=self.node_type_indices,
             node_mask_field=self.node_mask_field,
+            node_level_filter=self.node_level_filter,
             ignore_nan=ignore_nan,
             denormalize=True,
             normalization_fields=normalization_fields,
