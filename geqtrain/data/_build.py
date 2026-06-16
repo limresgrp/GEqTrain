@@ -341,7 +341,12 @@ def _filter_dataset(
 
     nan_filters = []
     for key in key_clean_list:
-        if key in _NODE_FIELDS and key in data and torch.isnan(data[key]).any():
+        if (
+            key in _NODE_FIELDS
+            and key in data
+            and torch.is_floating_point(data[key])
+            and torch.isnan(data[key]).any()
+        ):
             valid_nodes = torch.all(~torch.isnan(data[key]), dim=-1)
             nan_filters.append(valid_nodes[edge_index[0]])
     if nan_filters:
