@@ -31,6 +31,7 @@ class Loss:
         self.funcs: Dict[str, torch.nn.Module] = {}
         self.func_params: Dict[str, dict] = {}
         self.target_filters: Dict[str, dict] = {}
+        self.target_keys: Dict[str, str] = {}
         self.key_pattern = r"\_\d+"
 
         self._parse_components_from_yaml(components)
@@ -45,7 +46,7 @@ class Loss:
         total_loss = 0.0
         contributions = {}
         for key in self.keys:
-            clean_key = self.remove_suffix(key)
+            clean_key = self.get_target_key(key)
             try:
                 func = self.funcs[key]
                 prepared_pred, prepared_ref = pred, ref
@@ -114,11 +115,14 @@ class Loss:
             raise NotImplementedError(f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}")
 
     def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = None):
-        key = self.suffix_key(key)
+        target_key = key
+        func_params = {} if func_params is None else dict(func_params)
+        display_name = func_params.pop("name", func_params.pop("loss_name", None))
+        key = self.suffix_key(str(display_name) if display_name is not None else target_key)
         self.keys.append(key)
+        self.target_keys[key] = target_key
         self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
 
-        func_params = {} if func_params is None else dict(func_params)
         instance = None
         # 1. Check for a standard torch.nn loss without relying on exceptions.
         torch_cls = getattr(torch.nn, func, None) if isinstance(func, str) else None
@@ -167,6 +171,9 @@ class Loss:
 
     def remove_suffix(self, key):
         return re.sub(self.key_pattern, '', key)
+
+    def get_target_key(self, key):
+        return self.target_keys.get(key, self.remove_suffix(key))
 
     def add_suffix(self, key: str, suffix_id: int):
         if re.search(self.key_pattern, key):

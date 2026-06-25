@@ -31,8 +31,22 @@ class TrainingLoop:
         """
         if train_phase:
             if self.trainer.train_sampler is not None:
-                self.trainer.train_sampler.set_epoch(self.trainer.iepoch + 1)
+                self.trainer.train_sampler.set_epoch(max(0, int(self.trainer.iepoch)))
             self.run_phase(TRAIN, summary)
+            if getattr(self.trainer, "curriculum_sampler", None) is not None:
+                self.trainer.curriculum_sampler.on_epoch_end()
+                if self.dist.is_master:
+                    cfg = self.trainer._curriculum_config()
+                    bins = cfg.get("histogram_bins", 10)
+                    self.trainer.logger.info(
+                        "Curriculum sampling probabilities after epoch %d "
+                        "(anchor=%s, beta=%.3f, gamma=%.3f):\n%s",
+                        max(0, int(self.trainer.iepoch)),
+                        self.trainer.curriculum_sampler.last_epoch_was_anchor,
+                        self.trainer.curriculum_sampler._beta(),
+                        self.trainer.curriculum_sampler._gamma(),
+                        self.trainer.curriculum_sampler.ascii_histogram(bins=bins),
+                    )
 
         if run_validation:
             ema_cm = self.ema.average_parameters() if self.ema is not None else contextlib.nullcontext()
@@ -137,11 +151,15 @@ class TrainingLoop:
             current_epoch=max(0, int(self.trainer.iepoch)),
         )
         loss, loss_contrib = self.loss_fn(pred=out, ref=ref_data)
+        raw_loss = loss
 
         if is_train:
             accumulation_steps = self.trainer.config.get('accumulation_steps', 1)
-            loss = loss / accumulation_steps
-            loss.backward()
+            importance_weight = 1.0
+            if getattr(self.trainer, "curriculum_sampler", None) is not None:
+                importance_weight = self.trainer.curriculum_sampler.current_importance_weight
+            train_loss = loss * float(importance_weight) / accumulation_steps
+            train_loss.backward()
             self.trainer.accumulation_counter += 1
             self.trainer._dispatch_callbacks('on_after_backward')
 
@@ -155,8 +173,12 @@ class TrainingLoop:
                 self.optim.zero_grad(set_to_none=True)
                 self.trainer.accumulation_counter = 0
 
-        syncd_loss = self.dist.sync_tensor(loss.detach())
+        syncd_loss = self.dist.sync_tensor(raw_loss.detach())
         syncd_loss_contrib = self.dist.sync_dict_of_tensors(loss_contrib)
+        if is_train and getattr(self.trainer, "curriculum_sampler", None) is not None:
+            target_key = getattr(self.trainer, "curriculum_loss_key", "loss")
+            priority_loss = syncd_loss if target_key in (None, "loss") else syncd_loss_contrib.get(target_key, syncd_loss)
+            self.trainer.curriculum_sampler.update_batch_loss(priority_loss)
         batch_losses = self.loss_fn.loss_stat(syncd_loss, syncd_loss_contrib)
         if self.dist.is_master: self.trainer.batch_losses = batch_losses
 

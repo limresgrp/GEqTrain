@@ -48,16 +48,25 @@ class DataLoader(torch.utils.data.DataLoader):
         dataset,
         batch_size: int = 1,
         shuffle: bool = False,
+        batch_sampler=None,
         exclude_keys: List[str] = [],
         **kwargs,
     ):
         if "collate_fn" in kwargs:
             del kwargs["collate_fn"]
 
-        super(DataLoader, self).__init__(
-            dataset,
-            batch_size,
-            shuffle,
-            collate_fn=Collater(exclude_keys=exclude_keys),
-            **kwargs,
-        )
+        if batch_sampler is not None:
+            super(DataLoader, self).__init__(
+                dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=Collater(exclude_keys=exclude_keys),
+                **kwargs,
+            )
+        else:
+            super(DataLoader, self).__init__(
+                dataset,
+                batch_size,
+                shuffle,
+                collate_fn=Collater(exclude_keys=exclude_keys),
+                **kwargs,
+            )

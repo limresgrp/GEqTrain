@@ -10,6 +10,81 @@ from geqtrain.utils import add_tags_to_module
 from e3nn.util.jit import compile_mode
 
 
+class SirenEnvelopeMixedActivation(torch.nn.Module):
+    """
+    Mixture between a standard activation and an exponentially enveloped
+    sinusoid:
+
+        lambda_base * activation(x)
+        + lambda_siren * sin(omega * x + phase) * exp(-alpha * x^2)
+
+    Default initialization recovers the wrapped activation exactly:
+
+        lambda_siren = 0
+        lambda_base = 1
+        alpha ~= 0
+
+    This is intentionally scalar and element-wise. It is appropriate for scalar
+    latent features or scalar gates, but it should not be applied directly to
+    equivariant tensor components unless the representation constraints are
+    explicitly handled elsewhere.
+    """
+
+    def __init__(
+        self,
+        base_activation: torch.nn.Module,
+        omega_init: float = 1.0,
+        alpha_init: float = 0.0,
+        phase_init: float = 0.0,
+        lambda_siren_init: float = 0.0,
+        lambda_base_init: float = 1.0,
+        learnable_omega: bool = True,
+        learnable_alpha: bool = True,
+        learnable_phase: bool = True,
+        learnable_lambdas: bool = True,
+    ):
+        super().__init__()
+        self.base_activation = base_activation
+
+        omega = torch.tensor(float(omega_init))
+        phase = torch.tensor(float(phase_init))
+        lambda_siren = torch.tensor(float(lambda_siren_init))
+        lambda_base = torch.tensor(float(lambda_base_init))
+
+        # softplus^{-1}(alpha). For alpha_init == 0, use a very negative value
+        # so alpha starts effectively at zero while remaining non-negative.
+        if alpha_init <= 0.0:
+            raw_alpha = torch.tensor(-20.0)
+        else:
+            raw_alpha = torch.log(torch.expm1(torch.tensor(float(alpha_init))))
+
+        if learnable_omega:
+            self.omega = torch.nn.Parameter(omega)
+        else:
+            self.register_buffer("omega", omega)
+
+        if learnable_alpha:
+            self.raw_alpha = torch.nn.Parameter(raw_alpha)
+        else:
+            self.register_buffer("raw_alpha", raw_alpha)
+
+        if learnable_phase:
+            self.phase = torch.nn.Parameter(phase)
+        else:
+            self.register_buffer("phase", phase)
+
+        if learnable_lambdas:
+            self.lambda_siren = torch.nn.Parameter(lambda_siren)
+            self.lambda_base = torch.nn.Parameter(lambda_base)
+        else:
+            self.register_buffer("lambda_siren", lambda_siren)
+            self.register_buffer("lambda_base", lambda_base)
+
+    def forward(self, x):
+        alpha = torch.nn.functional.softplus(self.raw_alpha)
+        siren_envelope = torch.sin(self.omega * x + self.phase) * torch.exp(-alpha * x.pow(2))
+        return self.lambda_base * self.base_activation(x) + self.lambda_siren * siren_envelope
+
 @compile_mode("script")
 class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
     """
@@ -179,3 +254,109 @@ class ScalarMLPFunction(CodeGenMixin, torch.nn.Module):
 
     def forward(self, x):
         return self.sequential(x)
+
+@compile_mode("script")
+class SirenMixedScalarMLPFunction(ScalarMLPFunction):
+    """
+    ScalarMLPFunction specialization whose hidden activations are replaced by
+    SirenEnvelopeMixedActivation modules.
+
+    The base ScalarMLPFunction remains a generic MLP. This subclass is the
+    explicit opt-in SIREN/envelope variant.
+
+    By default the initialized network is functionally identical to the base MLP:
+
+        lambda_siren = 0
+        lambda_base = 1
+
+    The SIREN branch can then be learned as a residual correction to the chosen
+    base nonlinearity.
+    """
+
+    def __init__(
+        self,
+        mlp_input_dimension: Optional[int],
+        mlp_latent_dimensions: List[int],
+        mlp_output_dimension: Optional[int],
+        mlp_nonlinearity: Optional[str] = "silu",
+        use_layer_norm: bool = True,
+        use_weight_norm: bool = False,
+        dim_weight_norm: int = 0,
+        has_bias: bool = False,
+        bias: Optional[List] = None,
+        zero_init_last_layer_weights: bool = False,
+        dropout: Optional[float] = None,
+        dampen: bool = False,
+        wd: bool = False,
+        gain: Optional[float] = None,
+        siren_omega_init: float = 1.0,
+        siren_alpha_init: float = 0.0,
+        siren_phase_init: float = 0.0,
+        siren_lambda_init: float = 0.0,
+        base_lambda_init: float = 1.0,
+        siren_learnable_omega: bool = True,
+        siren_learnable_alpha: bool = True,
+        siren_learnable_phase: bool = True,
+        siren_learnable_lambdas: bool = True,
+    ):
+        if mlp_nonlinearity == "swiglu":
+            raise ValueError(
+                "SirenMixedScalarMLPFunction is incompatible with swiglu, "
+                "because swiglu changes the feature dimension while the SIREN branch preserves it."
+            )
+
+        super().__init__(
+            mlp_input_dimension=mlp_input_dimension,
+            mlp_latent_dimensions=mlp_latent_dimensions,
+            mlp_output_dimension=mlp_output_dimension,
+            mlp_nonlinearity=mlp_nonlinearity,
+            use_layer_norm=use_layer_norm,
+            use_weight_norm=use_weight_norm,
+            dim_weight_norm=dim_weight_norm,
+            has_bias=has_bias,
+            bias=bias,
+            zero_init_last_layer_weights=zero_init_last_layer_weights,
+            dropout=dropout,
+            dampen=dampen,
+            wd=wd,
+            gain=gain,
+        )
+
+        self._replace_hidden_activations_with_siren_mixed(
+            omega_init=siren_omega_init,
+            alpha_init=siren_alpha_init,
+            phase_init=siren_phase_init,
+            lambda_siren_init=siren_lambda_init,
+            lambda_base_init=base_lambda_init,
+            learnable_omega=siren_learnable_omega,
+            learnable_alpha=siren_learnable_alpha,
+            learnable_phase=siren_learnable_phase,
+            learnable_lambdas=siren_learnable_lambdas,
+        )
+
+    def _replace_hidden_activations_with_siren_mixed(
+        self,
+        omega_init: float,
+        alpha_init: float,
+        phase_init: float,
+        lambda_siren_init: float,
+        lambda_base_init: float,
+        learnable_omega: bool,
+        learnable_alpha: bool,
+        learnable_phase: bool,
+        learnable_lambdas: bool,
+    ):
+        for module_name, module in list(self.sequential.named_children()):
+            if module_name.startswith("activation_"):
+                self.sequential._modules[module_name] = SirenEnvelopeMixedActivation(
+                    base_activation=module,
+                    omega_init=omega_init,
+                    alpha_init=alpha_init,
+                    phase_init=phase_init,
+                    lambda_siren_init=lambda_siren_init,
+                    lambda_base_init=lambda_base_init,
+                    learnable_omega=learnable_omega,
+                    learnable_alpha=learnable_alpha,
+                    learnable_phase=learnable_phase,
+                    learnable_lambdas=learnable_lambdas,
+                )

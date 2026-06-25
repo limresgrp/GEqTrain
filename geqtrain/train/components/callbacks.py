@@ -442,7 +442,6 @@ class CheckpointCallback(Callback):
         current_metrics = summary.get_target_metric(self.trainer.metrics_key)
         if current_metrics is None:
             return
-        
         with atomic_write_group():
             is_improved = (current_metrics < self.trainer.best_metrics if self.trainer.metric_criteria == 'decreasing' else current_metrics > self.trainer.best_metrics)
             if is_improved:

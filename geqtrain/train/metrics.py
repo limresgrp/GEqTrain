@@ -173,7 +173,7 @@ class Metrics(Loss):
     def __call__(self, pred: Dict[str, torch.Tensor], ref: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         batch_metrics = {}
         for key, metric_handler in self.metrics.items():
-            clean_key = self.remove_suffix(key)
+            clean_key = self.get_target_key(key)
             value = metric_handler.accumulate(
                 pred,
                 ref,
@@ -214,7 +214,7 @@ class Metrics(Loss):
             handler = self.metrics[key]
             params = handler.params
             
-            key_clean = self.remove_suffix(key)
+            key_clean = self.get_target_key(key)
             metric_name = ABBREV.get(key_clean, key_clean)
             loss_name = str(handler.func)
             reduction_name = params.get('reduction', Reduction.MEAN).name.lower()
