@@ -48,6 +48,10 @@ Use this when the model should see the full molecular environment, but supervisi
 
 The same flags are also accepted in `metrics_components`, so you can report metrics on the same atom subset without changing the graph.
 
+Batch-level metric CSVs and validation prediction/target CSVs are disabled by default. Set `log_batch_csv: true` in the train config to write `metrics_batch_train.csv`, `metrics_batch_val.csv`, and `pred_target_batch_val_*.csv`.
+
+`metrics_epoch.csv` is always written and contains validation metrics only. For equivariant tensor targets with multiple irrep degrees, validation epoch metrics also include per-degree columns when the target irreps are known from the model or normalization config. For example, a `cs_tensor` target with `1x1o + 1x2e` gets the usual `cs_tensor` metric plus `cs_tensor_l1o` and `cs_tensor_l2e` metrics, using the same species and node-mask filters.
+
 ## Practical difference
 
 - `keep_type_names` answers: "which atoms exist in the graph?"

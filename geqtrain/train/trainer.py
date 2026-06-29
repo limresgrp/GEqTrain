@@ -213,10 +213,13 @@ class Trainer:
             self.output = Output.get_output(self.config)
             self.logfile = self.output.open_logfile("log", propagate=True)
             self.epoch_log = self.output.open_logfile("metrics_epoch.csv", propagate=False)
-            self.batch_log = {
-                TRAIN: self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
-                VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
-            }
+            self.log_batch_csv = bool(self.config.get("log_batch_csv", self.config.get("save_batch_metrics", False)))
+            self.batch_log = {}
+            if self.log_batch_csv:
+                self.batch_log = {
+                    TRAIN: self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+                    VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
+                }
             config_path = self.output.generate_file("config.yaml")
             if self.config.get("_hydra_config", False):
                 self.config.save(config_path)
@@ -230,6 +233,8 @@ class Trainer:
                 logging.info(f"Copied config file to {config_path}")
         else:
             self.output = None; self.logfile = "dummy"
+            self.log_batch_csv = bool(self.config.get("log_batch_csv", self.config.get("save_batch_metrics", False)))
+            self.batch_log = {}
 
         self.logger = logging.getLogger(self.logfile)
         set_seed(self.config.get('seed'))
@@ -363,12 +368,19 @@ class Trainer:
     def _setup_training_components(self):
         self.loss = setup_loss(self.config)
         self._resolve_curriculum_loss_key()
-        self.metrics = setup_metrics(self.config)
+        self.metrics = setup_metrics(self.config, target_irreps=self._collect_metric_target_irreps())
         self.optim = setup_optimizer(self.model, self.config)
         steps_per_epoch = self._get_steps_per_epoch()
         self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, steps_per_epoch)
         self.ema = setup_ema(self.model, self.config)
         self.early_stopping_conds = setup_early_stopping(self.config)
+
+    def _collect_metric_target_irreps(self):
+        model = self.model.module if self.dist.is_distributed else self.model
+        irreps_out = getattr(model, "irreps_out", None)
+        if not irreps_out:
+            return {}
+        return {str(key): value for key, value in dict(irreps_out).items()}
 
     def _resolve_curriculum_loss_key(self):
         if self.curriculum_sampler is None:
@@ -404,7 +416,9 @@ class Trainer:
 
     def _setup_callbacks(self):
         # Core callbacks
-        callbacks = [EpochDiagnosticsCallback(), Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
+        callbacks = [EpochDiagnosticsCallback(), Logger(), CheckpointCallback(), EarlyStoppingCallback()]
+        if self.log_batch_csv:
+            callbacks.insert(2, ValidationBatchPredictionLogger())
 
         # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):

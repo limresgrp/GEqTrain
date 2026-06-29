@@ -66,6 +66,8 @@ class TrainingLoop:
         dataloader = self.trainer.dl_train if is_train else self.trainer.dl_val
         self.trainer.n_batches = len(dataloader)
         self.model.train(is_train)
+        if hasattr(self.metrics, "enable_irrep_breakdown"):
+            self.metrics.enable_irrep_breakdown = phase == VALIDATION
 
         # Reset and move both trackers to the correct device
         self.loss_fn.reset()

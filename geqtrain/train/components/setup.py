@@ -67,7 +67,7 @@ def setup_loss(config):
     )
     return loss
 
-def setup_metrics(config):
+def setup_metrics(config, target_irreps=None):
     normalization_fields = resolve_normalization_map(
         config.as_dict() if hasattr(config, "as_dict") else config,
     )
@@ -79,6 +79,7 @@ def setup_metrics(config):
         positional_args=dict(
             components=metric_components,
             normalization_fields=normalization_fields,
+            target_irreps=target_irreps,
         ),
         all_args=config,
     )
