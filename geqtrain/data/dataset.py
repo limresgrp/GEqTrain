@@ -509,7 +509,7 @@ class AtomicDataset(Dataset):
             # Bump cache key when standardization math changes.
             params["standardization_impl_version"] = 3
         # Add other relevant metadata:
-        params["dtype"] = str(torch.float32)
+        params["dtype"] = str(torch.get_default_dtype())
         params["geqtrain_version"] = geqtrain.__version__
         return params
 
@@ -728,7 +728,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         return sorted(fields)
 
     def _sample_flattened_tensor(self, values: torch.Tensor, max_points: int = 200000) -> torch.Tensor:
-        flat = values.reshape(-1).detach().to(dtype=torch.float32, device="cpu")
+        flat = values.reshape(-1).detach().to(dtype=torch.get_default_dtype(), device="cpu")
         flat = flat[torch.isfinite(flat)]
         if flat.numel() <= max_points:
             return flat
@@ -1271,7 +1271,8 @@ class NpzDataset(AtomicInMemoryDataset):
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
                     fields[key] = fields[key].astype(np.int64) # keep int64 since cross entropy based pytorch loss functions require this dtype
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
-                    fields[key] = fields[key].astype(np.float32)
+                    dtype = np.float64 if torch.get_default_dtype() is torch.float64 else np.float32
+                    fields[key] = fields[key].astype(dtype)
 
         # k:v k field, v the value grabbed from the npz in np.array form
         return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields

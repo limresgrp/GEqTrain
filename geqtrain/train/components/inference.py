@@ -9,6 +9,37 @@ from geqtrain.utils.normalization import denormalize_prediction_dict, resolve_no
 from geqtrain.utils.inference_metadata import inject_inference_metadata_into_ref_data
 
 
+def _autocast_context(device, config: dict):
+    mixed_precision = config.get("mixed_precision", False)
+    if not mixed_precision:
+        return contextlib.nullcontext()
+
+    dtype_name = config.get("mixed_precision_dtype", None)
+    if isinstance(mixed_precision, str):
+        dtype_name = mixed_precision
+        mixed_precision = True
+    if dtype_name is None:
+        dtype_name = "bfloat16"
+
+    dtype_map = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+    }
+    try:
+        dtype = dtype_map[str(dtype_name).lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Invalid mixed_precision_dtype={dtype_name!r}. Expected one of {sorted(dtype_map)}."
+        ) from exc
+
+    if device.type not in ("cuda", "cpu"):
+        logging.warning("mixed_precision is only supported for cuda/cpu autocast; disabling for device type %s.", device.type)
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device.type, dtype=dtype)
+
+
 def get_output_keys(loss_fn: Loss):
     output_keys, per_node_outputs_keys = [], []
     if loss_fn is not None:
@@ -176,7 +207,6 @@ def run_inference(
     """
     Runs inference for a single batch, extracting options from the config object.
     """
-    mixed_precision = config.get('mixed_precision', False)
     chunking = config.get('chunking', False)
     batch_max_atoms = config.get('batch_max_atoms', 1000)
     chunk_ignore_keys = config.get('chunk_ignore_keys', [])
@@ -196,7 +226,7 @@ def run_inference(
             "Disabling chunking for this batch."
         )
 
-    precision = torch.autocast(device_type=device.type, dtype=torch.bfloat16) if mixed_precision else contextlib.nullcontext()
+    precision = _autocast_context(device, config)
     
     batch = data.to(device)
     batch_center_nodes = batch[AtomicDataDict.EDGE_INDEX_KEY][0].unique()

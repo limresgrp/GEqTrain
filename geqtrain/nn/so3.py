@@ -178,7 +178,7 @@ class SO3_Linear(torch.nn.Module):
                     )
                     b_cursor += seg_len
             if b_cursor > 0:
-                self.bias = torch.nn.Parameter(torch.zeros(b_cursor, dtype=torch.float32))
+                self.bias = torch.nn.Parameter(torch.zeros(b_cursor, dtype=torch.get_default_dtype()))
 
     def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         if (not self.internal_weights) and (weights is None):
@@ -408,7 +408,7 @@ class SO3_LayerNorm(torch.nn.Module):
                     b_cursor += seg_len
             if b_cursor > 0:
                 # bias is stored in channel format: (mul, total_scalar_per_mul)
-                self.bias = torch.nn.Parameter(torch.zeros(self.mul, b_cursor, dtype=torch.float32))
+                self.bias = torch.nn.Parameter(torch.zeros(self.mul, b_cursor, dtype=torch.get_default_dtype()))
 
         # For 'std', stabilize by 1/sqrt(#unique l). For others, no extra scaling.
         if self.normalization == "std" and self.n_unique_l > 0:

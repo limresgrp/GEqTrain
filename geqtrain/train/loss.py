@@ -121,7 +121,7 @@ class Loss:
         key = self.suffix_key(str(display_name) if display_name is not None else target_key)
         self.keys.append(key)
         self.target_keys[key] = target_key
-        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
+        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
 
         instance = None
         # 1. Check for a standard torch.nn loss without relying on exceptions.

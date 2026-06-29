@@ -96,7 +96,7 @@ class ComputeGradient(GraphModuleMixin, torch.nn.Module):
             # Initialize with the user-provided value, or default to 1.0 (no scaling)
             initial_value = scales.get(key, 1.0)
             self.trainable_scales[key] = torch.nn.Parameter(
-                torch.as_tensor(initial_value, dtype=torch.float32)
+                torch.as_tensor(initial_value, dtype=torch.get_default_dtype())
             )
         # =================================================
 

@@ -604,7 +604,7 @@ class FocalLossBinaryAccuracy:
 
     def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
         logits = pred[key]
-        target = ref[key].float()
+        target = ref[key].to(dtype=logits.dtype)
 
         bce_loss = self.bce(logits, target)
         p_t = torch.exp(-bce_loss) # This is p if target=1, and 1-p if target=0

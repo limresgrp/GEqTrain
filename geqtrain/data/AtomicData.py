@@ -150,6 +150,7 @@ def _initialize_fields_from_env():
 
 def _process_dict(kwargs, ignore_fields):
     """Convert a dict of data into correct dtypes/shapes according to key"""
+    floating_dtype = torch.get_default_dtype()
     # Deal with _some_ dtype issues
     for k, v in kwargs.items():
         if k in ignore_fields:
@@ -163,23 +164,25 @@ def _process_dict(kwargs, ignore_fields):
             kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, np.ndarray):
             if np.issubdtype(v.dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
+                kwargs[k] = torch.as_tensor(v, dtype=floating_dtype)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif isinstance(v, list):
             ele_dtype = np.array(v).dtype
             if np.issubdtype(ele_dtype, np.floating):
-                kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
+                kwargs[k] = torch.as_tensor(v, dtype=floating_dtype)
             else:
                 kwargs[k] = torch.as_tensor(v)
         elif np.issubdtype(type(v), np.floating):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
-            kwargs[k] = torch.as_tensor(v, dtype=torch.float32)
+            kwargs[k] = torch.as_tensor(v, dtype=floating_dtype)
         elif np.issubdtype(type(v), int):
             # Force scalars to be tensors with a data dimension
             # This makes them play well with irreps
             kwargs[k] = torch.as_tensor(v, dtype=torch.long)
+        elif isinstance(v, torch.Tensor) and torch.is_floating_point(v):
+            kwargs[k] = v.to(dtype=floating_dtype)
         elif isinstance(v, torch.Tensor) and len(v.shape) == 0:
             # ^ this tensor is a scalar; we need to give it
             # a data dimension to play nice with irreps
@@ -530,7 +533,7 @@ def neighbor_list(
         else:
             temp_pos = np.asarray(pos)
             out_device = torch.device("cpu")
-            out_dtype = torch.float32
+            out_dtype = torch.get_default_dtype()
 
         if isinstance(cell, torch.Tensor):
             temp_cell = cell.detach().cpu().numpy()
