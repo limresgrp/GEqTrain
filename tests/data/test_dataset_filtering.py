@@ -3,7 +3,12 @@ import torch
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.AtomicData import register_fields
-from geqtrain.data._build import _filter_dataset, _node_types_to_exclude_from_edges, _node_types_to_keep
+from geqtrain.data._build import (
+    _filter_dataset,
+    _node_types_to_exclude_from_edges,
+    _node_types_to_keep,
+    _node_types_to_keep_for_edges,
+)
 from geqtrain.data.dataset import NpzDataset
 from geqtrain.train._loss import LossWrapper
 
@@ -161,6 +166,41 @@ def test_exclude_type_names_from_edge_neigh_removes_neighbors_only(tmp_path):
     assert H in center_types.tolist()
     assert H not in neigh_types.tolist()
     assert data["center_atoms_mask"].shape[0] == data.num_nodes
+
+
+def test_keep_type_names_for_edge_center_keeps_other_types_as_neighbors(tmp_path):
+    dataset = _fixture_dataset(tmp_path, "keep_centers")
+    keep_center, keep_neigh = _node_types_to_keep_for_edges(
+        {"keep_type_names_for_edge_center": ["H"], "type_names": TYPE_NAMES}
+    )
+
+    filtered = _filter_dataset(dataset, ["cs_iso"], None, None, None, keep_center, keep_neigh)
+
+    assert filtered is not None
+    data = filtered.data
+    center_types = _center_node_types(data)
+    node_types = data[AtomicDataDict.NODE_TYPE_KEY].view(-1)
+    assert set(center_types.tolist()) == {H}
+    assert C in node_types.tolist()
+    assert N in node_types.tolist()
+    assert not torch.isnan(data["cs_iso"][data[AtomicDataDict.EDGE_INDEX_KEY][0]]).any()
+
+
+def test_keep_type_names_for_edge_neigh_removes_only_other_neighbors(tmp_path):
+    dataset = _fixture_dataset(tmp_path, "keep_neighbors")
+    keep_center, keep_neigh = _node_types_to_keep_for_edges(
+        {"keep_type_names_for_edge_neigh": ["C", "N"], "type_names": TYPE_NAMES}
+    )
+
+    filtered = _filter_dataset(dataset, ["cs_iso"], None, None, None, keep_center, keep_neigh)
+
+    assert filtered is not None
+    data = filtered.data
+    center_types = _center_node_types(data)
+    neigh_types = _neighbor_node_types(data)
+    assert H in center_types.tolist()
+    assert H not in neigh_types.tolist()
+    assert set(neigh_types.tolist()).issubset({C, N})
 
 
 def test_prefiltered_node_mask_field_stays_aligned_for_loss_filtering(tmp_path):

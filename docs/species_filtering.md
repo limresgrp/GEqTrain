@@ -48,6 +48,39 @@ Use this when the model should see the full molecular environment, but supervisi
 
 The same flags are also accepted in `metrics_components`, so you can report metrics on the same atom subset without changing the graph.
 
+## 3) Edge-center and edge-neighbor filtering
+
+These are dataset filters that restrict edges without necessarily removing all
+other atom types from the graph.
+
+Example:
+
+```yaml
+keep_type_names_for_edge_center: [H]
+```
+
+What it does:
+
+- keeps only H atoms as edge centers
+- keeps all atom types as neighbors unless `keep_type_names_for_edge_neigh` is also set
+- reduces center-side message/readout work
+- preserves the non-H environment around supervised H atoms
+
+The index-based forms are also available:
+
+```yaml
+keep_node_types_for_edge_center: [1]
+keep_node_types_for_edge_neigh: [1, 6]
+```
+
+The exclusion variants remain available when it is shorter to describe what to
+remove:
+
+```yaml
+exclude_type_names_from_edge_center: [C]
+exclude_type_names_from_edge_neigh: [H]
+```
+
 Batch-level metric CSVs and validation prediction/target CSVs are disabled by default. Set `log_batch_csv: true` in the train config to write `metrics_batch_train.csv`, `metrics_batch_val.csv`, and `pred_target_batch_val_*.csv`.
 
 `metrics_epoch.csv` is always written and contains validation metrics only. For equivariant tensor targets with multiple irrep degrees, validation epoch metrics also include per-degree columns when the target irreps are known from the model or normalization config. For example, a `cs_tensor` target with `1x1o + 1x2e` gets the usual `cs_tensor` metric plus `cs_tensor_l1o` and `cs_tensor_l2e` metrics, using the same species and node-mask filters.
@@ -55,6 +88,8 @@ Batch-level metric CSVs and validation prediction/target CSVs are disabled by de
 ## Practical difference
 
 - `keep_type_names` answers: "which atoms exist in the graph?"
+- `keep_type_names_for_edge_center` answers: "which atoms act as prediction/message centers?"
+- `keep_type_names_for_edge_neigh` answers: "which atoms can be used as neighbors?"
 - loss-side masking answers: "which atoms contribute to the loss?"
 
 ## Notes

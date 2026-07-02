@@ -48,8 +48,12 @@ Filtering is applied in `_filter_dataset(...)` (`geqtrain/data/_build.py`) after
   - `keep_node_types` (index-based), or
   - `keep_type_names` (name-based, mapped to indices).
 - Edge filtering:
+  - `keep_type_names_for_edge_center` / `keep_type_names_for_edge_neigh`,
+  - `keep_node_types_for_edge_center` / `keep_node_types_for_edge_neigh`,
   - `exclude_type_names_from_edge_center` / `exclude_type_names_from_edge_neigh`,
   - and corresponding index-based variants.
+  - center filters control which atoms can send center-to-neighbor messages.
+  - neighbor filters control which atoms can appear as neighbors.
 - NaN-aware filtering:
   - edges connected to nodes with NaNs in loss-relevant node targets are removed.
   - this filtering runs even when no explicit `keep_type_names` or edge-type exclusion is configured.

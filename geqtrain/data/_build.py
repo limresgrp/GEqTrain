@@ -243,7 +243,13 @@ def _handle_single_file(file_info: tuple, config_dict: dict, prefix: str, class_
     if instance.data is None or instance.data.num_graphs == 0:
         return None
 
-    instance = _filter_dataset(instance, key_clean_list, _node_types_to_keep(config_dict), *_node_types_to_exclude_from_edges(config_dict))
+    instance = _filter_dataset(
+        instance,
+        key_clean_list,
+        _node_types_to_keep(config_dict),
+        *_node_types_to_exclude_from_edges(config_dict),
+        *_node_types_to_keep_for_edges(config_dict),
+    )
 
     if instance is None:
         logging.warning(f"All data from {dataset_file_name} was filtered out.")
@@ -275,12 +281,24 @@ def _node_types_to_exclude_from_edges(config):
         exclude_neigh = torch.tensor(find_matching_indices(config["type_names"], config["exclude_type_names_from_edge_neigh"]))
     return exclude_center, exclude_neigh
 
+def _node_types_to_keep_for_edges(config):
+    from geqtrain.train.utils import find_matching_indices
+    keep_center = config.get("keep_node_types_for_edge_center")
+    keep_neigh = config.get("keep_node_types_for_edge_neigh")
+    if config.get("keep_type_names_for_edge_center"):
+        keep_center = torch.tensor(find_matching_indices(config["type_names"], config["keep_type_names_for_edge_center"]))
+    if config.get("keep_type_names_for_edge_neigh"):
+        keep_neigh = torch.tensor(find_matching_indices(config["type_names"], config["keep_type_names_for_edge_neigh"]))
+    return keep_center, keep_neigh
+
 def _filter_dataset(
     dataset: AtomicInMemoryDataset,
     key_clean_list: List[str],
     keep_node_types: Optional[torch.Tensor] = None,
     exclude_node_types_from_edge_center: Optional[torch.Tensor] = None,
     exclude_node_types_from_edge_neigh: Optional[torch.Tensor] = None,
+    keep_node_types_for_edge_center: Optional[torch.Tensor] = None,
+    keep_node_types_for_edge_neigh: Optional[torch.Tensor] = None,
 ) -> Optional[AtomicInMemoryDataset]:
     """
     Filters a dataset by operating on the entire Batch object at once using
@@ -300,6 +318,8 @@ def _filter_dataset(
         keep_node_types is None
         and exclude_node_types_from_edge_center is None
         and exclude_node_types_from_edge_neigh is None
+        and keep_node_types_for_edge_center is None
+        and keep_node_types_for_edge_neigh is None
         and not has_nan_target_filter
     ):
         return dataset
@@ -353,6 +373,10 @@ def _filter_dataset(
         edges_to_keep_mask &= torch.all(torch.stack(nan_filters), dim=0)
     
     if node_types is not None:
+        if keep_node_types_for_edge_center is not None:
+            edges_to_keep_mask &= torch.isin(node_types[edge_index[0]], keep_node_types_for_edge_center.to(node_types.device))
+        if keep_node_types_for_edge_neigh is not None:
+            edges_to_keep_mask &= torch.isin(node_types[edge_index[1]], keep_node_types_for_edge_neigh.to(node_types.device))
         if exclude_node_types_from_edge_center is not None:
             edges_to_keep_mask &= ~torch.isin(node_types[edge_index[0]], exclude_node_types_from_edge_center.to(node_types.device))
         if exclude_node_types_from_edge_neigh is not None:

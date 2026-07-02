@@ -260,14 +260,27 @@ def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, nu
         all_field_values = torch.cat(field_values_list, dim=0)
 
     all_node_types = torch.cat([data[AtomicDataDict.NODE_TYPE_KEY] for data in dataset], dim=0).squeeze()
+    finite_rows = torch.isfinite(all_field_values)
+    if finite_rows.dim() > 1:
+        finite_rows = finite_rows.all(dim=1)
+    if finite_rows.numel() > 0:
+        all_field_values = all_field_values[finite_rows]
+        all_node_types = all_node_types[finite_rows]
+
+    if all_field_values.numel() == 0:
+        shape = (num_types,) + tuple(all_field_values.shape[1:])
+        means = torch.zeros(shape, dtype=field_values_list[0].dtype, device=field_values_list[0].device)
+        stds = torch.ones_like(means)
+        return means, stds
 
     means = scatter_mean(all_field_values, all_node_types, dim=0, dim_size=num_types)
     stds = scatter_std(all_field_values, all_node_types, dim=0, dim_size=num_types)
 
-    # Fallback for types with no samples to avoid NaN
+    # Fallback for types with no finite samples to avoid NaN.
+    means = torch.where(torch.isfinite(means), means, torch.zeros_like(means))
     for i, std in enumerate(stds):
-        if torch.any(torch.isnan(std)) or torch.all(std < 1.e-3):
-            stds[i] = torch.where(torch.isnan(std) | (std < 1.e-3), 1.0, std)
+        if torch.any(~torch.isfinite(std)) or torch.all(std < 1.e-3):
+            stds[i] = torch.where((~torch.isfinite(std)) | (std < 1.e-3), 1.0, std)
 
     return means, stds
 
@@ -306,8 +319,14 @@ def compute_global_statistics(dataset: Optional[ConcatDataset], field: str, irre
     else:
         all_field_values = torch.cat(field_values_list, dim=0)
     
-    mean = torch.mean(all_field_values).item()
-    std = torch.std(all_field_values).item()
+    finite_values = all_field_values[torch.isfinite(all_field_values)]
+    if finite_values.numel() == 0:
+        return 0.0, 1.0
+    
+    mean = torch.mean(finite_values).item()
+    std = torch.std(finite_values).item()
+    if not np.isfinite(std) or std < 1.e-8:
+        std = 1.0
 
     return mean, std
 
