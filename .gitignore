@@ -6,8 +6,24 @@ NOTES.md
 *.tex
 *.npz
 
+config/*
+!config/base.yaml
+!config/data/
+config/data/*
+!config/data/shiftml3.yaml
+!config/experiment/
+config/experiment/*
+!config/experiment/shiftml3.yaml
+!config/model/
+config/model/*
+!config/model/shiftml3_interaction.yaml
+!config/model/stack_blocks/
+config/model/stack_blocks/*
+!config/model/stack_blocks/common.yaml
+!config/train/
+config/train/*
+!config/train/shiftml3.yaml
 
-config/
 results/
 deployed/
 _misc/

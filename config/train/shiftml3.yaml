@@ -1,0 +1,83 @@
+# @package _global_
+
+# default_dtype: float64
+# mixed_precision: false
+# allow_tf32: false
+
+supervised_type_names: &supervised_type_names
+  - H
+  - C
+  - N
+  - O
+
+# Build edges only with these atom types as centers. Neighbor atoms are not
+# restricted, so the selected centers still see the full molecular environment.
+keep_type_names_for_edge_center: *supervised_type_names
+
+# --- Loss --- #
+loss_coeffs:
+  - cs_iso:
+    - 1.0
+    - geqtrain.train.LogCoshLoss
+    - node_type_names: *supervised_type_names
+  - cs_tensor:
+    - 10.0
+    - geqtrain.train.LogCoshLoss
+    - node_type_names: *supervised_type_names
+
+# --- Metrics --- #
+metrics_components:
+  - cs_iso:
+    - L1Loss
+    - PerSpecies: true
+    - node_mask_field: center_atoms_mask
+    - node_type_names: *supervised_type_names
+  - cs_tensor:
+    - L1Loss
+    - PerSpecies: true
+    - node_mask_field: center_atoms_mask
+    - node_type_names: *supervised_type_names
+  - cs_iso:
+    - geqtrain.train.RMSDMetric
+    - PerSpecies: true
+    - node_mask_field: center_atoms_mask
+    - node_type_names: *supervised_type_names
+  - cs_tensor:
+    - geqtrain.train.RMSDMetric
+    - PerSpecies: true
+    - node_mask_field: center_atoms_mask
+    - node_type_names: *supervised_type_names
+
+metrics_key: validation_loss
+metric_criteria: decreasing
+
+# --- Training --- #
+batch_size: 2
+validation_batch_size: 4
+dataloader_num_workers: 1
+
+max_epochs: 100
+learning_rate: 1.e-5
+lr_scheduler_name: ExponentialLR
+lr_scheduler_gamma: 0.98
+
+optimizer_name: AdamW
+optimizer_params:
+  amsgrad: false
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+  weight_decay: 0.0
+head_wds: 1e-7
+
+dropout: 0.
+use_ema: false
+warmup_epochs: 1
+
+chunking: false
+batch_max_atoms: 1000
+
+# activation_diagnostics: true
+# activation_diagnostics_fields: [node_features, edge_features, cs_tensor]
+# activation_diagnostics_stats: [mean_abs, rms, max_abs]
