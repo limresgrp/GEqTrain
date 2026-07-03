@@ -3,6 +3,7 @@ import torch
 
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.AtomicData import register_fields
+from geqtrain.data.dataloader import Collater
 from geqtrain.data._build import (
     _filter_dataset,
     _node_types_to_exclude_from_edges,
@@ -11,6 +12,7 @@ from geqtrain.data._build import (
 )
 from geqtrain.data.dataset import NpzDataset
 from geqtrain.train._loss import LossWrapper
+from geqtrain.utils.torch_geometric import Data
 
 
 TYPE_NAMES = ["X", "H", "He", "Li", "Be", "B", "C", "N"]
@@ -237,3 +239,68 @@ def test_prefiltered_node_mask_field_stays_aligned_for_loss_filtering(tmp_path):
     assert selected.sum().item() == 2
     assert out.shape == torch.Size([2, 1])
     assert torch.allclose(out, torch.full_like(out, 2.0))
+
+
+def test_keep_edge_center_filter_and_node_mask_field_are_combined(tmp_path):
+    dataset = _fixture_dataset(tmp_path, "center_keep_mask_alignment")
+    keep_center, keep_neigh = _node_types_to_keep_for_edges(
+        {"keep_type_names_for_edge_center": ["C"], "type_names": TYPE_NAMES}
+    )
+    dataset = _filter_dataset(dataset, ["cs_iso"], None, None, None, keep_center, keep_neigh)
+
+    assert dataset is not None
+    data = dataset.data
+    assert set(_center_node_types(data).tolist()) == {C}
+    assert data["center_atoms_mask"].shape[0] == data.num_nodes
+
+    ref = data.to_dict()
+    pred = dict(ref)
+    pred["cs_iso"] = ref["cs_iso"].clone().requires_grad_(True) + 2.0
+    loss = LossWrapper(
+        "L1Loss",
+        params={
+            "node_type_names": ["C"],
+            "type_names": TYPE_NAMES,
+            "node_mask_field": "center_atoms_mask",
+            "ignore_nan": True,
+        },
+    )
+
+    out = loss(pred=pred, ref=ref, key="cs_iso", mean=False)
+
+    centers = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+    selected = (
+        (ref[AtomicDataDict.NODE_TYPE_KEY].view(-1) == C)
+        & ref["center_atoms_mask"].view(-1).to(torch.bool)
+    )
+    selected &= torch.isin(torch.arange(data.num_nodes), centers)
+    assert selected.sum().item() == 1
+    assert out.shape == torch.Size([1, 1])
+    assert torch.allclose(out, torch.full_like(out, 2.0))
+
+
+def test_collater_treats_missing_optional_node_mask_as_all_true():
+    def with_mask():
+        return Data(
+            pos=torch.zeros(2, 3),
+            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            center_atoms_mask=torch.tensor([[True], [False]]),
+            ensemble_index=0,
+        )
+
+    def without_mask():
+        return Data(
+            pos=torch.zeros(3, 3),
+            edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            ensemble_index=0,
+        )
+
+    collater = Collater()
+    for batch_list, expected in (
+        ([with_mask(), without_mask()], torch.tensor([True, False, True, True, True])),
+        ([without_mask(), with_mask()], torch.tensor([True, True, True, True, False])),
+    ):
+        batch = collater.collate(batch_list)
+        assert "center_atoms_mask" in batch
+        assert batch["center_atoms_mask"].shape == torch.Size([5, 1])
+        assert torch.equal(batch["center_atoms_mask"].view(-1).to(torch.bool), expected)
