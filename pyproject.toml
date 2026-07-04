@@ -35,6 +35,7 @@ geqtrain-train = "geqtrain.scripts.train:main"
 geqtrain-evaluate = "geqtrain.scripts.evaluate:main"
 geqtrain-test-equivariance = "geqtrain.scripts.test_equivariance:main"
 geqtrain-deploy = "geqtrain.scripts.deploy:main"
+geqtrain-scaling-test = "geqtrain.scripts.scaling_test:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "geqtrain._version.__version__"}

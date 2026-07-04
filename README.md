@@ -79,7 +79,40 @@ Other entry points:
 geqtrain-evaluate --help
 geqtrain-test-equivariance --help
 geqtrain-deploy --help
+geqtrain-scaling-test --help
 ```
+
+## Synthetic Scaling Benchmark
+
+Use `geqtrain-scaling-test` to measure how a model scales with synthetic graph
+size on one device. It accepts either a full experiment config or a model-only
+config:
+
+```bash
+geqtrain-scaling-test config/model/shiftml3_interaction.yaml \
+  -d cuda:0 \
+  -o results/scaling/shiftml3_interaction \
+  --start-nodes 256 \
+  --max-nodes 32768 \
+  --avg-degree 32 \
+  --modes both \
+  --chunk-batch-max-atoms 1000 2000 \
+  --warmup 1 \
+  --repeats 3 \
+  --stop-on-oom
+```
+
+The benchmark writes:
+
+- `scaling_results.csv`: one row per graph size, mode, and chunk size.
+- `scaling_report.txt`: GPU, software, model, and OOM summary.
+- `scaling_time.png`: wall-time scaling plot.
+- `scaling_memory.png`: peak memory scaling plot.
+
+Full mode forwards the entire synthetic graph. Chunked mode prepares chunks on
+CPU and moves only one chunk at a time to the benchmark device, so it isolates
+the expected memory/time tradeoff: lower peak GPU memory and larger graphs at
+the cost of more forward passes.
 
 ## Configuration Layout
 
