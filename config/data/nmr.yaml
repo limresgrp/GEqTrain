@@ -1,7 +1,6 @@
 # @package _global_
 dataset_num_workers: 1
 
-# - train - #
 train_dataset_list:
   - dataset: npz
     dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/train.npz
@@ -21,28 +20,10 @@ train_dataset_list:
       center_atoms_mask: center_atoms_mask
       center_atoms_mask__mask__: center_atoms_mask__mask__
       Lattice: cell
-  - dataset: npz
-    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/valid.npz
-    key_mapping:
-      pos: pos
-      pos__mask__: pos__mask__
-      atom_types: node_types
-      atom_types__mask__: node_types__mask__
-      atom_rows: atom_rows
-      atom_rows__mask__: atom_rows__mask__
-      atom_cols: atom_cols
-      atom_cols__mask__: atom_cols__mask__
-      cs_iso: cs_iso
-      cs_iso__mask__: cs_iso__mask__
-      cs_tensor_spherical: cs_tensor
-      cs_tensor_spherical__mask__: cs_tensor__mask__
-      center_atoms_mask: center_atoms_mask
-      center_atoms_mask__mask__: center_atoms_mask__mask__
-      Lattice: cell
 
 validation_dataset_list:
   - dataset: npz
-    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/test.npz
+    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/valid.npz
     key_mapping:
       pos: pos
       pos__mask__: pos__mask__
