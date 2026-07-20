@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 from geqtrain.data import AtomicDataDict
 from geqtrain.data.dataloader import Collater
 from geqtrain.model import model_from_config
-from geqtrain.train.components.inference import prepare_chunked_input_data, run_inference
+from geqtrain.train.components.inference import run_inference
 from geqtrain.train.utils import evaluate_end_chunking_condition
 from geqtrain.utils import Config, load_config
 from geqtrain.utils._global_options import apply_global_config
@@ -336,6 +336,60 @@ def _run_forward(model: torch.nn.Module, batch: Any, device: torch.device, confi
     return 1
 
 
+def _prepare_streamed_center_chunk(
+    batch: Any,
+    already_computed_nodes: Optional[torch.Tensor],
+    batch_max_atoms: int,
+    chunk_ignore_keys: Iterable[str],
+) -> tuple[Any, torch.Tensor]:
+    edge_index = batch[AtomicDataDict.EDGE_INDEX_KEY]
+    remaining_edge_index = edge_index
+    if already_computed_nodes is not None:
+        remaining_edge_index = edge_index[:, ~torch.isin(edge_index[0], already_computed_nodes)]
+    if remaining_edge_index.numel() == 0:
+        return None, torch.empty(0, dtype=torch.long, device=edge_index.device)
+
+    centers = torch.unique_consecutive(remaining_edge_index[0])
+    if centers.numel() == 0:
+        return None, centers
+
+    selected_centers: List[torch.Tensor] = []
+    selected_mask = torch.zeros(
+        remaining_edge_index.shape[1],
+        dtype=torch.bool,
+        device=remaining_edge_index.device,
+    )
+    selected_nodes = torch.empty(0, dtype=torch.long, device=remaining_edge_index.device)
+
+    # Greedy center-node chunks. If a single center exceeds the atom budget, keep it
+    # alone; otherwise chunking would make no progress.
+    for center in centers:
+        center_mask = remaining_edge_index[0] == center
+        candidate_mask = selected_mask | center_mask
+        candidate_nodes = remaining_edge_index[:, candidate_mask].unique()
+        if selected_centers and int(candidate_nodes.numel()) > int(batch_max_atoms):
+            break
+        selected_centers.append(center)
+        selected_mask = candidate_mask
+        selected_nodes = candidate_nodes
+        if int(selected_nodes.numel()) >= int(batch_max_atoms):
+            break
+
+    if not selected_centers:
+        selected_centers = [centers[0]]
+        selected_mask = remaining_edge_index[0] == centers[0]
+        selected_nodes = remaining_edge_index[:, selected_mask].unique()
+
+    selected_centers_tensor = torch.stack(selected_centers).to(dtype=torch.long)
+    chunk_edge_index = remaining_edge_index[:, selected_mask]
+    batch_chunk = batch.subgraph(
+        selected_nodes,
+        chunk_edge_index,
+        list(chunk_ignore_keys),
+    )
+    return batch_chunk, selected_centers_tensor
+
+
 def _run_forward_streamed_chunks(model: torch.nn.Module, batch: Any, device: torch.device, config: Config) -> int:
     already_computed_nodes = None
     chunk_config = deepcopy(config)
@@ -343,7 +397,7 @@ def _run_forward_streamed_chunks(model: torch.nn.Module, batch: Any, device: tor
     n_chunks = 0
     total_centers = int(len(batch[AtomicDataDict.EDGE_INDEX_KEY][0].unique()))
     while True:
-        batch_chunk, chunk_center_nodes = prepare_chunked_input_data(
+        batch_chunk, chunk_center_nodes = _prepare_streamed_center_chunk(
             batch=batch,
             already_computed_nodes=already_computed_nodes,
             batch_max_atoms=int(config.get("batch_max_atoms", 1000)),
@@ -574,6 +628,11 @@ def main(args: Optional[Sequence[str]] = None) -> None:
         for mode, chunk_size in modes:
             if full_oom and parsed.stop_on_oom and mode == "full":
                 continue
+            chunk_label = "full" if chunk_size is None else f"chunk={chunk_size}"
+            print(
+                f"[scaling] nodes={n_nodes} edges={n_edges} mode={mode} {chunk_label}",
+                flush=True,
+            )
             result = benchmark_case(
                 model=model,
                 batch=batch,
@@ -593,6 +652,13 @@ def main(args: Optional[Sequence[str]] = None) -> None:
             }
             rows.append(row)
             write_csv(output_dir / "scaling_results.csv", rows)
+            print(
+                f"[scaling] -> {result['status']} "
+                f"time={result['seconds_mean']}s "
+                f"peak_reserved={result['peak_reserved_gb']}GB "
+                f"chunks={result['chunks']}",
+                flush=True,
+            )
             if mode == "full" and result["status"] == "oom":
                 full_oom = True
         del batch
