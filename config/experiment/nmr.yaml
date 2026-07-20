@@ -1,18 +1,18 @@
 # @package _global_
 defaults:
   - /base
-  - /data: shiftml3
-  - /model: shiftml3_interaction
-  - /train: shiftml3
+  - /data: nmr
+  - /model: nmr_interaction
+  - /train: nmr
   - _self_
 
-root: results/shiftml3
+root: results/nmr
 run_name: tensor_all_reduced
-experiment_description: "ShiftML3 scalar and tensor chemical-shift tutorial."
+experiment_description: "NMR scalar and tensor chemical-shift tutorial."
 
 log_batch_freq: 500
 wandb: false
-wandb_project: shiftml3
+# wandb_project: nmr
 
 # Optional: set this to an existing checkpoint to fine-tune instead of starting
 # from scratch.

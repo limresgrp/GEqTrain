@@ -56,20 +56,20 @@ pip install scipy matplotlib pandas plotly
 Single-GPU training:
 
 ```bash
-geqtrain-train config/experiment/shiftml3.yaml -d cuda:0
+geqtrain-train config/experiment/nmr.yaml -d cuda:0
 ```
 
 CPU or explicit device:
 
 ```bash
-geqtrain-train config/experiment/shiftml3.yaml -d cpu
+geqtrain-train config/experiment/nmr.yaml -d cpu
 ```
 
 Distributed training on visible GPUs:
 
 ```bash
 torchrun --nproc_per_node=2 geqtrain/scripts/train.py \
-  config/experiment/shiftml3.yaml \
+  config/experiment/nmr.yaml \
   --ddp
 ```
 
@@ -89,9 +89,9 @@ size on one device. It accepts either a full experiment config or a model-only
 config:
 
 ```bash
-geqtrain-scaling-test config/model/shiftml3_interaction.yaml \
+geqtrain-scaling-test config/model/nmr_interaction.yaml \
   -d cuda:0 \
-  -o results/scaling/shiftml3_interaction \
+  -o results/scaling/nmr_interaction \
   --start-nodes 256 \
   --max-nodes 32768 \
   --avg-degree 32 \
@@ -121,9 +121,9 @@ GEqTrain experiments are composed with Hydra:
 ```yaml
 defaults:
   - /base
-  - /data: shiftml3
-  - /model: shiftml3_interaction
-  - /train: shiftml3
+  - /data: nmr
+  - /model: nmr_interaction
+  - /train: nmr
   - _self_
 ```
 
@@ -134,7 +134,7 @@ The main groups are:
 - `config/train`: losses, metrics, optimization, batching, and logging.
 - `config/experiment`: complete experiment compositions.
 
-## ShiftML3 NMR Tutorial
+## NMR Tutorial
 
 The repository includes a self-contained chemical-shift tutorial under
 `tutorial/chemical_shift_prediction`.
@@ -185,15 +185,15 @@ e3nn's canonical rank-2 tensor basis.
 Run the scalar-plus-tensor tutorial experiment:
 
 ```bash
-geqtrain-train config/experiment/shiftml3.yaml -d cuda:0
+geqtrain-train config/experiment/nmr.yaml -d cuda:0
 ```
 
 Relevant configs:
 
-- `config/experiment/shiftml3.yaml`
-- `config/data/shiftml3.yaml`
-- `config/model/shiftml3_interaction.yaml`
-- `config/train/shiftml3.yaml`
+- `config/experiment/nmr.yaml`
+- `config/data/nmr.yaml`
+- `config/model/nmr.yaml`
+- `config/train/nmr.yaml`
 
 The tutorial config predicts:
 
@@ -234,7 +234,7 @@ source .venv-geqtrain/bin/activate
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29500
 
-srun geqtrain-train config/experiment/shiftml3.yaml \
+srun geqtrain-train config/experiment/nmr.yaml \
   --ddp \
   --master-addr "$MASTER_ADDR" \
   --master-port "$MASTER_PORT"
