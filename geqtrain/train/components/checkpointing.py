@@ -87,6 +87,11 @@ class CheckpointHandler:
             'train_idcs': self.trainer.train_idcs,
             'val_idcs': self.trainer.val_idcs,
             'inference_metadata': inference_metadata,
+            'curriculum_sampler_state': (
+                self.trainer.curriculum_sampler.state_dict()
+                if getattr(self.trainer, "curriculum_sampler", None) is not None
+                else None
+            ),
         }
 
     def _collect_required_normalization_stat_keys(self):
@@ -326,6 +331,8 @@ class CheckpointHandler:
         self.trainer.best_epoch = state['best_epoch']
         self.trainer.best_metrics = state['best_metrics']
         self.trainer.cumulative_wall = state.get('cumulative_wall', 0)
+        if getattr(self.trainer, "curriculum_sampler", None) is not None:
+            self.trainer.curriculum_sampler.load_state_dict(state.get("curriculum_sampler_state"))
         
         logging.info(f"Successfully applied state. Resuming from epoch {self.trainer.iepoch + 1}.")
 

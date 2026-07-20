@@ -203,7 +203,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             if self.irreps_in[representative_out_field] != processor_out_irreps_combined:
                  raise ValueError("For resnet=True, output irreps must match input irreps for the out_field.")
             # Start close to identity by using a strongly negative logit.
-            self._resnet_update_coeff = nn.Parameter(torch.tensor([-5.0], dtype=torch.float32))
+            self._resnet_update_coeff = nn.Parameter(torch.tensor([-5.0], dtype=torch.get_default_dtype()))
         
         # --- Conditioning Fields Validation and Dimension Calculation ---
         self.total_conditioning_dim = 0
@@ -234,9 +234,9 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         if self.n_scalars_out > 0:
             if bias is not None:
                 if isinstance(bias, float):
-                    bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.float32)
+                    bias_init = torch.full((self.n_scalars_out,), bias, dtype=torch.get_default_dtype())
                 elif isinstance(bias, list):
-                    bias_init = torch.tensor(bias, dtype=torch.float32)
+                    bias_init = torch.tensor(bias, dtype=torch.get_default_dtype())
                     assert bias_init.shape[0] == self.n_scalars_out, "Length of bias list must match number of scalar outputs."
                 else: 
                     raise ValueError("Bias must be a float or a list of floats.")

@@ -75,16 +75,16 @@ class BesselBasisVec(nn.Module):
         for n in range(num_basis):
             Jn_values.append(spherical_jn(n, r_values))
         if isinstance(Jn_values[0], np.ndarray):
-            bessel_values = torch.from_numpy(np.stack(Jn_values, axis=0)).float().T
+            bessel_values = torch.from_numpy(np.stack(Jn_values, axis=0)).to(dtype=torch.get_default_dtype()).T
         else:
             assert isinstance(Jn_values[0], torch.Tensor)
-            bessel_values = torch.stack(Jn_values, dim=0).float().T
+            bessel_values = torch.stack(Jn_values, dim=0).to(dtype=torch.get_default_dtype()).T
 
         self.register_buffer("r_values", r_values)
         self.register_buffer("bessel_values", bessel_values)
 
         bessel_weights = (
-            torch.ones(self.num_basis, dtype=torch.float32)
+            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
         )
         if self.trainable:
             self.bessel_weights = nn.Parameter(bessel_weights)
@@ -127,13 +127,13 @@ class GaussianBasis(nn.Module):
             mu = n * step
             sigma = step
             G_values.append(gaussian(r_values, mu=mu, sigma=sigma))
-        gaussian_values = torch.stack(G_values, dim=0).float().T
+        gaussian_values = torch.stack(G_values, dim=0).to(dtype=torch.get_default_dtype()).T
 
         self.register_buffer("r_values", r_values)
         self.register_buffer("gaussian_values", gaussian_values)
 
         gaussian_weights = (
-            torch.ones(self.num_basis, dtype=torch.float32)
+            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
         )
         if self.trainable:
             self.gaussian_weights = nn.Parameter(gaussian_weights)
@@ -176,13 +176,13 @@ class PolyBasisVec(nn.Module):
         P_values = []
         for power in range(1, num_basis + 1):
             P_values.append(poly(r_values, power=power))
-        poly_values = torch.stack(P_values, dim=0).float().T
+        poly_values = torch.stack(P_values, dim=0).to(dtype=torch.get_default_dtype()).T
 
         self.register_buffer("r_values", r_values)
         self.register_buffer("poly_values", poly_values)
 
         poly_weights = (
-            torch.ones(self.num_basis, dtype=torch.float32)
+            torch.ones(self.num_basis, dtype=torch.get_default_dtype())
         )
         if self.trainable:
             self.poly_weights = nn.Parameter(poly_weights)

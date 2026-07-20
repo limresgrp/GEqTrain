@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from typing import Optional, List, Tuple, Union
 from geqtrain.utils._model_utils import build_concatenation_permutation, prepare_conditioning_tensors, process_out_irreps
-from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_softmax
+from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_mean, scatter_softmax
 from einops.layers.torch import Rearrange
 from geqtrain.nn import SO3_Linear
 from e3nn import o3
@@ -25,6 +25,7 @@ from geqtrain.utils.so3 import split_irreps, tp_path_exists
 from geqtrain.nn._equivariant_scalar_mlp import EquivariantScalarMLP
 from geqtrain.nn.mace.blocks import EquivariantProductBasisBlock
 from geqtrain.nn.mace.irreps_tools import reshape_irreps
+from geqtrain.nn._edge_attention import edge_group_self_attention_weights
 
 def apply_residual_stream(
     latents: torch.Tensor,
@@ -110,11 +111,19 @@ class InteractionLayerConfig:
     irreps_in: dict
     attention_logit_clip: float
     use_equivariant_residual: bool
+    attention_mode: str
 
 
 @compile_mode("script")
 class InteractionModule(GraphModuleMixin, torch.nn.Module):
     conditioning_fields: List[str]
+    __constants__ = [
+        "attention_mode",
+        "node_state_field",
+        "node_state_dim",
+        "node_state_pooling",
+        "use_node_feature_query_attention",
+    ]
 
     def __init__(
         self,
@@ -134,12 +143,17 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         latent_dim: int = 256,
         eq_latent_multiplicity: int = 16,
         use_attention: bool = False,
+        attention_mode: str = "edge_self",
         attention_head_dim: int = 64,
         attention_logit_clip: float = 0.0,
         use_mace_product: bool = False,
         product_correlation: int = 2,
         residual_update_max: float = 1.0,
         use_equivariant_residual: bool = True,
+        node_state_field: str = AtomicDataDict.NODE_FEATURES_KEY,
+        node_state_pooling: str = "mean",
+        node_state_use_residual: bool = True,
+        node_state_residual_update_max: Optional[float] = None,
         conditioning_fields: Optional[List[str]] = None,
         irreps_in = None,
     ):
@@ -152,17 +166,39 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.edge_spharm_emb_field  = edge_spharm_emb_field
         self.edge_equivariant_field = edge_equivariant_field
         self.out_field              = out_field
+        self.node_state_field       = node_state_field
+        self.node_state_dim         = int(latent_dim)
+        self.node_state_pooling     = node_state_pooling
+        self.node_state_use_residual = bool(node_state_use_residual)
         if latent_module_kwargs is None:
             latent_module_kwargs = {"mlp_latent_dimensions": [128, 128], "mlp_nonlinearity": "silu"}
+        else:
+            latent_module_kwargs = dict(latent_module_kwargs)
         
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
+        valid_attention_modes = ("edge_self", "node_feature_query")
+        if attention_mode not in valid_attention_modes:
+            raise ValueError(f"`attention_mode` must be one of {valid_attention_modes}, got {attention_mode!r}.")
+        if attention_mode == "node_feature_query" and not use_attention:
+            raise ValueError("`attention_mode: node_feature_query` requires `use_attention: true`.")
+        valid_node_state_pooling = ("mean", "sum", "attention")
+        if node_state_pooling not in valid_node_state_pooling:
+            raise ValueError(f"`node_state_pooling` must be one of {valid_node_state_pooling}, got {node_state_pooling!r}.")
         if residual_update_max <= 0.0:
             raise ValueError("`residual_update_max` must be > 0.")
+        if node_state_residual_update_max is None:
+            node_state_residual_update_max = residual_update_max
+        if node_state_residual_update_max <= 0.0:
+            raise ValueError("`node_state_residual_update_max` must be > 0.")
         if attention_logit_clip < 0.0:
             raise ValueError("`attention_logit_clip` must be >= 0.")
         self.residual_update_max = float(residual_update_max)
+        self.node_state_residual_update_max = float(node_state_residual_update_max)
         self.attention_logit_clip = float(attention_logit_clip)
         self.use_equivariant_residual = bool(use_equivariant_residual)
+        self.use_attention = bool(use_attention)
+        self.attention_mode = attention_mode
+        self.use_node_feature_query_attention = self.use_attention and self.attention_mode == "node_feature_query"
         
         # --- Irreps Initialization and Validation ---
         required_irreps = [
@@ -244,7 +280,25 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             output_shape_spec="channel_wise",
         )
 
+        self.node_state_init = None
+        self.node_state_pool_attention = None
+        if self.use_node_feature_query_attention:
+            self.node_state_init = latent_module(
+                mlp_input_dimension=self.node_invariant_field_irreps.dim,
+                mlp_output_dimension=latent_dim,
+                **latent_module_kwargs,
+            )
+            if self.node_state_pooling == "attention":
+                self.node_state_pool_attention = latent_module(
+                    mlp_input_dimension=latent_dim,
+                    mlp_output_dimension=1,
+                    **latent_module_kwargs,
+                )
+
         self._latent_resnet_update_params = torch.nn.Parameter(torch.full((self.num_layers - 1,), -4.0))
+        self._node_state_resnet_update_params = None
+        if self.use_node_feature_query_attention and self.node_state_use_residual:
+            self._node_state_resnet_update_params = torch.nn.Parameter(torch.full((self.num_layers,), -4.0))
         self.interaction_layers = torch.nn.ModuleList()
         
         for i in range(self.num_layers):
@@ -269,6 +323,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
                 edge_conditioning_dim = self.edge_conditioning_dim,
                 attention_logit_clip = self.attention_logit_clip,
                 use_equivariant_residual = self.use_equivariant_residual,
+                attention_mode = self.attention_mode,
             )
 
             self.interaction_layers.append(InteractionLayer(layer_config))
@@ -286,6 +341,31 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
 
         # The output field will contain the final equivariant features
         self.irreps_out[self.out_field] = final_out_irreps
+        if self.use_node_feature_query_attention:
+            self.irreps_out[self.node_state_field] = o3.Irreps(f"{latent_dim}x0e")
+
+    def _initial_node_state(self, data: AtomicDataDict.Type) -> Optional[torch.Tensor]:
+        if not self.use_node_feature_query_attention:
+            return None
+        if self.node_state_field in data and data[self.node_state_field].shape[-1] == self.node_state_dim:
+            return data[self.node_state_field]
+        assert self.node_state_init is not None
+        return self.node_state_init(data[self.node_invariant_field])
+
+    def _pool_node_state(
+        self,
+        scalar_state: torch.Tensor,
+        edge_src: torch.Tensor,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        if self.node_state_pooling == "sum":
+            return scatter_sum(scalar_state, edge_src, dim=0, dim_size=num_nodes)
+        if self.node_state_pooling == "attention":
+            assert self.node_state_pool_attention is not None
+            logits = self.node_state_pool_attention(scalar_state).squeeze(-1)
+            weights = scatter_softmax(logits, edge_src, dim=0).unsqueeze(-1)
+            return scatter_sum(scalar_state * weights, edge_src, dim=0, dim_size=num_nodes)
+        return scatter_mean(scalar_state, edge_src, dim=0, dim_size=num_nodes)
 
     def _init_input_field(self, field_name: str, field_type: str):
         """
@@ -364,6 +444,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             data=data,
             scalar_state=scalar_state,
             equiv_state=equiv_state,
+            node_state=self._initial_node_state(data),
             edge_conditioning=edge_conditioning,
             layer_update_coefficients=layer_update_coefficients,
         )
@@ -380,20 +461,40 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         data: AtomicDataDict.Type,
         scalar_state: torch.Tensor,
         equiv_state: Optional[torch.Tensor],
+        node_state: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
         layer_update_coefficients: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         s = scalar_state
         e = equiv_state
+        n = node_state
+        edge_src = data[AtomicDataDict.EDGE_INDEX_KEY][0]
+        num_nodes = data[AtomicDataDict.POSITIONS_KEY].shape[0]
         for i, layer in enumerate(self.interaction_layers):
             residual_update_coeff = layer_update_coefficients[i - 1] if i > 0 else None
+            node_state_in = n
             s, e = layer(
                 data=data,
                 scalar_state=s,
                 equiv_state=e,
+                node_state=n,
                 edge_conditioning=edge_conditioning,
                 residual_update_coeff=residual_update_coeff,
             )
+            if self.use_node_feature_query_attention:
+                if node_state_in is None:
+                    raise RuntimeError("InteractionModule node_feature_query attention requires an initialized node state.")
+                pooled_node_state = self._pool_node_state(s, edge_src, num_nodes)
+                if self.node_state_use_residual:
+                    assert self._node_state_resnet_update_params is not None
+                    node_residual_update_coeff = (
+                        self._node_state_resnet_update_params[i].sigmoid()
+                        * self.node_state_residual_update_max
+                    )
+                    n = apply_residual_stream(node_state_in, pooled_node_state, node_residual_update_coeff)
+                else:
+                    n = pooled_node_state
+                data[self.node_state_field] = n
         return s, e
 
 
@@ -405,7 +506,7 @@ class InteractionLayer(torch.nn.Module):
     - `__init__` is streamlined and groups related module constructions.
     - Forward pass is clarified and returns the correct signature.
     """
-    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product", "attention_logit_clip", "use_equivariant_residual"]
+    __constants__ = ["node_invariant_field", "use_attention", "use_mace_product", "attention_logit_clip", "use_equivariant_residual", "attention_mode"]
     def __init__(
         self, config: InteractionLayerConfig
     ):
@@ -415,6 +516,7 @@ class InteractionLayer(torch.nn.Module):
         self.use_mace_product = config.use_mace_product
         self.attention_logit_clip = float(config.attention_logit_clip)
         self.use_equivariant_residual = bool(config.use_equivariant_residual)
+        self.attention_mode = config.attention_mode
 
         # === Define dimensions and irreps ===
         node_inv_dim = config.irreps_in[config.node_invariant_field].dim
@@ -433,11 +535,15 @@ class InteractionLayer(torch.nn.Module):
         self.node_env_norm = SO3_LayerNorm(config.equiv_latent_irreps)
 
         # === Attention modules ===
-        self.node_attr_to_query = None
+        self.latent_to_query = None
+        self.node_state_to_query = None
         self.latent_to_key = None
         if config.use_attention:
             self.inv_sqrtd = 1. / math.sqrt(config.attention_head_dim)
-            self.node_attr_to_query = config.latent_module(node_inv_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            if config.attention_mode == "edge_self":
+                self.latent_to_query = config.latent_module(config.latent_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
+            else:
+                self.node_state_to_query = config.latent_module(config.latent_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
             self.latent_to_key = config.latent_module(config.latent_dim, [], config.eq_latent_multiplicity * config.attention_head_dim)
             self.rearrange_qk = Rearrange('e (m d) -> e m d', m=config.eq_latent_multiplicity, d=config.attention_head_dim)
         
@@ -493,6 +599,7 @@ class InteractionLayer(torch.nn.Module):
         data: AtomicDataDict.Type,
         scalar_state: torch.Tensor,
         equiv_state: Optional[torch.Tensor],
+        node_state: Optional[torch.Tensor],
         edge_conditioning: Optional[torch.Tensor],
         residual_update_coeff: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -513,13 +620,28 @@ class InteractionLayer(torch.nn.Module):
             raise RuntimeError("env_embed_mlp must return a Tensor.")
         
         if self.use_attention:
-            assert self.node_attr_to_query is not None and self.latent_to_key is not None and self.rearrange_qk is not None
-            Q = self.rearrange_qk(self.node_attr_to_query(node_attrs[edge_src]))
+            assert self.latent_to_key is not None and self.rearrange_qk is not None
             K = self.rearrange_qk(self.latent_to_key(scalar_state))
-            W = torch.einsum('emd,emd -> em', Q, K) * self.inv_sqrtd
-            if self.attention_logit_clip > 0.0:
-                W = torch.clamp(W, min=-self.attention_logit_clip, max=self.attention_logit_clip)
-            attn_softmax = scatter_softmax(W, edge_src, dim=0)
+            if self.attention_mode == "edge_self":
+                assert self.latent_to_query is not None
+                Q = self.rearrange_qk(self.latent_to_query(scalar_state))
+                attn_softmax = edge_group_self_attention_weights(
+                    queries=Q,
+                    keys=K,
+                    edge_center=edge_src,
+                    num_nodes=num_nodes,
+                    inv_sqrtd=self.inv_sqrtd,
+                    logit_clip=self.attention_logit_clip,
+                )
+            else:
+                if node_state is None:
+                    raise RuntimeError("InteractionLayer node_feature_query attention requires a node_state tensor.")
+                assert self.node_state_to_query is not None
+                Q = self.rearrange_qk(self.node_state_to_query(node_state[edge_src]))
+                W = torch.einsum('emd,emd -> em', Q, K) * self.inv_sqrtd
+                if self.attention_logit_clip > 0.0:
+                    W = torch.clamp(W, min=-self.attention_logit_clip, max=self.attention_logit_clip)
+                attn_softmax = scatter_softmax(W, edge_src, dim=0)
             env_edges = torch.einsum('...d, ... -> ...d', env_edges, attn_softmax)
         
         env_nodes = scatter_sum(env_edges, edge_src, dim=0, dim_size=num_nodes)

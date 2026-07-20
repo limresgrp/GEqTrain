@@ -1,5 +1,5 @@
 from .kan import KAN
-from ._fc import ScalarMLPFunction, select_nonlinearity, select_nonlinearity_module
+from ._fc import ScalarMLPFunction, SirenMixedScalarMLPFunction, select_nonlinearity, select_nonlinearity_module
 from .so3 import SO3_Linear, SO3_LayerNorm
 from ._graph_mixin import GraphModuleMixin, SequentialGraphNetwork  # noqa: F401
 from .embeddings import (
@@ -54,6 +54,7 @@ __all__ = [
     FiLMFunction,
     KAN,
     ScalarMLPFunction,
+    SirenMixedScalarMLPFunction,
     SO3_Linear,
     SO3_LayerNorm,
     WeightedTP,

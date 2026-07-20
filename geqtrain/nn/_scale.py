@@ -86,7 +86,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_bias to have length {num_types}, "
                 f"but got {len(per_type_bias)}"
             )
-            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.get_default_dtype())
             self.per_type_bias = torch.nn.Parameter(per_type_bias.reshape(num_types, -1))
         else:
             self.per_type_bias = None
@@ -96,7 +96,7 @@ class PerTypeScaleModule(GraphModuleMixin, torch.nn.Module):
                 f"Expected per_type_std to have length {num_types}, "
                 f"but got {len(per_type_std)}"
             )
-            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
+            per_type_std = torch.tensor(per_type_std, dtype=torch.get_default_dtype())
             self.per_type_std = torch.nn.Parameter(per_type_std.reshape(num_types, -1))
         else:
             self.per_type_std = None
@@ -163,14 +163,14 @@ class PerTypeUnscaleModule(GraphModuleMixin, torch.nn.Module):
 
         if per_type_bias is not None:
             assert len(per_type_bias) == num_types
-            per_type_bias = torch.tensor(per_type_bias, dtype=torch.float32)
+            per_type_bias = torch.tensor(per_type_bias, dtype=torch.get_default_dtype())
             self.register_buffer("per_type_bias", per_type_bias.reshape(num_types, -1))
         else:
             self.per_type_bias = None
 
         if per_type_std is not None:
             assert len(per_type_std) == num_types
-            per_type_std = torch.tensor(per_type_std, dtype=torch.float32)
+            per_type_std = torch.tensor(per_type_std, dtype=torch.get_default_dtype())
             # Add a small epsilon to prevent division by zero
             self.register_buffer("per_type_std", per_type_std.reshape(num_types, -1) + 1e-8)
         else:

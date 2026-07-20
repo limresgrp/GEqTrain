@@ -119,7 +119,7 @@ class RecycleModelWrapper(GraphModuleMixin, torch.nn.Module):
 
         recycled_fields = config.get("recycled_fields", [])
         # Single alpha parameter for the additive output update, initialized to 0.0 so sigmoid(0.0) = 0.5
-        self.alpha_param = torch.nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        self.alpha_param = torch.nn.Parameter(torch.tensor(0.0, dtype=torch.get_default_dtype()))
 
         register_fields(node_fields=[AtomicDataDict.RECYCLE_STEP_KEY])
         self.recycle_block = RecycleBlock(

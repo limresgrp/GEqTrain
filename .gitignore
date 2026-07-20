@@ -6,8 +6,7 @@ NOTES.md
 *.tex
 *.npz
 
-
-config/
+local_config/
 results/
 deployed/
 _misc/

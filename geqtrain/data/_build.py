@@ -131,13 +131,31 @@ def dataset_from_config(
         is_inmemory = instance_config.get('inmemory', True)
         key_clean_list = _get_key_clean(instance_config, loss_key)
 
+        explicit_frame_workers = instance_config.get(
+            f"{prefix}_frame_num_workers",
+            instance_config.get("frame_num_workers", None),
+        )
+        if len(files_to_process) == 1:
+            frame_num_workers = explicit_frame_workers
+            if frame_num_workers is None:
+                frame_num_workers = instance_config.get('dataset_num_workers', 1)
+            frame_num_workers = max(1, int(frame_num_workers))
+            instance_config_dict[f"{prefix}_frame_num_workers"] = frame_num_workers
+            n_workers = 1
+        else:
+            # Keep a single spawn level: when parallelizing across files, do not
+            # also parallelize frame construction inside each file.
+            instance_config_dict[f"{prefix}_frame_num_workers"] = 1
+            n_workers = int(min(len(files_to_process), instance_config.get('dataset_num_workers', 1)))
+
+        instance_config = Config(instance_config_dict)
+
         worker_func = partial(
             _handle_single_file,
             config_dict=instance_config.as_dict(), prefix=prefix, class_name=class_name,
             inmemory=is_inmemory, key_clean_list=key_clean_list
         )
-        
-        n_workers = int(min(len(files_to_process), instance_config.get('dataset_num_workers', 1)))
+
         if n_workers > 1:
             with mp.Pool(processes=n_workers) as pool:
                 results = pool.map(worker_func, files_to_process)
@@ -225,7 +243,13 @@ def _handle_single_file(file_info: tuple, config_dict: dict, prefix: str, class_
     if instance.data is None or instance.data.num_graphs == 0:
         return None
 
-    instance = _filter_dataset(instance, key_clean_list, _node_types_to_keep(config_dict), *_node_types_to_exclude_from_edges(config_dict))
+    instance = _filter_dataset(
+        instance,
+        key_clean_list,
+        _node_types_to_keep(config_dict),
+        *_node_types_to_exclude_from_edges(config_dict),
+        *_node_types_to_keep_for_edges(config_dict),
+    )
 
     if instance is None:
         logging.warning(f"All data from {dataset_file_name} was filtered out.")
@@ -257,12 +281,24 @@ def _node_types_to_exclude_from_edges(config):
         exclude_neigh = torch.tensor(find_matching_indices(config["type_names"], config["exclude_type_names_from_edge_neigh"]))
     return exclude_center, exclude_neigh
 
+def _node_types_to_keep_for_edges(config):
+    from geqtrain.train.utils import find_matching_indices
+    keep_center = config.get("keep_node_types_for_edge_center")
+    keep_neigh = config.get("keep_node_types_for_edge_neigh")
+    if config.get("keep_type_names_for_edge_center"):
+        keep_center = torch.tensor(find_matching_indices(config["type_names"], config["keep_type_names_for_edge_center"]))
+    if config.get("keep_type_names_for_edge_neigh"):
+        keep_neigh = torch.tensor(find_matching_indices(config["type_names"], config["keep_type_names_for_edge_neigh"]))
+    return keep_center, keep_neigh
+
 def _filter_dataset(
     dataset: AtomicInMemoryDataset,
     key_clean_list: List[str],
     keep_node_types: Optional[torch.Tensor] = None,
     exclude_node_types_from_edge_center: Optional[torch.Tensor] = None,
     exclude_node_types_from_edge_neigh: Optional[torch.Tensor] = None,
+    keep_node_types_for_edge_center: Optional[torch.Tensor] = None,
+    keep_node_types_for_edge_neigh: Optional[torch.Tensor] = None,
 ) -> Optional[AtomicInMemoryDataset]:
     """
     Filters a dataset by operating on the entire Batch object at once using
@@ -271,7 +307,21 @@ def _filter_dataset(
     data: Batch = dataset.data
     if data is None or data.num_graphs == 0:
         return None
-    if keep_node_types is None and exclude_node_types_from_edge_center is None and exclude_node_types_from_edge_neigh is None:
+    has_nan_target_filter = any(
+        key in _NODE_FIELDS
+        and key in data
+        and torch.is_floating_point(data[key])
+        and torch.isnan(data[key]).any()
+        for key in key_clean_list
+    )
+    if (
+        keep_node_types is None
+        and exclude_node_types_from_edge_center is None
+        and exclude_node_types_from_edge_neigh is None
+        and keep_node_types_for_edge_center is None
+        and keep_node_types_for_edge_neigh is None
+        and not has_nan_target_filter
+    ):
         return dataset
 
     # --- 1. Compute the final node mask based on all conditions ---
@@ -311,13 +361,22 @@ def _filter_dataset(
 
     nan_filters = []
     for key in key_clean_list:
-        if key in _NODE_FIELDS and key in data and torch.isnan(data[key]).any():
+        if (
+            key in _NODE_FIELDS
+            and key in data
+            and torch.is_floating_point(data[key])
+            and torch.isnan(data[key]).any()
+        ):
             valid_nodes = torch.all(~torch.isnan(data[key]), dim=-1)
             nan_filters.append(valid_nodes[edge_index[0]])
     if nan_filters:
         edges_to_keep_mask &= torch.all(torch.stack(nan_filters), dim=0)
     
     if node_types is not None:
+        if keep_node_types_for_edge_center is not None:
+            edges_to_keep_mask &= torch.isin(node_types[edge_index[0]], keep_node_types_for_edge_center.to(node_types.device))
+        if keep_node_types_for_edge_neigh is not None:
+            edges_to_keep_mask &= torch.isin(node_types[edge_index[1]], keep_node_types_for_edge_neigh.to(node_types.device))
         if exclude_node_types_from_edge_center is not None:
             edges_to_keep_mask &= ~torch.isin(node_types[edge_index[0]], exclude_node_types_from_edge_center.to(node_types.device))
         if exclude_node_types_from_edge_neigh is not None:

@@ -26,10 +26,10 @@ class CategoricalPositionalEmbedding(torch.nn.Module):
         self.base = float(base)
 
         # Build a deterministic sinusoidal table with support for odd dimensions.
-        positions = torch.arange(self.num_types, dtype=torch.float32).unsqueeze(1)  # [num_types, 1]
+        positions = torch.arange(self.num_types, dtype=torch.get_default_dtype()).unsqueeze(1)  # [num_types, 1]
         freq_count = (self.embedding_dim + 1) // 2
         freqs = torch.exp(
-            -math.log(self.base) * torch.arange(freq_count, dtype=torch.float32) / max(freq_count, 1)
+            -math.log(self.base) * torch.arange(freq_count, dtype=torch.get_default_dtype()) / max(freq_count, 1)
         )  # [freq_count]
         angles = positions * freqs.unsqueeze(0)  # [num_types, freq_count]
         table = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)[:, : self.embedding_dim]

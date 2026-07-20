@@ -16,8 +16,10 @@ import inspect
 import yaml
 import hashlib
 import torch
+import torch.multiprocessing as mp
 import copy
 import os
+import tempfile
 from os.path import dirname, basename, abspath
 from e3nn.o3 import Irreps
 from typing import Tuple, Dict, Any, List, Union, Optional, Callable
@@ -59,6 +61,63 @@ def fix_batch_dim(arr):
     if len(arr.shape) == 0:
         return arr.reshape(1)
     return arr
+
+
+_NPZ_FRAME_BUILD_CONTEXT = {}
+
+
+def _set_npz_frame_build_context(
+    *,
+    node_fields,
+    edge_fields,
+    graph_fields,
+    extra_fields,
+    fixed_fields,
+    constructor,
+    ignore_fields,
+):
+    global _NPZ_FRAME_BUILD_CONTEXT
+    _NPZ_FRAME_BUILD_CONTEXT = {
+        "node_fields": node_fields,
+        "edge_fields": edge_fields,
+        "graph_fields": graph_fields,
+        "extra_fields": extra_fields,
+        "fixed_fields": fixed_fields,
+        "constructor": constructor,
+        "ignore_fields": ignore_fields,
+    }
+
+
+def _build_npz_frame_chunk(frame_indices):
+    ctx = _NPZ_FRAME_BUILD_CONTEXT
+    data_list = []
+    for i in frame_indices:
+        data_list.append(
+            ctx["constructor"](
+                **{
+                    **{f: v[i] for f, v in ctx["node_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["edge_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["graph_fields"].items() if v is not None},
+                    **{f: v[i] for f, v in ctx["extra_fields"].items() if v is not None},
+                    **ctx["fixed_fields"],
+                },
+                ignore_fields=ctx["ignore_fields"],
+            )
+        )
+    return data_list
+
+
+def _initialize_npz_frame_worker(context):
+    global _NPZ_FRAME_BUILD_CONTEXT
+    _NPZ_FRAME_BUILD_CONTEXT = context
+    torch.set_num_threads(1)
+
+
+def _build_npz_frame_chunk_to_file(task):
+    frame_indices, output_path = task
+    data_list = _build_npz_frame_chunk(frame_indices)
+    torch.save(data_list, output_path)
+    return output_path
 
 
 def _has_binning(options: Dict) -> bool:
@@ -201,14 +260,27 @@ def compute_per_type_statistics(dataset: Optional[ConcatDataset], field: str, nu
         all_field_values = torch.cat(field_values_list, dim=0)
 
     all_node_types = torch.cat([data[AtomicDataDict.NODE_TYPE_KEY] for data in dataset], dim=0).squeeze()
+    finite_rows = torch.isfinite(all_field_values)
+    if finite_rows.dim() > 1:
+        finite_rows = finite_rows.all(dim=1)
+    if finite_rows.numel() > 0:
+        all_field_values = all_field_values[finite_rows]
+        all_node_types = all_node_types[finite_rows]
+
+    if all_field_values.numel() == 0:
+        shape = (num_types,) + tuple(all_field_values.shape[1:])
+        means = torch.zeros(shape, dtype=field_values_list[0].dtype, device=field_values_list[0].device)
+        stds = torch.ones_like(means)
+        return means, stds
 
     means = scatter_mean(all_field_values, all_node_types, dim=0, dim_size=num_types)
     stds = scatter_std(all_field_values, all_node_types, dim=0, dim_size=num_types)
 
-    # Fallback for types with no samples to avoid NaN
+    # Fallback for types with no finite samples to avoid NaN.
+    means = torch.where(torch.isfinite(means), means, torch.zeros_like(means))
     for i, std in enumerate(stds):
-        if torch.any(torch.isnan(std)) or torch.all(std < 1.e-3):
-            stds[i] = torch.where(torch.isnan(std) | (std < 1.e-3), 1.0, std)
+        if torch.any(~torch.isfinite(std)) or torch.all(std < 1.e-3):
+            stds[i] = torch.where((~torch.isfinite(std)) | (std < 1.e-3), 1.0, std)
 
     return means, stds
 
@@ -247,8 +319,14 @@ def compute_global_statistics(dataset: Optional[ConcatDataset], field: str, irre
     else:
         all_field_values = torch.cat(field_values_list, dim=0)
     
-    mean = torch.mean(all_field_values).item()
-    std = torch.std(all_field_values).item()
+    finite_values = all_field_values[torch.isfinite(all_field_values)]
+    if finite_values.numel() == 0:
+        return 0.0, 1.0
+    
+    mean = torch.mean(finite_values).item()
+    std = torch.std(finite_values).item()
+    if not np.isfinite(std) or std < 1.e-8:
+        std = 1.0
 
     return mean, std
 
@@ -422,6 +500,7 @@ class AtomicDataset(Dataset):
         IGNORE_KEYS = {
             "embedding_dimensionality",
             "transforms",
+            "frame_num_workers",
         }
 
         def filter_attributes(self, pnames, IGNORE_KEYS):
@@ -449,7 +528,7 @@ class AtomicDataset(Dataset):
             # Bump cache key when standardization math changes.
             params["standardization_impl_version"] = 3
         # Add other relevant metadata:
-        params["dtype"] = str(torch.float32)
+        params["dtype"] = str(torch.get_default_dtype())
         params["geqtrain_version"] = geqtrain.__version__
         return params
 
@@ -503,6 +582,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
         target_key: Optional[str] = None,
+        frame_num_workers: int = 1,
         node_attributes: Dict = {},
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
@@ -519,6 +599,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.include_frames = include_frames
         self.target_indices = target_indices
         self.target_key = target_key
+        self.frame_num_workers = max(1, int(frame_num_workers))
 
         self.data: Optional[Batch] = None
         self.fixed_fields = None
@@ -666,7 +747,7 @@ class AtomicInMemoryDataset(AtomicDataset):
         return sorted(fields)
 
     def _sample_flattened_tensor(self, values: torch.Tensor, max_points: int = 200000) -> torch.Tensor:
-        flat = values.reshape(-1).detach().to(dtype=torch.float32, device="cpu")
+        flat = values.reshape(-1).detach().to(dtype=torch.get_default_dtype(), device="cpu")
         flat = flat[torch.isfinite(flat)]
         if flat.numel() <= max_points:
             return flat
@@ -828,17 +909,53 @@ class AtomicInMemoryDataset(AtomicDataset):
                 assert AtomicDataDict.R_MAX_KEY in all_keys
                 assert AtomicDataDict.POSITIONS_KEY in all_keys
 
-            data_list = [  # list of AtomicData-pyg-object objects
-                constructor(
-                    **{
-                        **{f: v[i] for f, v in node_fields.items()  if v is not None},
-                        **{f: v[i] for f, v in edge_fields.items()  if v is not None},
-                        **{f: v[i] for f, v in graph_fields.items() if v is not None},
-                        **{f: v[i] for f, v in extra_fields.items() if v is not None},
-                        **fixed_fields,
-                    }, ignore_fields=self.ignore_fields)
-                for i in include_frames
-            ]
+            frame_indices = list(include_frames)
+            if self.frame_num_workers > 1 and len(frame_indices) > 1:
+                chunk_size = max(1, (len(frame_indices) + self.frame_num_workers - 1) // self.frame_num_workers)
+                frame_chunks = [frame_indices[i:i + chunk_size] for i in range(0, len(frame_indices), chunk_size)]
+                _set_npz_frame_build_context(
+                    node_fields=node_fields,
+                    edge_fields=edge_fields,
+                    graph_fields=graph_fields,
+                    extra_fields=extra_fields,
+                    fixed_fields=fixed_fields,
+                    constructor=constructor,
+                    ignore_fields=self.ignore_fields,
+                )
+                worker_context = dict(_NPZ_FRAME_BUILD_CONTEXT)
+                num_workers = min(self.frame_num_workers, len(frame_chunks))
+                spawn_context = mp.get_context("spawn")
+                with tempfile.TemporaryDirectory(
+                    prefix="frame_chunks_",
+                    dir=self.processed_dir,
+                ) as temp_dir:
+                    tasks = [
+                        (chunk, os.path.join(temp_dir, f"chunk_{chunk_idx}.pth"))
+                        for chunk_idx, chunk in enumerate(frame_chunks)
+                    ]
+                    with spawn_context.Pool(
+                        processes=num_workers,
+                        initializer=_initialize_npz_frame_worker,
+                        initargs=(worker_context,),
+                    ) as pool:
+                        chunk_paths = pool.map(_build_npz_frame_chunk_to_file, tasks)
+                    data_chunks = [
+                        torch.load(path, map_location="cpu", weights_only=False)
+                        for path in chunk_paths
+                    ]
+                data_list = [item for chunk in data_chunks for item in chunk]
+            else:
+                data_list = [  # list of AtomicData-pyg-object objects
+                    constructor(
+                        **{
+                            **{f: v[i] for f, v in node_fields.items()  if v is not None},
+                            **{f: v[i] for f, v in edge_fields.items()  if v is not None},
+                            **{f: v[i] for f, v in graph_fields.items() if v is not None},
+                            **{f: v[i] for f, v in extra_fields.items() if v is not None},
+                            **fixed_fields,
+                        }, ignore_fields=self.ignore_fields)
+                    for i in frame_indices
+                ]
 
         else:
             raise ValueError("Invalid return from `self.get_data()`")
@@ -1069,6 +1186,7 @@ class NpzDataset(AtomicInMemoryDataset):
         include_frames: Optional[List[int]] = None,
         target_indices: Optional[List[int]] = None,
         target_key: Optional[str] = None,
+        frame_num_workers: int = 1,
         node_attributes: Dict = {},
         edge_attributes: Dict = {},
         graph_attributes: Dict = {},
@@ -1089,6 +1207,7 @@ class NpzDataset(AtomicInMemoryDataset):
                 include_frames=include_frames,
                 target_indices=target_indices,
                 target_key=target_key,
+                frame_num_workers=frame_num_workers,
                 node_attributes=node_attributes,
                 edge_attributes=edge_attributes,
                 graph_attributes=graph_attributes,
@@ -1171,7 +1290,8 @@ class NpzDataset(AtomicInMemoryDataset):
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, np.integer):
                     fields[key] = fields[key].astype(np.int64) # keep int64 since cross entropy based pytorch loss functions require this dtype
                 if key in fields and fields[key] is not None and np.issubdtype(fields[key].dtype, bool):
-                    fields[key] = fields[key].astype(np.float32)
+                    dtype = np.float64 if torch.get_default_dtype() is torch.float64 else np.float32
+                    fields[key] = fields[key].astype(dtype)
 
         # k:v k field, v the value grabbed from the npz in np.array form
         return node_fields, edge_fields, graph_fields, extra_fields, fixed_fields

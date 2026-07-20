@@ -72,7 +72,7 @@ def test_edgewise_reduce_no_attention_matches_scatter_sum():
     torch.testing.assert_close(out[module.out_field], expected)
 
 
-def test_edgewise_reduce_attention_mixed_irreps_uses_scalar_attrs():
+def test_edgewise_reduce_attention_mixed_irreps_uses_scalar_edge_attrs():
     torch.manual_seed(0)
     irreps_in = {
         AtomicDataDict.NODE_ATTRS_KEY: "2x0e+1x0o",
@@ -94,9 +94,7 @@ def test_edgewise_reduce_attention_mixed_irreps_uses_scalar_attrs():
     )
 
     edge_irreps = o3.Irreps(irreps_in[AtomicDataDict.EDGE_FEATURES_KEY])
-    node_irreps = o3.Irreps(irreps_in[AtomicDataDict.NODE_ATTRS_KEY])
     assert module.n_scalars == _count_scalar_dims(edge_irreps)
-    assert module.n_node_scalars == _count_scalar_dims(node_irreps)
     assert module.attention_num_heads == max(mul for mul, _ in edge_irreps)
 
     out = module(data)
@@ -107,14 +105,19 @@ def test_edgewise_reduce_attention_mixed_irreps_uses_scalar_attrs():
         key: value.clone() if torch.is_tensor(value) else value
         for key, value in data.items()
     }
-    node_scalar_slices = _scalar_slices(node_irreps)
-    assert len(node_scalar_slices) >= 1
-    start, end = node_scalar_slices[0]
-    data_mod[AtomicDataDict.NODE_ATTRS_KEY][:, start:end] += 5.0
+    data_mod[AtomicDataDict.NODE_ATTRS_KEY] += 5.0
     out_mod = module(data_mod)
+    torch.testing.assert_close(out_mod[module.out_field], out[module.out_field])
 
-    delta = (out_mod[module.out_field] - out[module.out_field]).abs().max().item()
-    assert delta > 1e-4, "Attention output did not respond to scalar node attrs"
+    edge_scalar_slices = _scalar_slices(edge_irreps)
+    assert len(edge_scalar_slices) >= 1
+    start, end = edge_scalar_slices[0]
+    data_mod[AtomicDataDict.EDGE_FEATURES_KEY][:, start:end] += torch.randn_like(
+        data_mod[AtomicDataDict.EDGE_FEATURES_KEY][:, start:end]
+    )
+    out_edge_mod = module(data_mod)
+    delta = (out_edge_mod[module.out_field] - out[module.out_field]).abs().max().item()
+    assert delta > 1e-4, "Attention output did not respond to scalar edge attrs"
 
 
 @pytest.mark.parametrize("use_attention", [False, True])

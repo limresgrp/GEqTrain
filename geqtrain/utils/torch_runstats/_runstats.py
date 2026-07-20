@@ -199,7 +199,7 @@ class RunningStats:
 
         # Finally, do the average:
         average = new_sum / N
-        average.nan_to_num_(nan=0.0)
+        average = torch.nan_to_num(average, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self._reduction == Reduction.RMS:
             average.sqrt_()
@@ -258,7 +258,7 @@ class RunningStats:
         self._n += N
 
         # Make div by zero 0
-        self._state = torch.nan_to_num_(self._state, nan=0.0)
+        self._state = torch.nan_to_num(self._state, nan=0.0, posinf=0.0, neginf=0.0)
 
         return average
 

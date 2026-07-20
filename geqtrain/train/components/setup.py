@@ -24,28 +24,62 @@ def set_seed(seed):
         torch.manual_seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def _inject_type_names_into_components(components, type_names):
+    if components is None or type_names is None:
+        return components
+
+    def _inject(value):
+        if isinstance(value, dict):
+            new_dict = {}
+            for key, item in value.items():
+                if isinstance(item, dict):
+                    child = _inject(item)
+                    if "node_type_names" in child and "type_names" not in child:
+                        child = dict(child)
+                        child["type_names"] = type_names
+                    new_dict[key] = child
+                elif isinstance(item, list):
+                    new_dict[key] = _inject(item)
+                else:
+                    new_dict[key] = item
+            if "node_type_names" in new_dict and "type_names" not in new_dict:
+                new_dict["type_names"] = type_names
+            return new_dict
+        if isinstance(value, list):
+            return [_inject(item) for item in value]
+        return value
+
+    if isinstance(components, list):
+        return [_inject(item) for item in components]
+    if isinstance(components, dict):
+        return _inject(components)
+    return components
 
 def setup_loss(config):
+    loss_components = _inject_type_names_into_components(config.get('loss_coeffs'), config.get('type_names'))
     loss, _ = instantiate(
         builder=Loss,
         prefix="loss",
-        positional_args=dict(components=config.get('loss_coeffs')),
+        positional_args=dict(components=loss_components),
         all_args=config,
     )
     return loss
 
-def setup_metrics(config):
+def setup_metrics(config, target_irreps=None):
     normalization_fields = resolve_normalization_map(
         config.as_dict() if hasattr(config, "as_dict") else config,
     )
+    metric_components = _inject_type_names_into_components(config.get('metrics_components'), config.get('type_names'))
 
     metrics, _ = instantiate(
         builder=Metrics,
         prefix="metrics",
         positional_args=dict(
-            components=config.get('metrics_components'),
+            components=metric_components,
             normalization_fields=normalization_fields,
+            target_irreps=target_irreps,
         ),
         all_args=config,
     )

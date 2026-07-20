@@ -48,11 +48,23 @@ Filtering is applied in `_filter_dataset(...)` (`geqtrain/data/_build.py`) after
   - `keep_node_types` (index-based), or
   - `keep_type_names` (name-based, mapped to indices).
 - Edge filtering:
+  - `keep_type_names_for_edge_center` / `keep_type_names_for_edge_neigh`,
+  - `keep_node_types_for_edge_center` / `keep_node_types_for_edge_neigh`,
   - `exclude_type_names_from_edge_center` / `exclude_type_names_from_edge_neigh`,
   - and corresponding index-based variants.
+  - center filters control which atoms can send center-to-neighbor messages.
+  - neighbor filters control which atoms can appear as neighbors.
 - NaN-aware filtering:
   - edges connected to nodes with NaNs in loss-relevant node targets are removed.
+  - this filtering runs even when no explicit `keep_type_names` or edge-type exclusion is configured.
+  - affected atoms may remain as neighbors; they are removed only as edge centers unless they become isolated.
 - After edge filtering, isolated nodes are pruned.
+
+Dataset processing parallelism:
+
+- With multiple input files, `dataset_num_workers` parallelizes across files.
+- With one NPZ file, `dataset_num_workers` parallelizes frame construction inside that file.
+- Single-NPZ workers use spawned processes and temporary chunk files, avoiding forked Torch state and large `AtomicData` payloads through multiprocessing pipes.
 
 ## 4) Normalization and transforms
 

@@ -287,21 +287,25 @@ def build_deployment(
     metadata[R_MAX_KEY] = str(float(deployment_config["r_max"]))
     metadata[TF32_KEY] = str(int(deployment_config["allow_tf32"]))
     metadata[CONFIG_KEY] = yaml.safe_dump(deployment_config, sort_keys=False)
-    try:
-        stats_by_ensemble = _collect_normalization_stats_by_ensemble(deployment_config)
-    except Exception as exc:
-        logging.warning(
-            "Could not collect train normalization statistics for deployment metadata. "
-            "Deployed inference can still run, but automatic denormalization may require batch-level stats. "
-            "Underlying error: %s",
-            exc,
+    if extra_metadata and INFERENCE_METADATA_KEY in extra_metadata:
+        metadata[INFERENCE_METADATA_KEY] = extra_metadata[INFERENCE_METADATA_KEY]
+        logging.info("Using caller-provided inference metadata; skipping train dataset normalization scan.")
+    else:
+        try:
+            stats_by_ensemble = _collect_normalization_stats_by_ensemble(deployment_config)
+        except Exception as exc:
+            logging.warning(
+                "Could not collect train normalization statistics for deployment metadata. "
+                "Deployed inference can still run, but automatic denormalization may require batch-level stats. "
+                "Underlying error: %s",
+                exc,
+            )
+            stats_by_ensemble = {}
+        inference_bundle = build_inference_metadata_bundle(
+            deployment_config,
+            normalization_stats_by_ensemble=stats_by_ensemble,
         )
-        stats_by_ensemble = {}
-    inference_bundle = build_inference_metadata_bundle(
-        deployment_config,
-        normalization_stats_by_ensemble=stats_by_ensemble,
-    )
-    metadata[INFERENCE_METADATA_KEY] = dump_inference_metadata_bundle(inference_bundle)
+        metadata[INFERENCE_METADATA_KEY] = dump_inference_metadata_bundle(inference_bundle)
     
     # Add any extra metadata passed from the command line
     if extra_metadata:

@@ -11,6 +11,7 @@ from geqtrain.train.components.setup import setup_metrics
 from geqtrain.utils.config import Config
 from geqtrain.utils.inference_metadata import build_inference_metadata_bundle
 from geqtrain.utils.normalization import get_transform_param_key, resolve_normalization_map
+from geqtrain.utils.normalization import get_per_type_stat_keys
 from geqtrain.utils.torch_geometric import Batch
 
 
@@ -183,6 +184,147 @@ def test_metrics_use_normalization_map():
     out = metrics(pred=pred, ref=ref)
     value = next(iter(out.values())).item()
     assert value == pytest.approx(3.0)
+
+
+def test_metrics_with_species_filter_still_denormalize_per_type():
+    register_fields(node_fields=["cs_iso"])
+    mean_key, std_key = get_per_type_stat_keys("cs_iso")
+    config = Config.from_dict(
+        {
+            "type_names": ["X", "H", "C"],
+            "metrics_components": [
+                {
+                    "cs_iso": [
+                        "L1Loss",
+                        {"node_type_names": ["H"]},
+                    ]
+                }
+            ],
+            "normalization": {"cs_iso": "per_type:1x0e"},
+        }
+    )
+    metrics = setup_metrics(config)
+
+    pred = {
+        "cs_iso": torch.tensor([[0.5], [0.5], [0.5]], dtype=torch.float32),
+        AtomicDataDict.NODE_TYPE_KEY: torch.tensor([[0], [1], [2]], dtype=torch.long),
+    }
+    ref = {
+        "cs_iso": torch.tensor([[0.0], [0.0], [0.0]], dtype=torch.float32),
+        AtomicDataDict.NODE_TYPE_KEY: torch.tensor([[0], [1], [2]], dtype=torch.long),
+        mean_key: torch.tensor([[0.0], [10.0], [20.0]], dtype=torch.float32),
+        std_key: torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32),
+    }
+    out = metrics(pred=pred, ref=ref)
+    value = next(iter(out.values())).item()
+    assert value == pytest.approx(1.0)
+
+
+def test_per_type_normalization_ignores_nan_node_targets(tmp_path):
+    register_fields(node_fields=["target"])
+
+    npz_path = tmp_path / "nan_node_targets.npz"
+    pos = np.array(
+        [
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.2, 0.0, 0.0], [1.2, 0.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    target = np.array(
+        [
+            [[1.0], [np.nan]],
+            [[3.0], [np.nan]],
+        ],
+        dtype=np.float32,
+    )
+    node_types = np.array([0, 1], dtype=np.int64)
+    np.savez(npz_path, coords=pos, target=target, atom_types=node_types)
+
+    dataset = NpzDataset(
+        root=str(tmp_path),
+        ensemble_index=0,
+        file_name=str(npz_path),
+        key_mapping={
+            "coords": "pos",
+            "target": "target",
+            "atom_types": "node_types",
+        },
+        extra_fixed_fields={AtomicDataDict.R_MAX_KEY: 3.0},
+        node_attributes={
+            AtomicDataDict.NODE_TYPE_KEY: {
+                "embedding_mode": "one_hot",
+                "num_types": 2,
+                "fixed": True,
+            }
+        },
+        normalization={
+            "target": {
+                "mode": "per_type:1x0e",
+                "transform": "none",
+            }
+        },
+    )
+
+    mean_key, std_key = get_per_type_stat_keys("target")
+    means = dataset.fixed_fields[mean_key]
+    stds = dataset.fixed_fields[std_key]
+    normalized = dataset.data["target"]
+
+    assert torch.allclose(means[0], torch.tensor([2.0]))
+    assert torch.allclose(means[1], torch.tensor([0.0]))
+    assert torch.allclose(stds[1], torch.tensor([1.0]))
+    assert torch.isfinite(normalized).sum().item() == 2
+    assert torch.isnan(normalized).sum().item() == 2
+    assert torch.allclose(normalized[torch.isfinite(normalized)].mean(), torch.tensor(0.0), atol=1e-6)
+
+
+def test_global_normalization_ignores_nan_targets(tmp_path):
+    register_fields(graph_fields=["target_global"])
+
+    npz_path = tmp_path / "nan_global_targets.npz"
+    pos = np.array(
+        [
+            [[0.0, 0.0, 0.0]],
+            [[0.2, 0.0, 0.0]],
+            [[0.4, 0.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    target = np.array([1.0, np.nan, 3.0], dtype=np.float32)
+    node_types = np.array([0], dtype=np.int64)
+    np.savez(npz_path, coords=pos, target=target, atom_types=node_types)
+
+    dataset = NpzDataset(
+        root=str(tmp_path),
+        ensemble_index=0,
+        file_name=str(npz_path),
+        key_mapping={
+            "coords": "pos",
+            "target": "target_global",
+            "atom_types": "node_types",
+        },
+        extra_fixed_fields={AtomicDataDict.R_MAX_KEY: 3.0},
+        node_attributes={
+            AtomicDataDict.NODE_TYPE_KEY: {
+                "embedding_mode": "one_hot",
+                "num_types": 1,
+                "fixed": True,
+            }
+        },
+        normalization={
+            "target_global": {
+                "mode": "global",
+                "transform": "none",
+            }
+        },
+    )
+
+    normalized = dataset.data["target_global"]
+    assert dataset.fixed_fields["_mean_.global.target_global"].item() == pytest.approx(2.0)
+    assert torch.isfinite(normalized).sum().item() == 2
+    assert torch.isnan(normalized).sum().item() == 1
+    assert torch.allclose(normalized[torch.isfinite(normalized)].mean(), torch.tensor(0.0), atol=1e-6)
 
 
 def test_legacy_normalization_keys_raise():

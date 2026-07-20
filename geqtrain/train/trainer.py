@@ -13,6 +13,7 @@ import torch.distributed as dist
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
+from geqtrain.train.sampler import CurriculumBatchSampler
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import Config, Output, load_callable, load_file
 from geqtrain.utils._global_options import apply_global_config
@@ -23,7 +24,7 @@ from .components.distributed import DistributedManager
 from .components.callbacks import (ActivationNormCallback, GrokFastCallback, Logger,
                                    ValidationBatchPredictionLogger, CheckpointCallback,
                                    EarlyStoppingCallback, SanitizeGradCallback,
-                                   GradientClippingCallback)
+                                   GradientClippingCallback, EpochDiagnosticsCallback)
 from .components.setup import (setup_loss, setup_metrics, setup_optimizer,
                                setup_scheduler, setup_ema, set_seed, setup_early_stopping)
 from .components.checkpointing import CheckpointHandler
@@ -71,7 +72,7 @@ def check_for_config_updates(new_config):
         "max_epochs", "learning_rate", "loss_coeffs", "metrics_components", "log_batch_freq",
         "use_ema", "wandb", "dataset_list", "validation_dataset_list", "test_dataset_list",
         "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
-        "device", "filepath", "ddp",
+        "device", "filepath", "ddp", "curriculum_importance_sampling",
     ]
     # Ignore certain mismatches to allow clean restarts (e.g., wandb sweeps overriding config).
     ignored_restart_params = {"optimizer_params"}
@@ -212,10 +213,13 @@ class Trainer:
             self.output = Output.get_output(self.config)
             self.logfile = self.output.open_logfile("log", propagate=True)
             self.epoch_log = self.output.open_logfile("metrics_epoch.csv", propagate=False)
-            self.batch_log = {
-                TRAIN: self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
-                VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
-            }
+            self.log_batch_csv = bool(self.config.get("log_batch_csv", self.config.get("save_batch_metrics", False)))
+            self.batch_log = {}
+            if self.log_batch_csv:
+                self.batch_log = {
+                    TRAIN: self.output.open_logfile(f"metrics_batch_{ABBREV[TRAIN]}.csv", propagate=False),
+                    VALIDATION: self.output.open_logfile(f"metrics_batch_{ABBREV[VALIDATION]}.csv", propagate=False),
+                }
             config_path = self.output.generate_file("config.yaml")
             if self.config.get("_hydra_config", False):
                 self.config.save(config_path)
@@ -229,6 +233,8 @@ class Trainer:
                 logging.info(f"Copied config file to {config_path}")
         else:
             self.output = None; self.logfile = "dummy"
+            self.log_batch_csv = bool(self.config.get("log_batch_csv", self.config.get("save_batch_metrics", False)))
+            self.batch_log = {}
 
         self.logger = logging.getLogger(self.logfile)
         set_seed(self.config.get('seed'))
@@ -267,6 +273,8 @@ class Trainer:
         self.train_dset, self.val_dset = None, None
         self.train_idcs, self.val_idcs = None, None
         self.train_sampler, self.val_sampler = None, None
+        self.curriculum_sampler = None
+        self.curriculum_loss_key = None
 
     def _build_datasets(self):
         """
@@ -308,11 +316,45 @@ class Trainer:
 
     def _init_dataloaders(self):
         use_ensemble = self.config.get("dataset_mode") == "ensemble"
-        self.train_sampler = self.dist.get_sampler(self.train_dset, self.shuffle, use_ensemble)
+        curriculum_cfg = self._curriculum_config()
+        if curriculum_cfg.get("enabled", False):
+            if self.dist.is_distributed:
+                raise NotImplementedError("curriculum_importance_sampling is currently supported only for non-DDP training.")
+            if use_ensemble:
+                raise NotImplementedError("curriculum_importance_sampling is currently not compatible with dataset_mode: ensemble.")
+            seed = self.config.get("dataset_seed")
+            self.curriculum_sampler = CurriculumBatchSampler(
+                self.train_dset,
+                batch_size=self.config.get('batch_size'),
+                shuffle=self.shuffle,
+                seed=0 if seed is None else int(seed),
+                anchor_interval=curriculum_cfg.get("anchor_interval", curriculum_cfg.get("normal_epoch_interval", 5)),
+                alpha=curriculum_cfg.get("alpha", 0.5),
+                beta_warmup_epochs=curriculum_cfg.get("beta_warmup_epochs", curriculum_cfg.get("warmup_epochs", 10)),
+                gamma=curriculum_cfg.get("gamma", 0.2),
+                gamma_final=curriculum_cfg.get("gamma_final", curriculum_cfg.get("gamma", 0.2)),
+                gamma_warmup_epochs=curriculum_cfg.get("gamma_warmup_epochs", curriculum_cfg.get("beta_warmup_epochs", 10)),
+                error_ema=curriculum_cfg.get("error_ema", 0.8),
+                eps=curriculum_cfg.get("eps", 1.0e-12),
+            )
+            self.train_sampler = self.curriculum_sampler
+        else:
+            self.train_sampler = self.dist.get_sampler(self.train_dset, self.shuffle, use_ensemble)
         self.val_sampler = self.dist.get_sampler(self.val_dset, False, use_ensemble)
         dl_kwargs = {"num_workers": self.config.get('dataloader_num_workers', 0), "pin_memory": self.dist.device.type == 'cuda', "generator": self.dataset_torch_rng}
-        self.dl_train = DataLoader(dataset=self.train_dset, batch_size=self.config.get('batch_size'), shuffle=(self.train_sampler is None and self.shuffle), sampler=self.train_sampler, **dl_kwargs)
+        if self.curriculum_sampler is not None:
+            self.dl_train = DataLoader(dataset=self.train_dset, batch_sampler=self.curriculum_sampler, **dl_kwargs)
+        else:
+            self.dl_train = DataLoader(dataset=self.train_dset, batch_size=self.config.get('batch_size'), shuffle=(self.train_sampler is None and self.shuffle), sampler=self.train_sampler, **dl_kwargs)
         self.dl_val = DataLoader(dataset=self.val_dset, batch_size=self.config.get('validation_batch_size'), shuffle=False, sampler=self.val_sampler, **dl_kwargs)
+
+    def _curriculum_config(self):
+        cfg = self.config.get("curriculum_importance_sampling", {})
+        if cfg is True:
+            return {"enabled": True}
+        if cfg in (False, None):
+            return {"enabled": False}
+        return dict(cfg)
 
     def _setup_model(self, model):
         if model is None:
@@ -325,16 +367,58 @@ class Trainer:
 
     def _setup_training_components(self):
         self.loss = setup_loss(self.config)
-        self.metrics = setup_metrics(self.config)
+        self._resolve_curriculum_loss_key()
+        self.metrics = setup_metrics(self.config, target_irreps=self._collect_metric_target_irreps())
         self.optim = setup_optimizer(self.model, self.config)
         steps_per_epoch = self._get_steps_per_epoch()
         self.lr_sched, self.warmup_sched = setup_scheduler(self.optim, self.config, steps_per_epoch)
         self.ema = setup_ema(self.model, self.config)
         self.early_stopping_conds = setup_early_stopping(self.config)
 
+    def _collect_metric_target_irreps(self):
+        model = self.model.module if self.dist.is_distributed else self.model
+        irreps_out = getattr(model, "irreps_out", None)
+        if not irreps_out:
+            return {}
+        return {str(key): value for key, value in dict(irreps_out).items()}
+
+    def _resolve_curriculum_loss_key(self):
+        if self.curriculum_sampler is None:
+            return
+        cfg = self._curriculum_config()
+        requested = cfg.get("loss", cfg.get("loss_key", "loss"))
+        if requested in (None, "loss", "total"):
+            self.curriculum_loss_key = "loss"
+        else:
+            candidates = list(self.loss.keys)
+            matches = [key for key in candidates if key == requested or self.loss.remove_suffix(key) == requested]
+            if len(matches) != 1:
+                raise ValueError(
+                    "curriculum_importance_sampling.loss must match exactly one configured loss name. "
+                    f"Requested {requested!r}; available: {candidates}."
+                )
+            self.curriculum_loss_key = matches[0]
+        self.curriculum_sampler.loss_key = self.curriculum_loss_key
+        if self.dist.is_master:
+            self.logger.info(
+                "Curriculum importance sampling enabled: loss=%s, batches=%d, anchor_interval=%d",
+                self.curriculum_loss_key,
+                len(self.curriculum_sampler),
+                self.curriculum_sampler.anchor_interval,
+            )
+
+    def curriculum_is_anchor_epoch(self, epoch: int = None) -> bool:
+        if self.curriculum_sampler is None:
+            return True
+        if epoch is None:
+            epoch = max(0, int(self.iepoch))
+        return self.curriculum_sampler.is_anchor_epoch(epoch)
+
     def _setup_callbacks(self):
         # Core callbacks
-        callbacks = [Logger(), ValidationBatchPredictionLogger(), CheckpointCallback(), EarlyStoppingCallback()]
+        callbacks = [EpochDiagnosticsCallback(), Logger(), CheckpointCallback(), EarlyStoppingCallback()]
+        if self.log_batch_csv:
+            callbacks.insert(2, ValidationBatchPredictionLogger())
 
         # Optional integrations (e.g., Weights & Biases)
         if self.config.get('wandb'):

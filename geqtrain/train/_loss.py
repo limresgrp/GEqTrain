@@ -1,6 +1,7 @@
 # geqtrain/train/_loss.py
 
-from typing import Dict, Tuple
+from dataclasses import dataclass
+from typing import Dict, Tuple, List, Optional
 import logging
 import math
 import torch
@@ -9,6 +10,225 @@ from geqtrain.utils import instantiate_from_cls_name
 from geqtrain.data import AtomicDataDict, _NODE_FIELDS
 from geqtrain.utils.pytorch_scatter import scatter_sum, scatter_mean, scatter_max
 from geqtrain.utils.normalization import denormalize_tensor
+
+@dataclass
+class PreparedTarget:
+    pred: Dict[str, torch.Tensor]
+    ref: Dict[str, torch.Tensor]
+    pred_key: torch.Tensor
+    ref_key: torch.Tensor
+    node_types: Optional[torch.Tensor] = None
+    mask: Optional[torch.Tensor] = None
+
+
+def graph_zero_like(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a scalar zero that remains connected to `tensor`'s autograd graph."""
+    return tensor.sum() * 0.0
+
+
+def _row_count(tensor: torch.Tensor) -> Optional[int]:
+    if not torch.is_tensor(tensor) or tensor.ndim == 0:
+        return None
+    return int(tensor.shape[0])
+
+
+def _center_nodes(data: dict) -> Optional[torch.Tensor]:
+    if AtomicDataDict.EDGE_INDEX_KEY not in data:
+        return None
+    return data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
+
+
+def _can_index_by_center(tensor: torch.Tensor, center_nodes: Optional[torch.Tensor], row_count: int) -> bool:
+    if center_nodes is None or not torch.is_tensor(tensor) or tensor.ndim == 0:
+        return False
+    if int(center_nodes.numel()) != row_count or center_nodes.numel() == 0:
+        return False
+    return int(tensor.shape[0]) > int(center_nodes.max().item())
+
+
+def _align_rows(tensor: Optional[torch.Tensor], row_count: int, center_nodes: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if tensor is None or not torch.is_tensor(tensor) or tensor.ndim == 0:
+        return tensor
+    if int(tensor.shape[0]) == row_count:
+        return tensor
+    if _can_index_by_center(tensor, center_nodes, row_count):
+        return tensor[center_nodes]
+    return None
+
+
+def _align_pred_ref_rows(
+    pred_key: torch.Tensor,
+    ref_key: torch.Tensor,
+    key: str,
+    center_nodes: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    pred_rows = _row_count(pred_key)
+    ref_rows = _row_count(ref_key)
+    if pred_rows is None or ref_rows is None or pred_rows == ref_rows or key not in _NODE_FIELDS:
+        return pred_key, ref_key
+
+    if _can_index_by_center(ref_key, center_nodes, pred_rows):
+        ref_key = ref_key[center_nodes]
+    elif _can_index_by_center(pred_key, center_nodes, ref_rows):
+        pred_key = pred_key[center_nodes]
+    return pred_key, ref_key
+
+
+def _finite_row_mask(pred_key: torch.Tensor, ref_key: torch.Tensor) -> torch.Tensor:
+    finite = torch.isfinite(pred_key) & torch.isfinite(ref_key)
+    if finite.ndim == 0:
+        return finite.reshape(1)
+    if finite.ndim > 1:
+        finite = finite.reshape(finite.shape[0], -1).all(dim=1)
+    return finite
+
+
+def resolve_node_type_indices(params: dict, owner: str) -> Optional[torch.Tensor]:
+    node_type_indices = params.get("node_type_indices", None)
+    node_type_names = params.get("node_type_names", None)
+    type_names = params.get("type_names", None)
+
+    if node_type_indices is not None and node_type_names is not None:
+        raise ValueError("Specify only one of `node_type_indices` or `node_type_names`.")
+
+    if node_type_indices is not None:
+        if isinstance(node_type_indices, (int, str)):
+            node_type_indices = [node_type_indices]
+        return torch.tensor([int(v) for v in node_type_indices], dtype=torch.long)
+
+    if node_type_names is None:
+        return None
+
+    if type_names is None:
+        raise ValueError(
+            f"`node_type_names` was provided for a {owner}, but no `type_names` list was found in the {owner} parameters. "
+            "Add `type_names` next to the entry or use `node_type_indices` instead."
+        )
+    if isinstance(node_type_names, str):
+        node_type_names = [node_type_names]
+    if isinstance(type_names, str):
+        type_names = [type_names]
+    type_name_to_idx = {str(name): idx for idx, name in enumerate(type_names)}
+    missing = [name for name in node_type_names if str(name) not in type_name_to_idx]
+    if missing:
+        raise ValueError(
+            f"Unknown node type names in {owner} filter: {missing}. Available type names: {list(type_name_to_idx.keys())}"
+        )
+    return torch.tensor([type_name_to_idx[str(name)] for name in node_type_names], dtype=torch.long)
+
+
+def prepare_target(
+    *,
+    pred: dict,
+    ref: dict,
+    key: str,
+    pred_key_name: str,
+    pred_key: torch.Tensor,
+    ref_key: torch.Tensor,
+    node_type_indices: Optional[torch.Tensor] = None,
+    node_mask_field: Optional[str] = None,
+    node_level_filter: object = "auto",
+    ignore_nan: bool = False,
+    denormalize: bool = False,
+    normalization_fields: Optional[Dict[str, Dict]] = None,
+) -> PreparedTarget:
+    """Build and apply one row mask for a loss/metric target."""
+    ref = {} if ref is None else ref
+    node_data = pred if AtomicDataDict.EDGE_INDEX_KEY in pred else ref
+    center_nodes = _center_nodes(node_data)
+
+    pred_key, ref_key = _align_pred_ref_rows(pred_key, ref_key, key, center_nodes)
+    if ref_key.shape != pred_key.shape:
+        try:
+            ref_key = ref_key.reshape(pred_key.shape)
+        except Exception:
+            pass
+
+    row_count = _row_count(pred_key)
+    if row_count is None:
+        prepared_pred = dict(pred)
+        prepared_ref = dict(ref)
+        prepared_pred[pred_key_name] = pred_key
+        prepared_ref[key] = ref_key
+        return PreparedTarget(prepared_pred, prepared_ref, pred_key, ref_key)
+
+    masks = []
+    node_types = None
+    apply_center_filter = (
+        key in _NODE_FIELDS
+        and (node_level_filter is True or node_level_filter == "auto")
+    )
+    if (
+        apply_center_filter
+        and center_nodes is not None
+        and center_nodes.numel() < row_count
+        and center_nodes.numel() > 0
+        and int(center_nodes.max().item()) < row_count
+    ):
+        center_mask = torch.zeros(row_count, dtype=torch.bool, device=pred_key.device)
+        center_mask[center_nodes.to(device=pred_key.device)] = True
+        masks.append(center_mask)
+
+    if key in _NODE_FIELDS and (AtomicDataDict.NODE_TYPE_KEY in pred or AtomicDataDict.NODE_TYPE_KEY in ref):
+        node_type_source = pred if AtomicDataDict.NODE_TYPE_KEY in pred else ref
+        node_types = _align_rows(
+            node_type_source[AtomicDataDict.NODE_TYPE_KEY].squeeze(-1),
+            row_count,
+            center_nodes,
+        )
+
+    if node_type_indices is not None:
+        if node_types is None:
+            raise ValueError(
+                f"Cannot apply node type filter for '{key}': node_types could not be aligned to {row_count} rows."
+            )
+        masks.append(torch.isin(node_types, node_type_indices.to(node_types.device)))
+
+    if node_mask_field is not None:
+        mask_source = pred if node_mask_field in pred else ref
+        if node_mask_field in mask_source:
+            node_mask = mask_source[node_mask_field]
+            if not torch.is_tensor(node_mask):
+                node_mask = torch.as_tensor(node_mask, device=pred_key.device)
+            node_mask = _align_rows(node_mask.to(device=pred_key.device, dtype=torch.bool).squeeze(-1), row_count, center_nodes)
+            if node_mask is None:
+                raise ValueError(
+                    f"Cannot apply node mask field '{node_mask_field}' for '{key}': mask could not be aligned to {row_count} rows."
+                )
+            masks.append(node_mask)
+
+    if ignore_nan:
+        masks.append(_finite_row_mask(pred_key, ref_key))
+
+    final_mask = None
+    if masks:
+        final_mask = masks[0].to(device=pred_key.device, dtype=torch.bool)
+        for mask in masks[1:]:
+            final_mask = final_mask & mask.to(device=pred_key.device, dtype=torch.bool)
+        pred_key = pred_key[final_mask]
+        ref_key = ref_key[final_mask]
+        if node_types is not None:
+            node_types = node_types.to(device=final_mask.device)[final_mask]
+
+    prepared_pred = dict(pred)
+    prepared_ref = dict(ref)
+    prepared_pred[pred_key_name] = pred_key
+    prepared_ref[key] = ref_key
+    if node_types is not None:
+        node_types = node_types.to(device=pred_key.device)
+        prepared_pred[AtomicDataDict.NODE_TYPE_KEY] = node_types.reshape(-1, 1)
+        prepared_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types.reshape(-1, 1)
+
+    if denormalize:
+        normalization_fields = normalization_fields or {}
+        spec = normalization_fields.get(key, {})
+        pred_key = denormalize_tensor(pred_key.clone(), prepared_ref, key, spec)
+        ref_key = denormalize_tensor(ref_key.clone(), prepared_ref, key, spec)
+        prepared_pred[pred_key_name] = pred_key
+        prepared_ref[key] = ref_key
+
+    return PreparedTarget(prepared_pred, prepared_ref, pred_key, ref_key, node_types, final_mask)
+
 
 def ensemble_predictions_and_targets(predictions, targets, ensemble_indices, aggregation_fn=scatter_sum):
     ''' checks whether field has already been ensembled, if not, ensembles it using ensemble_indices and the specified aggregation_fn'''
@@ -46,6 +266,8 @@ class LossWrapper:
 
         self.ignore_nan = self.params.pop("ignore_nan", False)
         self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
+        self.node_mask_field = self.params.pop("node_mask_field", self.params.pop("node_mask_key", None))
+        self.node_type_indices = self._resolve_node_type_indices()
 
         # New: Handle deep supervision parameters
         self.supervision_weights = self.params.pop("supervision_weights", None)
@@ -70,6 +292,13 @@ class LossWrapper:
             torch.nn, class_name=func_name, prefix="",
             positional_args=dict(reduction="none"), optional_args=torch_params, all_args={},
         )
+
+    def _resolve_node_type_indices(self) -> Optional[torch.Tensor]:
+        out = resolve_node_type_indices(self.params, "loss")
+        self.params.pop("node_type_indices", None)
+        self.params.pop("node_type_names", None)
+        self.params.pop("type_names", None)
+        return out
     
     def _get_pred_key_name(self, base_key: str) -> str:
         """Determines the correct prediction key based on whether deep supervision is used."""
@@ -119,25 +348,61 @@ class LossWrapper:
                 except: pass
         return ref_key
 
-    def _apply_node_filter(self, pred_key: torch.Tensor, ref_key: torch.Tensor, data: dict, key: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Filters tensors to include only center nodes if the key is a node-level property."""
-        apply_filter = False
-        if self.node_level_filter is True:
-            apply_filter = True
-        elif self.node_level_filter == 'auto' and key in _NODE_FIELDS:
-            apply_filter = True
+    def _resolve_node_mask(self, pred: dict, ref: dict):
+        if self.node_mask_field is None:
+            return None
 
-        if apply_filter:
-            num_atoms = data.get(AtomicDataDict.POSITIONS_KEY).shape[0]
-            center_nodes_idx = data[AtomicDataDict.EDGE_INDEX_KEY][0].unique()
-            if pred_key.shape[0] == num_atoms:
-                pred_key = pred_key[center_nodes_idx]
-            if ref_key.shape[0] == num_atoms:
-                ref_key = ref_key[center_nodes_idx]
-        return pred_key, ref_key
+        mask_source = pred if self.node_mask_field in pred else ref
+        if self.node_mask_field not in mask_source:
+            return None
+
+        node_mask = mask_source[self.node_mask_field]
+        if not torch.is_tensor(node_mask):
+            node_mask = torch.as_tensor(node_mask)
+        node_mask = node_mask.to(dtype=torch.bool)
+        if node_mask.ndim > 1:
+            node_mask = node_mask.squeeze(-1)
+        return node_mask
+
+    def _apply_node_filter(
+        self,
+        pred_key: torch.Tensor,
+        ref_key: torch.Tensor,
+        pred: dict,
+        ref: dict = None,
+        key: str = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compatibility wrapper around the shared target preparation helper."""
+        if key is None:
+            if isinstance(ref, str):
+                key = ref
+                ref = pred
+                pred = {}
+            else:
+                raise TypeError(
+                    "_apply_node_filter expected either (pred_key, ref_key, pred, ref, key) "
+                    "or legacy (pred_key, ref_key, ref, key) arguments."
+                )
+
+        prepared = prepare_target(
+            pred=pred,
+            ref=ref,
+            key=key,
+            pred_key_name=key,
+            pred_key=pred_key,
+            ref_key=ref_key,
+            node_type_indices=self.node_type_indices,
+            node_mask_field=self.node_mask_field,
+            node_level_filter=self.node_level_filter,
+            ignore_nan=False,
+            denormalize=False,
+        )
+        return prepared.pred_key, prepared.ref_key
 
     def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
         """Computes the loss, handling NaNs and applying supervision weights."""
+        if pred_key.numel() == 0:
+            return graph_zero_like(pred_key) if mean else pred_key
         if self.ignore_nan:
             not_nan_mask = torch.isfinite(pred_key) & torch.isfinite(ref_key)
             pred_key = torch.nan_to_num(pred_key, nan=0.0)
@@ -174,27 +439,37 @@ class LossWrapper:
         normalization_fields: Dict[str, Dict] = None,
         **kwargs,
     ):
-        # 1. Determine prediction key and prepare tensors
         pred_key_name = self._get_pred_key_name(key)
-        pred_key, ref_key = self._prepare_tensors(
-            pred=pred,
-            ref=ref,
-            pred_key_name=pred_key_name,
-            ref_key_name=key,
-            mean=mean,
-            normalization_fields=normalization_fields,
-        )
+        pred_key = pred.get(pred_key_name)
+        assert isinstance(pred_key, torch.Tensor), f"Prediction for '{pred_key_name}' not a tensor."
+        ref_key = ref.get(key)
+        assert isinstance(ref_key, torch.Tensor), f"Reference for '{key}' not a tensor."
 
-        # 2. Initialize supervision weights if needed
         self._initialize_supervision_weights(pred_key.device, pred_key.dtype)
-
-        # 3. Ensure reference and prediction shapes are compatible
         ref_key = self._handle_supervision_shapes(pred_key, ref_key, pred_key_name, key)
 
-        # 4. Apply node-level filtering if necessary
-        pred_key, ref_key = self._apply_node_filter(pred_key, ref_key, pred, key)
+        if not kwargs.get("skip_target_filter", False):
+            prepared = prepare_target(
+                pred=pred,
+                ref=ref,
+                key=key,
+                pred_key_name=pred_key_name,
+                pred_key=pred_key,
+                ref_key=ref_key,
+                node_type_indices=self.node_type_indices,
+                node_mask_field=self.node_mask_field,
+                node_level_filter=self.node_level_filter,
+                ignore_nan=self.ignore_nan,
+                denormalize=not mean,
+                normalization_fields=normalization_fields,
+            )
+            pred_key, ref_key = prepared.pred_key, prepared.ref_key
+        elif not mean:
+            normalization_fields = normalization_fields or {}
+            spec = normalization_fields.get(key, {})
+            pred_key = denormalize_tensor(pred_key.clone(), ref, key, spec)
+            ref_key = denormalize_tensor(ref_key.clone(), ref, key, spec)
 
-        # 5. Calculate and return the loss
         return self._calculate_loss(pred_key, ref_key, mean)
 
     def _prepare_tensors(
@@ -238,6 +513,8 @@ class LogCoshLoss(LossWrapper):
         self.func_name = "LogCoshLoss"
 
     def _calculate_loss(self, pred_key: torch.Tensor, ref_key: torch.Tensor, mean: bool) -> torch.Tensor:
+        if pred_key.numel() == 0:
+            return graph_zero_like(pred_key) if mean else pred_key
         diff = (pred_key - ref_key) / self.beta
         abs_diff = torch.abs(diff)
         log_cosh = self.beta * self.beta * (
@@ -327,7 +604,7 @@ class FocalLossBinaryAccuracy:
 
     def __call__(self, pred: dict, ref: dict, key: str, mean: bool = True, **kwargs):
         logits = pred[key]
-        target = ref[key].float()
+        target = ref[key].to(dtype=logits.dtype)
 
         bce_loss = self.bce(logits, target)
         p_t = torch.exp(-bce_loss) # This is p if target=1, and 1-p if target=0

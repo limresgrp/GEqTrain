@@ -4,12 +4,11 @@ import re
 from typing import Union, List, Dict
 
 import torch
-from geqtrain.train._loss import StatefulMetric
+from geqtrain.train._loss import LossWrapper, StatefulMetric, graph_zero_like, prepare_target, resolve_node_type_indices
 from geqtrain.train.utils import parse_loss_metrics_dict
 from ._key import ABBREV
 
 from geqtrain.utils.torch_runstats._runstats import RunningStats, Reduction
-from geqtrain.train import LossWrapper
 
 
 def _instantiate_from_path(path: str):
@@ -31,6 +30,8 @@ class Loss:
         self.coeffs: Dict[str, torch.Tensor] = {}
         self.funcs: Dict[str, torch.nn.Module] = {}
         self.func_params: Dict[str, dict] = {}
+        self.target_filters: Dict[str, dict] = {}
+        self.target_keys: Dict[str, str] = {}
         self.key_pattern = r"\_\d+"
 
         self._parse_components_from_yaml(components)
@@ -45,16 +46,50 @@ class Loss:
         total_loss = 0.0
         contributions = {}
         for key in self.keys:
-            clean_key = self.remove_suffix(key)
+            clean_key = self.get_target_key(key)
             try:
-                loss_val = self.funcs[key](
-                    pred=pred,
-                    ref=ref,
-                    key=clean_key,
-                    mean=True,
-                    normalization_fields=normalization_fields,
-                    **kwargs,
-                )
+                func = self.funcs[key]
+                prepared_pred, prepared_ref = pred, ref
+                prepared = None
+                pred_key_name = clean_key
+                if isinstance(func, LossWrapper):
+                    pred_key_name = func._get_pred_key_name(clean_key)
+                if pred_key_name in pred and clean_key in ref:
+                    pred_key = pred[pred_key_name]
+                    ref_key = ref[clean_key]
+                    if isinstance(func, LossWrapper):
+                        func._initialize_supervision_weights(pred_key.device, pred_key.dtype)
+                        ref_key = func._handle_supervision_shapes(pred_key, ref_key, pred_key_name, clean_key)
+                    target_filter = self.target_filters.get(key, {})
+                    prepared = prepare_target(
+                        pred=pred,
+                        ref=ref,
+                        key=clean_key,
+                        pred_key_name=pred_key_name,
+                        pred_key=pred_key,
+                        ref_key=ref_key,
+                        node_type_indices=target_filter.get("node_type_indices"),
+                        node_mask_field=target_filter.get("node_mask_field"),
+                        node_level_filter=target_filter.get("node_level_filter", "auto"),
+                        ignore_nan=target_filter.get("ignore_nan", False),
+                        denormalize=False,
+                    )
+                    prepared_pred, prepared_ref = prepared.pred, prepared.ref
+
+                if prepared is not None and prepared.pred_key.numel() == 0:
+                    loss_val = graph_zero_like(prepared.pred_key)
+                else:
+                    call_kwargs = dict(
+                        pred=prepared_pred,
+                        ref=prepared_ref,
+                        key=clean_key,
+                        mean=True,
+                        normalization_fields=normalization_fields,
+                        **kwargs,
+                    )
+                    if isinstance(func, LossWrapper):
+                        call_kwargs["skip_target_filter"] = True
+                    loss_val = func(**call_kwargs)
                 contributions[key] = loss_val.detach()
                 total_loss += self.coeffs[key].to(loss_val.device) * loss_val
             except Exception as e:
@@ -80,11 +115,14 @@ class Loss:
             raise NotImplementedError(f"loss_coeffs can only be str, list[str] or list[dict]. got {type(components)}")
 
     def register_coeffs_and_loss(self, key: str, coeff: float, func: str, func_params: dict = None):
-        key = self.suffix_key(key)
-        self.keys.append(key)
-        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.float32)
-
+        target_key = key
         func_params = {} if func_params is None else dict(func_params)
+        display_name = func_params.pop("name", func_params.pop("loss_name", None))
+        key = self.suffix_key(str(display_name) if display_name is not None else target_key)
+        self.keys.append(key)
+        self.target_keys[key] = target_key
+        self.coeffs[key] = torch.as_tensor(coeff, dtype=torch.get_default_dtype())
+
         instance = None
         # 1. Check for a standard torch.nn loss without relying on exceptions.
         torch_cls = getattr(torch.nn, func, None) if isinstance(func, str) else None
@@ -111,6 +149,16 @@ class Loss:
 
         self.funcs[key] = instance
         self.func_params[key] = func_params
+        self.target_filters[key] = self._extract_target_filter(func_params)
+
+    def _extract_target_filter(self, func_params: dict) -> dict:
+        params = {} if func_params is None else dict(func_params)
+        return {
+            "node_type_indices": resolve_node_type_indices(params, "loss"),
+            "node_mask_field": params.get("node_mask_field", params.get("node_mask_key", None)),
+            "node_level_filter": params.get("node_level_filter", "auto"),
+            "ignore_nan": bool(params.get("ignore_nan", False)),
+        }
 
     def suffix_key(self, key):
         suffix_id = 0
@@ -123,6 +171,9 @@ class Loss:
 
     def remove_suffix(self, key):
         return re.sub(self.key_pattern, '', key)
+
+    def get_target_key(self, key):
+        return self.target_keys.get(key, self.remove_suffix(key))
 
     def add_suffix(self, key: str, suffix_id: int):
         if re.search(self.key_pattern, key):

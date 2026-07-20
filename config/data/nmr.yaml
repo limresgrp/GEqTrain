@@ -1,0 +1,111 @@
+# @package _global_
+dataset_num_workers: 1
+
+train_dataset_list:
+  - dataset: npz
+    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/train.npz
+    key_mapping:
+      pos: pos
+      pos__mask__: pos__mask__
+      atom_types: node_types
+      atom_types__mask__: node_types__mask__
+      atom_rows: atom_rows
+      atom_rows__mask__: atom_rows__mask__
+      atom_cols: atom_cols
+      atom_cols__mask__: atom_cols__mask__
+      cs_iso: cs_iso
+      cs_iso__mask__: cs_iso__mask__
+      cs_tensor_spherical: cs_tensor
+      cs_tensor_spherical__mask__: cs_tensor__mask__
+      center_atoms_mask: center_atoms_mask
+      center_atoms_mask__mask__: center_atoms_mask__mask__
+      Lattice: cell
+
+validation_dataset_list:
+  - dataset: npz
+    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/valid.npz
+    key_mapping:
+      pos: pos
+      pos__mask__: pos__mask__
+      atom_types: node_types
+      atom_types__mask__: node_types__mask__
+      atom_rows: atom_rows
+      atom_rows__mask__: atom_rows__mask__
+      atom_cols: atom_cols
+      atom_cols__mask__: atom_cols__mask__
+      cs_iso: cs_iso
+      cs_iso__mask__: cs_iso__mask__
+      cs_tensor_spherical: cs_tensor
+      cs_tensor_spherical__mask__: cs_tensor__mask__
+      center_atoms_mask: center_atoms_mask
+      center_atoms_mask__mask__: center_atoms_mask__mask__
+      Lattice: cell
+
+test_dataset_list:
+  - dataset: npz
+    dataset_input: /home/angiod@usi.ch/GEqTrain/tutorial/chemical_shift_prediction/test.npz
+    key_mapping:
+      pos: pos
+      pos__mask__: pos__mask__
+      atom_types: node_types
+      atom_types__mask__: node_types__mask__
+      atom_rows: atom_rows
+      atom_rows__mask__: atom_rows__mask__
+      atom_cols: atom_cols
+      atom_cols__mask__: atom_cols__mask__
+      cs_iso: cs_iso
+      cs_iso__mask__: cs_iso__mask__
+      cs_tensor_spherical: cs_tensor
+      cs_tensor_spherical__mask__: cs_tensor__mask__
+      center_atoms_mask: center_atoms_mask
+      center_atoms_mask__mask__: center_atoms_mask__mask__
+      Lattice: cell
+
+node_fields:
+  - atom_rows
+  - atom_cols
+  - cs_iso
+  - cs_tensor
+  - center_atoms_mask
+
+extra_fixed_fields:
+  pbc: [true, true, true]
+
+normalization:
+  cs_iso:
+    mode: per_type:1x0e
+    transform: yeo_johnson
+    grid_min: -3
+    grid_max: 3
+    grid_steps: 151
+  cs_tensor:
+    mode: per_type:1x1o+1x2e
+    transform: yeo_johnson
+    grid_min: -3
+    grid_max: 3
+    grid_steps: 151
+
+type_names:
+  - X
+  - H
+  - He
+  - Li
+  - Be
+  - B
+  - C
+  - N
+  - O
+  - F
+  - Ne
+  - Na
+  - Mg
+  - Al
+  - Si
+  - P
+  - S
+  - Cl
+  - Ar
+  - K
+  - Ca
+
+avg_num_neighbors: 96.12

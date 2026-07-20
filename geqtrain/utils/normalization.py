@@ -241,8 +241,8 @@ def _estimate_yeo_johnson_lambda(values: torch.Tensor, transform_cfg: Dict[str, 
         flat = flat[idx]
 
     arr = flat.to(dtype=torch.float64).cpu().numpy()
-    grid_min = float(transform_cfg.get("grid_min", -2.0))
-    grid_max = float(transform_cfg.get("grid_max", 2.0))
+    grid_min = float(transform_cfg.get("grid_min", -3.0))
+    grid_max = float(transform_cfg.get("grid_max", 3.0))
     grid_steps = int(transform_cfg.get("grid_steps", 121))
     lambdas = np.linspace(grid_min, grid_max, grid_steps, dtype=np.float64)
 
@@ -439,7 +439,7 @@ def serialize_transform_params(field: str, transform_cfg: Dict[str, Any]) -> Dic
     if cfg["name"] == "yeo_johnson":
         out[get_transform_param_key(field, "lambda")] = torch.tensor(
             float(cfg.get("lambda", 1.0)),
-            dtype=torch.float32,
+            dtype=torch.get_default_dtype(),
         )
     return out
 

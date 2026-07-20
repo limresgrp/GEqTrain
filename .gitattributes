@@ -1,0 +1,1 @@
+tutorial/chemical_shift_prediction/*.xyz filter=lfs diff=lfs merge=lfs -text
