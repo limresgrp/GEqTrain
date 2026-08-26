@@ -83,6 +83,29 @@ def test_readout_split_in_split_out_with_conditioning():
     # Check that total_conditioning_dim matches what we expect
     assert readout.total_conditioning_dim == o3.Irreps("3x0e").dim
 
+
+def test_readout_graph_attrs_conditioning_broadcasts_per_graph():
+    irreps_in = {
+        "node_features": "4x0e+1x1o",
+        AtomicDataDict.GRAPH_ATTRS_KEY: "3x0e",
+    }
+    readout = ReadoutModule(
+        irreps_in=irreps_in,
+        field="node_features",
+        out_field="node_features_out",
+        out_irreps="4x0e+1x1o",
+        conditioning_fields=[AtomicDataDict.GRAPH_ATTRS_KEY],
+        readout_latent_kwargs={"mlp_latent_dimensions": [8]},
+    )
+
+    num_atoms = 5
+    data = _dummy_atomic_dict(num_atoms=num_atoms, irreps_in={"node_features": "4x0e+1x1o"})
+    data[AtomicDataDict.BATCH_KEY] = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+    data[AtomicDataDict.GRAPH_ATTRS_KEY] = o3.Irreps("3x0e").randn(2, -1)
+
+    out = readout(data)
+    assert out["node_features_out"].shape == (num_atoms, readout.irreps_out["node_features_out"].dim)
+
 def test_readout_resnet_behaves_near_identity():
     irreps_in = { "feat": "4x0e+1x1o" }
     readout = ReadoutModule(

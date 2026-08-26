@@ -14,6 +14,7 @@ from geqtrain.data import (
     AtomicDataDict,
     _NODE_FIELDS,
     _EDGE_FIELDS,
+    _GRAPH_FIELDS,
 )
 from geqtrain.nn import (
     GraphModuleMixin,
@@ -223,11 +224,20 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         # --- Conditioning Tensor Dimension Calculation ---
         self.edge_conditioning_dim = 0
         for field in self.conditioning_fields:
-            dim = self.irreps_in[field].dim
+            cond_irreps = self.irreps_in[field]
+            if not all(ir.l == 0 for _, ir in cond_irreps):
+                raise ValueError(
+                    f"Conditioning field '{field}' must have scalar (0e) irreps, but got {cond_irreps}."
+                )
+            dim = cond_irreps.dim
             if field in _NODE_FIELDS:
                 self.edge_conditioning_dim += 2 * dim
             elif field in _EDGE_FIELDS:
                 self.edge_conditioning_dim += dim
+            elif field in _GRAPH_FIELDS:
+                self.edge_conditioning_dim += dim
+            else:
+                raise ValueError(f"Conditioning field '{field}' must be a registered graph/node/edge field.")
 
         # --- Define network architecture based on final irreps ---
         # 1. Build list of irreps for initial equivariant latent
@@ -274,6 +284,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         self.initial_latent_generator = EquivariantScalarMLP(
             in_irreps=(initial_scalar_latent_dim, initial_equiv_latent_irreps),
             out_irreps=(latent_dim, equiv_latent_irreps),
+            conditioning_dim=self.edge_conditioning_dim,
             latent_module=latent_module,
             latent_kwargs=latent_module_kwargs,
             equiv_linear_module=SO3_Linear,
@@ -425,20 +436,21 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
         if self.eq_concat_permutation is not None:
             initial_equiv_latent = initial_equiv_latent[:, self.eq_concat_permutation]
 
+        # Prepare conditioning tensors for edge-level MLPs.
+        _, edge_conditioning = prepare_conditioning_tensors(
+            data=data,
+            conditioning_fields=self.conditioning_fields,
+        )
+
         # === 2. Generate Initial Latent State ===
         init_out = self.initial_latent_generator(
             (initial_scalar_latent, initial_equiv_latent),
+            edge_conditioning,
         )
         if torch.jit.isinstance(init_out, Tuple[torch.Tensor, torch.Tensor]):
             scalar_state, equiv_state = init_out
         else:
             raise RuntimeError("initial_latent_generator must return scalar and equivariant tensors.")
-
-        # Prepare conditioning tensors for interaction layers
-        _, edge_conditioning = prepare_conditioning_tensors(
-            data=data,
-            conditioning_fields=self.conditioning_fields,
-        )
 
         scalar_state, equiv_state = self._run_interaction_stack(
             data=data,
@@ -449,7 +461,7 @@ class InteractionModule(GraphModuleMixin, torch.nn.Module):
             layer_update_coefficients=layer_update_coefficients,
         )
 
-        final_out = self.final_projection((scalar_state, equiv_state))
+        final_out = self.final_projection((scalar_state, equiv_state), edge_conditioning)
         if torch.jit.isinstance(final_out, torch.Tensor):
             data[self.out_field] = final_out
         else:
