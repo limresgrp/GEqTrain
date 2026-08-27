@@ -11,11 +11,35 @@ from e3nn import o3
 from e3nn.util.jit import compile
 from e3nn.util import prod
 from e3nn.o3 import Instruction
+import e3nn.o3._wigner as _e3nn_wigner
 
 from opt_einsum_fx import jitable, optimize_einsums_full
 
 from ._layout import StridedLayout
 from ._spmm import ExplicitGradSpmm
+
+
+def _safe_wigner_3j(l1: int, l2: int, l3: int) -> torch.Tensor:
+    """Build Wigner-3j coefficients, retrying e3nn's occasionally unstable cache path."""
+    last_error = None
+    for _ in range(16):
+        original_num_threads = torch.get_num_threads()
+        try:
+            torch.set_num_threads(1)
+            return o3.wigner_3j(l1, l2, l3)
+        except AssertionError as exc:
+            last_error = exc
+            for cached_fn_name in ("_so3_clebsch_gordan", "_su2_clebsch_gordan", "_su2_clebsch_gordan_coeff"):
+                cached_fn = getattr(_e3nn_wigner, cached_fn_name, None)
+                cache_clear = getattr(cached_fn, "cache_clear", None)
+                if cache_clear is not None:
+                    cache_clear()
+        finally:
+            torch.set_num_threads(original_num_threads)
+    raise RuntimeError(
+        f"e3nn failed to construct real Wigner-3j coefficients for "
+        f"(l1={l1}, l2={l2}, l3={l3}) after repeated retries."
+    ) from last_error
 
 
 def codegen_strided_tensor_product_forward(
@@ -116,7 +140,7 @@ def codegen_strided_tensor_product_forward(
         if mul_ir_in1.dim == 0 or mul_ir_in2.dim == 0 or mul_ir_out.dim == 0:
             raise ValueError
 
-        this_w3j = o3.wigner_3j(mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l)
+        this_w3j = _safe_wigner_3j(mul_ir_in1.ir.l, mul_ir_in2.ir.l, mul_ir_out.ir.l)
         this_w3j_index = this_w3j.nonzero()
         w3j_values.append(
             this_w3j[this_w3j_index[:, 0], this_w3j_index[:, 1], this_w3j_index[:, 2]]
