@@ -269,3 +269,32 @@ def test_interaction_module_deployable(config, tmp_path):
     data_in, _ = _create_dummy_data(config, device)
 
     assert_module_deployable(model, (data_in,), tmp_path=tmp_path)
+
+
+def test_interaction_module_graph_attrs_conditioning_forward():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    config = {
+        "name": "with_graph_attrs_conditioning_l1",
+        "params": {
+            "num_layers": 2,
+            "latent_dim": 16,
+            "eq_latent_multiplicity": 4,
+            "conditioning_fields": [AtomicDataDict.GRAPH_ATTRS_KEY],
+        },
+        "irreps_in": {
+            AtomicDataDict.NODE_ATTRS_KEY: "8x0e",
+            AtomicDataDict.EDGE_RADIAL_EMB_KEY: "4x0e",
+            AtomicDataDict.EDGE_SPHARMS_EMB_KEY: "1x0e+1x1o",
+            AtomicDataDict.GRAPH_ATTRS_KEY: "3x0e",
+        },
+    }
+    model = InteractionModule(irreps_in=config["irreps_in"], **config["params"]).to(device)
+    data_in, num_edges = _create_dummy_data(config, device)
+
+    out = model(data_in)
+
+    assert AtomicDataDict.EDGE_FEATURES_KEY in out
+    assert out[AtomicDataDict.EDGE_FEATURES_KEY].shape == (
+        num_edges,
+        model.irreps_out[AtomicDataDict.EDGE_FEATURES_KEY].dim,
+    )

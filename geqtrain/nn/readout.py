@@ -20,6 +20,7 @@ from geqtrain.utils._model_utils import build_concatenation_permutation
 @compile_mode("script")
 class ReadoutModule(GraphModuleMixin, nn.Module):
     conditioning_fields: List[str]
+    conditioning_is_graph: List[bool]
     _equiv_flat_multiplicities: List[int]
     _equiv_flat_dims: List[int]
     """
@@ -110,6 +111,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         self._has_equivariant_out_field = self.equivariant_out_field is not None
 
         self.conditioning_fields = conditioning_fields if conditioning_fields is not None else []
+        self.conditioning_is_graph = []
         self.ignore_amp = ignore_amp
         self.resnet = resnet
         self.normalize_equivariant_output = bool(normalize_equivariant_output)
@@ -214,6 +216,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
             if not all(ir.l == 0 for _, ir in cond_irreps):
                 raise ValueError(f"Conditioning field '{cond_field}' must have scalar (0e) irreps, but got {cond_irreps}.")
             self.total_conditioning_dim += cond_irreps.dim
+            self.conditioning_is_graph.append(cond_field in _GRAPH_FIELDS)
 
         # --- Core Processing Module ---
         self.processor = EquivariantScalarMLP(
@@ -252,6 +255,7 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
         # --- 1. Prepare inputs for EquivariantScalarMLP ---
         if self.input_mode == "single":
             features = data[self.field]
+            feature_count = features.shape[0]
         else: # "split"
             if self.invariant_field is None or self.equivariant_field is None:
                 raise ValueError("Split input requires both invariant_field and equivariant_field.")
@@ -261,16 +265,42 @@ class ReadoutModule(GraphModuleMixin, nn.Module):
                 data[self.invariant_field],
                 data[self.equivariant_field],
             )
+            feature_count = features[0].shape[0]
 
         conditioning_tensor: Optional[torch.Tensor] = None
         if len(self.conditioning_fields) > 0:
-            conditioning_tensor_list = [data[f] for f in self.conditioning_fields]
+            conditioning_tensor_list: List[torch.Tensor] = []
+            for i in range(len(self.conditioning_fields)):
+                field = self.conditioning_fields[i]
+                is_graph_field = self.conditioning_is_graph[i]
+                cond = data[field]
+                if cond.dim() == 1:
+                    cond = cond.unsqueeze(0) if is_graph_field else cond.unsqueeze(-1)
+                if cond.shape[0] == feature_count:
+                    conditioning_tensor_list.append(cond)
+                elif is_graph_field:
+                    if AtomicDataDict.BATCH_KEY not in data:
+                        if cond.shape[0] == 1:
+                            conditioning_tensor_list.append(cond.expand(feature_count, -1))
+                        else:
+                            raise ValueError(
+                                f"Graph conditioning field '{field}' has {cond.shape[0]} rows, "
+                                "but no batch vector is available for broadcasting."
+                            )
+                    else:
+                        batch = data[AtomicDataDict.BATCH_KEY].to(device=cond.device, dtype=torch.long).squeeze(-1)
+                        if cond.shape[0] == 1:
+                            conditioning_tensor_list.append(cond.expand(feature_count, -1))
+                        else:
+                            conditioning_tensor_list.append(cond[batch])
+                elif cond.shape[0] == 1:
+                    conditioning_tensor_list.append(cond.expand(feature_count, -1))
+                else:
+                    raise ValueError(
+                        f"Conditioning field '{field}' has incompatible shape {cond.shape}; "
+                        f"expected first dimension {feature_count} or graph-level broadcastable data."
+                    )
             conditioning_tensor = torch.cat(conditioning_tensor_list, dim=-1)
-            # Broadcast graph-level conditioning to node-level if needed
-            if conditioning_tensor.shape[0] == 1 and self.input_mode == "single":
-                conditioning_tensor = conditioning_tensor.expand(features.shape[0], -1)
-            elif conditioning_tensor.shape[0] == 1 and self.input_mode == "split":
-                conditioning_tensor = conditioning_tensor.expand(features[0].shape[0], -1)
 
         # --- 2. Run the core processor ---
         # The processor can return a single tensor or a tuple

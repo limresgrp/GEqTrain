@@ -6,6 +6,7 @@ defaults:
 model:
   stack:
     - ${stack_blocks.node_input_attrs}
+    - ${stack_blocks.graph_input_attrs}
     - ${stack_blocks.edge_radial_attrs}
     - ${stack_blocks.edge_angular_attrs}
     - _target_: geqtrain.nn.EmbeddingAttrs

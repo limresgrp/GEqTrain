@@ -149,6 +149,12 @@ def prepare_conditioning_tensors(
     edge_neigh = data[AtomicDataDict.EDGE_INDEX_KEY][1]
     num_nodes = data[AtomicDataDict.POSITIONS_KEY].shape[0]
     num_edges = edge_center.shape[0]
+    batch = torch.jit.annotate(Optional[torch.Tensor], None)
+    if AtomicDataDict.BATCH_KEY in data:
+        batch = data[AtomicDataDict.BATCH_KEY].to(device=edge_center.device, dtype=torch.long).squeeze(-1)
+    else:
+        batch = torch.zeros((num_nodes,), device=edge_center.device, dtype=torch.long)
+    num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 1
 
     for field in conditioning_fields:
         # Not jittable if uncommented
@@ -160,13 +166,37 @@ def prepare_conditioning_tensors(
         #     raise ValueError(f"Conditioning field '{field}' must have scalar (l=0) irreps, but got {cond_irreps}.")
 
         tensor = data[field]
+        is_default_graph_field = (
+            field == AtomicDataDict.GRAPH_ATTRS_KEY
+            or field == AtomicDataDict.GRAPH_FEATURES_KEY
+        )
 
-        if len(tensor) == num_nodes:
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0) if is_default_graph_field else tensor.unsqueeze(-1)
+
+        if is_default_graph_field or len(tensor) == num_graphs or len(tensor) == 1:
+            graph_tensor = tensor
+            if graph_tensor.shape[0] == 1 and num_graphs > 1:
+                graph_tensor = graph_tensor.expand(num_graphs, -1)
+            if graph_tensor.shape[0] != num_graphs:
+                raise ValueError(
+                    f"Graph conditioning field '{field}' must have shape [num_graphs, D] "
+                    f"or [1, D]. Got {graph_tensor.shape}, num_graphs={num_graphs}."
+                )
+            node_cond_tensors.append(graph_tensor[batch])
+            edge_cond_tensors.append(graph_tensor[batch[edge_center]])
+        elif len(tensor) == num_nodes:
             node_cond_tensors.append(tensor)
             edge_cond_tensors.append(tensor[edge_center])
             edge_cond_tensors.append(tensor[edge_neigh])
         elif len(tensor) == num_edges:
             edge_cond_tensors.append(tensor)
+        else:
+            raise ValueError(
+                f"Conditioning field '{field}' has incompatible shape {tensor.shape}. "
+                f"Expected node-level ({num_nodes}), edge-level ({num_edges}), "
+                f"or graph-level ({num_graphs}) conditioning."
+            )
 
     node_conditioning = torch.cat(node_cond_tensors, dim=-1) if node_cond_tensors else None
     edge_conditioning = torch.cat(edge_cond_tensors, dim=-1) if edge_cond_tensors else None
