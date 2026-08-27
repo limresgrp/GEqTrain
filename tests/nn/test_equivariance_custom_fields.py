@@ -12,7 +12,7 @@ from geqtrain.nn import (
     SequentialGraphNetwork,
     SphericalHarmonicEdgeAngularAttrs,
 )
-from tests.utils.equivariance import assert_AtomicData_equivariant
+from geqtrain.utils.equivariance import assert_AtomicData_equivariant
 
 
 def _make_graph(num_nodes: int = 6, r_max: float = 5.0):

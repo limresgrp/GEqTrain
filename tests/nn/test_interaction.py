@@ -7,7 +7,7 @@ from e3nn import o3
 from geqtrain.data import AtomicData, AtomicDataDict
 from geqtrain.data.dataset import _NODE_FIELDS, _EDGE_FIELDS
 from geqtrain.nn import InteractionModule
-from tests.utils.equivariance import assert_AtomicData_equivariant
+from geqtrain.utils.equivariance import assert_AtomicData_equivariant
 
 # Common parameters for tests
 BATCH_SIZE = 1

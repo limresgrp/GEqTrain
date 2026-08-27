@@ -6,7 +6,7 @@ Original authors: Albert Musaelian
 import json
 import logging
 import os
-from typing import Any, Tuple, Union, Dict, Set, Sequence
+from typing import Any, Dict, Optional, Sequence, Set, Tuple, Union
 from collections.abc import Mapping
 
 import numpy as np
@@ -243,14 +243,73 @@ def process_and_filter_data(
     processed_kwargs = kwargs.copy()
     mask_keys = [key for key in processed_kwargs if key.endswith('__mask__')]
     
+    def _finite_row_mask(value: Any) -> Optional[np.ndarray]:
+        if isinstance(value, torch.Tensor):
+            if not torch.is_floating_point(value):
+                return None
+            finite = torch.isfinite(value).detach().cpu().numpy()
+        elif isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.floating):
+            finite = np.isfinite(value)
+        else:
+            return None
+        if finite.ndim == 0:
+            return np.asarray([bool(finite)])
+        if finite.ndim == 1:
+            return finite
+        return np.all(finite.reshape(finite.shape[0], -1), axis=1)
+
+    def _infer_discard_mask(mask_array: np.ndarray, data_to_filter: Any) -> np.ndarray:
+        row_mask = _get_row_mask(mask_array, data_to_filter.shape)
+        finite_rows = _finite_row_mask(data_to_filter)
+        if finite_rows is not None and finite_rows.shape == row_mask.shape:
+            # Some datasets store validity masks (True = valid) instead of numpy-style
+            # masks (True = discard). If finite values and True mask entries coincide,
+            # interpret the mask as a validity mask and discard the inverse.
+            true_matches_finite = np.count_nonzero(row_mask == finite_rows)
+            false_matches_finite = np.count_nonzero((~row_mask) == finite_rows)
+            if true_matches_finite > false_matches_finite and np.any(~finite_rows):
+                return ~row_mask
+        return row_mask
+
+    def _masked_with_nan(value: Any, discard_mask: np.ndarray) -> Any:
+        if isinstance(value, torch.Tensor):
+            if not torch.is_floating_point(value):
+                return value
+            out = value.clone()
+            out[torch.as_tensor(discard_mask, dtype=torch.bool, device=out.device)] = torch.nan
+            return out
+        if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.floating):
+            out = np.array(value, copy=True)
+            out[discard_mask] = np.nan
+            return out
+        return value
+
+    def _should_preserve_node_alignment(value: Any, discard_mask: np.ndarray) -> bool:
+        finite_rows = _finite_row_mask(value)
+        return (
+            finite_rows is not None
+            and finite_rows.shape == discard_mask.shape
+            and np.any(~finite_rows)
+            and np.array_equal(discard_mask, ~finite_rows)
+        )
+
     for mask_key in mask_keys:
         root_key = mask_key[:-8]
         mask_array = processed_kwargs[mask_key]
 
         if root_key in processed_kwargs:
             data_to_filter = processed_kwargs[root_key]
-            row_mask = _get_row_mask(mask_array, data_to_filter.shape)
-            processed_kwargs[root_key] = data_to_filter[~row_mask]
+            discard_mask = _infer_discard_mask(mask_array, data_to_filter)
+            if (
+                root_key != AtomicDataDict.POSITIONS_KEY
+                and root_key in _NODE_FIELDS
+                and AtomicDataDict.POSITIONS_KEY in processed_kwargs
+                and getattr(data_to_filter, "shape", (None,))[0] == processed_kwargs[AtomicDataDict.POSITIONS_KEY].shape[0]
+                and _should_preserve_node_alignment(data_to_filter, discard_mask)
+            ):
+                processed_kwargs[root_key] = _masked_with_nan(data_to_filter, discard_mask)
+            else:
+                processed_kwargs[root_key] = data_to_filter[~discard_mask]
         else:
             raise ValueError(
                 f"Mask key '{mask_key}' found, but its corresponding "
@@ -297,7 +356,8 @@ def _get_row_mask(mask: np.ndarray, data_shape: Tuple[int, ...]) -> np.ndarray:
 
     # For multi-dimensional masks, validate that each row is consistent
     # (all True or all False) as per the initial requirement.
-    is_row_valid = np.all(mask, axis=1) == np.any(mask, axis=1)
+    flat_mask = mask.reshape(mask.shape[0], -1)
+    is_row_valid = np.all(flat_mask, axis=1) == np.any(flat_mask, axis=1)
     if not np.all(is_row_valid):
         raise ValueError(
             "Invalid multi-dimensional mask: each row must contain "
@@ -306,7 +366,7 @@ def _get_row_mask(mask: np.ndarray, data_shape: Tuple[int, ...]) -> np.ndarray:
 
     # Collapse the ND mask into a 1D mask for row-wise filtering.
     # A row is masked if all its elements are True.
-    return np.all(mask, axis=1)
+    return np.all(flat_mask, axis=1)
 
 class AtomicData(Data):
     """A neighbor graph for points in real space.

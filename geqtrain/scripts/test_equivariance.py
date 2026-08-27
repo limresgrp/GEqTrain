@@ -14,7 +14,7 @@ from geqtrain.model import model_from_config
 from geqtrain.utils import load_config
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.utils import load_file
-from tests.utils.equivariance import assert_AtomicData_equivariant
+from geqtrain.utils.equivariance import assert_AtomicData_equivariant
 from geqtrain.utils._global_options import apply_global_config
 from geqtrain.scripts._logger import set_up_script_logger
 
