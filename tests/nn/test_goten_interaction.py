@@ -6,7 +6,7 @@ from e3nn import o3
 from geqtrain.data import AtomicData, AtomicDataDict
 from geqtrain.nn.goten import GotenInteractionModule
 from tests.utils.deployability import assert_module_deployable
-from tests.utils.equivariance import assert_AtomicData_equivariant
+from geqtrain.utils.equivariance import assert_AtomicData_equivariant
 
 
 def _clone_data_dict(data_dict):

@@ -63,6 +63,10 @@ def fix_batch_dim(arr):
     return arr
 
 
+def _base_mask_field(field: str) -> str:
+    return field[:-8] if isinstance(field, str) and field.endswith("__mask__") else field
+
+
 _NPZ_FRAME_BUILD_CONTEXT = {}
 
 
@@ -877,6 +881,7 @@ class AtomicInMemoryDataset(AtomicDataset):
             edge_fields  = {k:v for k,v in edge_fields.items()  if v is not None}
             graph_fields = {k:v for k,v in graph_fields.items() if v is not None}
             extra_fields = {k:v for k,v in extra_fields.items() if v is not None}
+            fixed_fields = {k:v for k,v in fixed_fields.items() if v is not None}
 
             all_keys = set(node_fields.keys()).union(edge_fields.keys()).union(graph_fields.keys()).union(extra_fields.keys()).union(fixed_fields.keys())
             assert len(all_keys) == len(node_fields) + len(edge_fields) + len(graph_fields) + len(extra_fields) + len(fixed_fields), "No overlap in keys between data and fixed_fields allowed!"
@@ -988,6 +993,14 @@ class AtomicInMemoryDataset(AtomicDataset):
                     ).to(entry[field].dtype)
 
             fixed_fields.update(serialize_transform_params(field, transform_cfg))
+            if field in fixed_fields:
+                fixed_fields[field] = data_list[0][field].detach().clone()
+
+        fixed_fields = {
+            field: value
+            for field, value in fixed_fields.items()
+            if not (isinstance(field, str) and field.endswith("__mask__"))
+        }
 
         # Batch it for efficient saving
         # This limits an AtomicInMemoryDataset to a maximum of LONG_MAX atoms _overall_, but that is a very big number and any dataset that large is probably not "InMemory" anyway
@@ -1000,8 +1013,10 @@ class AtomicInMemoryDataset(AtomicDataset):
         GLOBAL_PREFIX = "global"
 
         for field, spec in normalization_specs.items():
-            if field not in data:
+            field_is_batched = field in data
+            if not field_is_batched and field not in fixed_fields:
                 raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+            field_values = data[field] if field_is_batched else fixed_fields[field]
 
             mode = spec.get("mode")
             irreps_str = spec.get("irreps")
@@ -1035,17 +1050,18 @@ class AtomicInMemoryDataset(AtomicDataset):
                 self.means[field] = mean_vals_to_store.tolist()
                 self.stds[field] = std_vals.tolist()
                 
-                mean_tensor = mean_vals_to_store.to(dtype=data[field].dtype)
-                std_tensor = std_vals.to(dtype=data[field].dtype)
+                mean_tensor = mean_vals_to_store.to(dtype=field_values.dtype, device=field_values.device)
+                std_tensor = std_vals.to(dtype=field_values.dtype, device=field_values.device)
+                node_type_chunks = data_list if field_is_batched else data_list[:1]
                 node_types = torch.cat(
-                    [d[AtomicDataDict.NODE_TYPE_KEY] for d in data_list], dim=0
-                ).squeeze().to(dtype=torch.long, device=data[field].device)
+                    [d[AtomicDataDict.NODE_TYPE_KEY] for d in node_type_chunks], dim=0
+                ).squeeze().to(dtype=torch.long, device=field_values.device)
 
-                if node_types.shape[0] != data[field].shape[0]:
+                if node_types.shape[0] != field_values.shape[0]:
                     raise ValueError(
                         f"Per-type standardization for field '{field}' requires a node-level field "
                         f"with first dimension matching the number of nodes, but got "
-                        f"{data[field].shape[0]} values and {node_types.shape[0]} node types."
+                        f"{field_values.shape[0]} values and {node_types.shape[0]} node types."
                     )
 
                 if irreps:
@@ -1054,14 +1070,16 @@ class AtomicInMemoryDataset(AtomicDataset):
                     i = 0
                     for (mul, ir), slice in zip(irreps, irreps.slices()):
                         if ir.l == 0:
-                            data[field][:, slice] -= means_expanded[:, i:i+1]
-                            data[field][:, slice] /= stds_expanded[:, i:i+1]
+                            field_values[:, slice] -= means_expanded[:, i:i+1]
+                            field_values[:, slice] /= stds_expanded[:, i:i+1]
                         else: # l > 0, std-only scaling to preserve invertibility
-                            data[field][:, slice] /= stds_expanded[:, i:i+1]
+                            field_values[:, slice] /= stds_expanded[:, i:i+1]
                         i += 1
                 else:
-                    data[field] -= mean_tensor[node_types].view(data[field].shape)
-                    data[field] /= std_tensor[node_types].view(data[field].shape)
+                    field_values -= mean_tensor[node_types].view(field_values.shape)
+                    field_values /= std_tensor[node_types].view(field_values.shape)
+                if not field_is_batched:
+                    fixed_fields[field] = field_values
                 
                 # Store stats in fixed_fields
                 mean_key = f"{MEAN_KEY_PREFIX}.{PER_TYPE_PREFIX}.{field}"
@@ -1079,8 +1097,10 @@ class AtomicInMemoryDataset(AtomicDataset):
                     if irreps:
                         raise NotImplementedError("Global standardization for equivariant fields is not yet implemented.")
                     else:
-                        data[field] -= mean_val
-                        data[field] /= std_val
+                        field_values -= mean_val
+                        field_values /= std_val
+                        if not field_is_batched:
+                            fixed_fields[field] = field_values
 
                     # Store stats in fixed_fields
                     mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
@@ -1255,14 +1275,38 @@ class NpzDataset(AtomicInMemoryDataset):
                 if k not in mapped:
                     mapped[k] = None
 
+        pos_values = mapped.get(AtomicDataDict.POSITIONS_KEY)
+        num_frames_from_pos = (
+            pos_values.shape[0]
+            if pos_values is not None and hasattr(pos_values, "shape") and len(pos_values.shape) >= 2
+            else None
+        )
+
+        def has_frame_dimension(value: Any) -> bool:
+            return (
+                num_frames_from_pos is not None
+                and value is not None
+                and hasattr(value, "shape")
+                and len(value.shape) > 0
+                and value.shape[0] == num_frames_from_pos
+            )
+
+        def is_fixed_mapped_field(key: str, value: Any) -> bool:
+            base_key = _base_mask_field(key)
+            configured_fixed = (
+                self.node_attributes.get(base_key, {}).get('fixed', False)
+                or self.edge_attributes.get(base_key, {}).get('fixed', False)
+                or self.graph_attributes.get(base_key, {}).get('fixed', False)
+                or self.extra_attributes.get(base_key, {}).get('fixed', False)
+            )
+            if configured_fixed:
+                return True
+            return base_key in _FIXED_FIELDS and not has_frame_dimension(value)
+
         # note that we don't deal with extra_fixed_fields here; AtomicInMemoryDataset does that.
         fixed_fields = {
             k: fix_batch_dim(v) for k, v in mapped.items()
-            if  self.node_attributes.get(k, {}).get('fixed', False)
-            or  self.edge_attributes.get(k, {}).get('fixed', False)
-            or self.graph_attributes.get(k, {}).get('fixed', False)
-            or self.extra_attributes.get(k, {}).get('fixed', False)
-            or k in _FIXED_FIELDS
+            if is_fixed_mapped_field(k, v)
         }
 
         node_fields = {

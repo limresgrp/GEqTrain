@@ -6,7 +6,7 @@ from geqtrain.data import AtomicData, AtomicDataDict, _NODE_FIELDS, _EDGE_FIELDS
 from geqtrain.nn import EdgewiseReduce
 from geqtrain.utils.pytorch_scatter import scatter_sum
 from tests.utils.deployability import assert_module_deployable
-from tests.utils.equivariance import assert_AtomicData_equivariant
+from geqtrain.utils.equivariance import assert_AtomicData_equivariant
 
 
 def _create_dummy_data(irreps_in, num_nodes=6, device="cpu"):

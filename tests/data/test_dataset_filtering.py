@@ -304,3 +304,61 @@ def test_collater_treats_missing_optional_node_mask_as_all_true():
         assert "center_atoms_mask" in batch
         assert batch["center_atoms_mask"].shape == torch.Size([5, 1])
         assert torch.equal(batch["center_atoms_mask"].view(-1).to(torch.bool), expected)
+
+
+def test_fixed_node_target_mask_inherits_fixed_status_and_preserves_alignment(tmp_path):
+    register_fields(node_fields=["cs_iso"])
+    npz_path = tmp_path / "fixed_target_mask.npz"
+    pos = np.array(
+        [
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0, 0.1, 0.0], [0.5, 0.1, 0.0], [1.0, 0.1, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    node_types = np.array([H, C, N], dtype=np.int64)
+    cs_iso = np.array([1.0, np.nan, 7.0], dtype=np.float32)
+    cs_iso_valid = np.array([True, False, True], dtype=bool)
+    np.savez(
+        npz_path,
+        coords=pos,
+        atom_types=node_types,
+        chemical_shifts=cs_iso,
+        chemical_shift_mask=cs_iso_valid,
+    )
+
+    dataset = NpzDataset(
+        root=str(tmp_path / "fixed_target_dataset"),
+        ensemble_index=0,
+        file_name=str(npz_path),
+        key_mapping={
+            "coords": AtomicDataDict.POSITIONS_KEY,
+            "atom_types": AtomicDataDict.NODE_TYPE_KEY,
+            "chemical_shifts": "cs_iso",
+            "chemical_shift_mask": "cs_iso__mask__",
+        },
+        extra_fixed_fields={AtomicDataDict.R_MAX_KEY: 1.1},
+        node_attributes={
+            AtomicDataDict.NODE_TYPE_KEY: {"fixed": True, "num_types": 8},
+            "cs_iso": {"fixed": True, "attribute_type": "numerical"},
+        },
+        normalization={"cs_iso": "per_type"},
+    )
+
+    assert len(dataset) == 2
+    assert "cs_iso__mask__" not in dataset.fixed_fields
+    assert "_mean_.per_type.cs_iso" in dataset.fixed_fields
+    assert "_std_.per_type.cs_iso" in dataset.fixed_fields
+    assert dataset.fixed_fields["cs_iso"].shape == torch.Size([3, 1])
+
+    batch = Collater().collate([dataset[0], dataset[1]])
+    assert batch[AtomicDataDict.POSITIONS_KEY].shape[0] == 6
+    assert batch["cs_iso"].shape == torch.Size([6, 1])
+    assert torch.equal(
+        torch.isfinite(batch["cs_iso"]).view(-1),
+        torch.tensor([True, False, True, True, False, True]),
+    )
+    assert torch.allclose(
+        batch["cs_iso"][torch.isfinite(batch["cs_iso"])],
+        torch.zeros(4),
+    )
