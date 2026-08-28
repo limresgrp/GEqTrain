@@ -26,7 +26,11 @@ batch_size: 1
 validation_batch_size: 1
 ```
 
-All conformers in one system must have the same atom count and atom ordering.
+The source ensemble must define a common atom identity, normally through the
+shared atom ordering of coordinates shaped `[M, N, 3]`. Preprocessing may
+retain different numbers of neighbor-only nodes and edges in each conformer;
+the preserved `ensemble_atom_index` keeps center selection and aggregation
+aligned despite those different graph sizes.
 
 ## Memory controls
 

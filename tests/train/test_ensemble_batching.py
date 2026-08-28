@@ -69,6 +69,34 @@ def test_ensemble_atom_cap_selects_same_centers_and_keeps_neighbors():
     assert set(batch.edge_index[1].sub(batch.ptr[batch.batch[batch.edge_index[1]]]).tolist()) == {0, 1, 2, 3}
 
 
+def test_ensemble_atom_cap_allows_different_neighbor_node_counts():
+    first = _frame(7)
+    first[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY] = torch.arange(4)
+
+    second = Data(
+        pos=first.pos[[0, 1, 3]],
+        edge_index=torch.tensor([[0, 0, 1, 1], [1, 2, 0, 2]], dtype=torch.long),
+        node_types=first.node_types[[0, 1, 3]],
+        cs_iso=first.cs_iso[[0, 1, 3]],
+        ensemble_atom_index=torch.tensor([0, 1, 3]),
+        ensemble_index=7,
+    )
+
+    batch = Collater(
+        ensemble_mode=True,
+        ensemble_max_atoms=2,
+        shuffle_ensemble_atoms=False,
+    ).collate([first, second])
+
+    assert batch.ptr.diff().tolist() == [4, 3]
+    assert torch.equal(
+        batch[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY],
+        torch.tensor([0, 1, 2, 3, 0, 1, 3]),
+    )
+    source_atom_ids = batch[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY][batch.edge_index[0]]
+    assert set(source_atom_ids.tolist()) == {0, 1}
+
+
 def test_prepare_target_averages_matching_atoms_across_conformers():
     batch = Collater(
         ensemble_mode=True,

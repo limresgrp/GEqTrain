@@ -80,8 +80,14 @@ class Collater(object):
         batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union([AtomicDataDict.ENSEMBLE_INDEX_KEY]))
         _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
 
-        local_atom_indices = [torch.arange(graph.num_nodes, dtype=torch.long) for graph in batch]
-        batch_graphs[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY] = torch.cat(local_atom_indices, dim=0)
+        atom_index_key = AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY
+        ensemble_atom_indices = [
+            graph[atom_index_key].to(dtype=torch.long)
+            if atom_index_key in graph
+            else torch.arange(graph.num_nodes, dtype=torch.long)
+            for graph in batch
+        ]
+        batch_graphs[atom_index_key] = torch.cat(ensemble_atom_indices, dim=0)
 
         if selected_centers is not None:
             edge_sources = batch_graphs.edge_index[0]
@@ -103,7 +109,7 @@ class Collater(object):
         return batch_graphs
 
     def _select_shared_ensemble_centers(self, batch: List[Data]) -> Optional[Dict[int, torch.Tensor]]:
-        """Select the same local center atom IDs in every frame of an ensemble."""
+        """Select the same physical center atoms in every frame of an ensemble."""
         if not self.ensemble_mode or self.ensemble_max_atoms is None:
             return None
 
@@ -113,30 +119,39 @@ class Collater(object):
 
         selected: Dict[int, torch.Tensor] = {}
         for graph_indices in graph_groups.values():
-            node_counts = {int(batch[idx].num_nodes) for idx in graph_indices}
-            if len(node_counts) != 1:
-                raise ValueError(
-                    "All conformers in an ensemble must have the same atom count for "
-                    "ensemble_max_atoms subsampling."
-                )
-
-            common_centers = None
+            common_center_atom_ids = None
             for graph_idx in graph_indices:
-                centers = set(batch[graph_idx].edge_index[0].unique().tolist())
-                common_centers = centers if common_centers is None else common_centers.intersection(centers)
-            common_centers = sorted(common_centers or [])
-            if len(common_centers) == 0:
+                graph = batch[graph_idx]
+                atom_ids = (
+                    graph[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY].to(dtype=torch.long)
+                    if AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY in graph
+                    else torch.arange(graph.num_nodes, dtype=torch.long)
+                )
+                center_atom_ids = set(atom_ids[graph.edge_index[0].unique()].tolist())
+                common_center_atom_ids = (
+                    center_atom_ids
+                    if common_center_atom_ids is None
+                    else common_center_atom_ids.intersection(center_atom_ids)
+                )
+            common_center_atom_ids = sorted(common_center_atom_ids or [])
+            if len(common_center_atom_ids) == 0:
                 raise ValueError("An ensemble has no center atoms shared by all conformers.")
 
-            center_ids = torch.tensor(common_centers, dtype=torch.long)
-            if center_ids.numel() > self.ensemble_max_atoms:
+            selected_atom_ids = torch.tensor(common_center_atom_ids, dtype=torch.long)
+            if selected_atom_ids.numel() > self.ensemble_max_atoms:
                 if self.shuffle_ensemble_atoms:
-                    permutation = torch.randperm(center_ids.numel())[: self.ensemble_max_atoms]
-                    center_ids = center_ids[permutation].sort().values
+                    permutation = torch.randperm(selected_atom_ids.numel())[: self.ensemble_max_atoms]
+                    selected_atom_ids = selected_atom_ids[permutation].sort().values
                 else:
-                    center_ids = center_ids[: self.ensemble_max_atoms]
+                    selected_atom_ids = selected_atom_ids[: self.ensemble_max_atoms]
             for graph_idx in graph_indices:
-                selected[graph_idx] = center_ids
+                graph = batch[graph_idx]
+                atom_ids = (
+                    graph[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY].to(dtype=torch.long)
+                    if AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY in graph
+                    else torch.arange(graph.num_nodes, dtype=torch.long)
+                )
+                selected[graph_idx] = torch.isin(atom_ids, selected_atom_ids).nonzero().flatten()
         return selected
 
     def __call__(self, batch: List[Data]) -> Batch:

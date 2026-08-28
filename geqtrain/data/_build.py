@@ -328,6 +328,19 @@ def _filter_dataset(
         return None
     target_mask_fields = {} if target_mask_fields is None else target_mask_fields
 
+    # Preserve the atom identity from the unfiltered frame. Graph filtering can
+    # prune different neighbor-only nodes in different conformers, so local row
+    # indices after subgraphing are not a stable ensemble atom identifier.
+    atom_index_key = AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY
+    if atom_index_key not in data:
+        node_counts = data.ptr.diff()
+        data[atom_index_key] = torch.cat(
+            [torch.arange(int(count), dtype=torch.long, device=data.pos.device) for count in node_counts]
+        )
+        data.__slices__[atom_index_key] = data.ptr.tolist()
+        data.__cumsum__[atom_index_key] = [0] * (data.num_graphs + 1)
+        data.__cat_dims__[atom_index_key] = data.__cat_dim__(atom_index_key, data[atom_index_key])
+
     def expanded_node_field(key: str) -> Optional[torch.Tensor]:
         if key in data:
             return data[key]
