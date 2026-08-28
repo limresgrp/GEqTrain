@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - node_model
+  - _self_
+
+model:
+  # Dictionary groups allow independently composed templates to append layers
+  # without replacing one another's lists.
+  stack_append:
+    pooling:
+      - _target_: geqtrain.nn.NodewiseReduce
+        name: global_node_pooling
+        field: node_features
+        out_field: graph_features
+    heads:
+      - _target_: geqtrain.nn.ReadoutModule
+        name: head_energy
+        field: graph_features
+        out_field: energy
+        out_irreps: 1x0e
+        strict_irreps: false
+        readout_latent: geqtrain.nn.ScalarMLPFunction
+        readout_latent_kwargs:
+          mlp_latent_dimensions: [12, 13]
+          mlp_nonlinearity: silu

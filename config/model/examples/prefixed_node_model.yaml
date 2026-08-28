@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - node_model
+  - _self_
+
+model:
+  prefix: example
+
+example_interaction_latent_dim: 16
+example_interaction_latent_module_kwargs_mlp_latent_dimensions: [12, 13]
+example_edge_radial_attrs_r_max: 7.0
+
