@@ -37,6 +37,8 @@ BATCH_KEY:             Final[str] = "batch"           # index tensor of the node
 DATASET_RAW_FILE_NAME: Final[str] = "dataset_raw_file_name" # dataset raw file names
 # (1) or [n_frames]
 ENSEMBLE_INDEX_KEY:    Final[str] = "ensemble_index"  # index of the molecule ensemble (all frames in same npz have same ensemble index)
+# [n_nodes]
+ENSEMBLE_ATOM_INDEX_KEY: Final[str] = "ensemble_atom_index"  # atom identity shared by all frames in an ensemble
 # (1)
 NOISE_KEY:             Final[str] = "noise"           # noise level to inject to coordinates
 

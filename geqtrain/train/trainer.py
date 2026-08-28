@@ -13,7 +13,7 @@ import torch.distributed as dist
 from geqtrain.data.dataloader import DataLoader
 from geqtrain.train.components.dataset_builder import DatasetBuilder
 from geqtrain.train._key import ABBREV, TRAIN, VALIDATION
-from geqtrain.train.sampler import CurriculumBatchSampler
+from geqtrain.train.sampler import CurriculumBatchSampler, EnsembleBatchSampler
 from geqtrain.train.components.epoch_summary import EpochSummary
 from geqtrain.utils import Config, Output, load_callable, load_file
 from geqtrain.utils._global_options import apply_global_config
@@ -73,6 +73,8 @@ def check_for_config_updates(new_config):
         "use_ema", "wandb", "dataset_list", "validation_dataset_list", "test_dataset_list",
         "batch_size", "validation_batch_size", "dataloader_num_workers", "master_addr", "master_port",
         "device", "filepath", "ddp", "curriculum_importance_sampling",
+        "ensemble_max_structures", "validation_ensemble_max_structures",
+        "ensemble_max_atoms", "validation_ensemble_max_atoms",
     ]
     # Ignore certain mismatches to allow clean restarts (e.g., wandb sweeps overriding config).
     ignored_restart_params = {"optimizer_params"}
@@ -338,15 +340,62 @@ class Trainer:
                 eps=curriculum_cfg.get("eps", 1.0e-12),
             )
             self.train_sampler = self.curriculum_sampler
+        elif use_ensemble:
+            if self.dist.is_distributed:
+                raise NotImplementedError(
+                    "dataset_mode: ensemble currently supports single-process training only; "
+                    "ensemble-aware DDP batching must preserve complete systems per rank."
+                )
+            seed = self.config.get("dataset_seed")
+            seed = 0 if seed is None else int(seed)
+            self.train_sampler = EnsembleBatchSampler(
+                self.train_dset,
+                batch_size=self.config.get('batch_size'),
+                shuffle=self.shuffle,
+                seed=seed,
+                max_structures=self.config.get("ensemble_max_structures"),
+            )
+            self.val_sampler = EnsembleBatchSampler(
+                self.val_dset,
+                batch_size=self.config.get('validation_batch_size'),
+                shuffle=False,
+                seed=seed,
+                max_structures=self.config.get(
+                    "validation_ensemble_max_structures",
+                    self.config.get("ensemble_max_structures"),
+                ),
+            )
         else:
             self.train_sampler = self.dist.get_sampler(self.train_dset, self.shuffle, use_ensemble)
-        self.val_sampler = self.dist.get_sampler(self.val_dset, False, use_ensemble)
+            self.val_sampler = self.dist.get_sampler(self.val_dset, False, use_ensemble)
         dl_kwargs = {"num_workers": self.config.get('dataloader_num_workers', 0), "pin_memory": self.dist.device.type == 'cuda', "generator": self.dataset_torch_rng}
         if self.curriculum_sampler is not None:
             self.dl_train = DataLoader(dataset=self.train_dset, batch_sampler=self.curriculum_sampler, **dl_kwargs)
+        elif use_ensemble:
+            self.dl_train = DataLoader(
+                dataset=self.train_dset,
+                batch_sampler=self.train_sampler,
+                ensemble_mode=True,
+                ensemble_max_atoms=self.config.get("ensemble_max_atoms"),
+                shuffle_ensemble_atoms=self.shuffle,
+                **dl_kwargs,
+            )
         else:
             self.dl_train = DataLoader(dataset=self.train_dset, batch_size=self.config.get('batch_size'), shuffle=(self.train_sampler is None and self.shuffle), sampler=self.train_sampler, **dl_kwargs)
-        self.dl_val = DataLoader(dataset=self.val_dset, batch_size=self.config.get('validation_batch_size'), shuffle=False, sampler=self.val_sampler, **dl_kwargs)
+        if use_ensemble:
+            self.dl_val = DataLoader(
+                dataset=self.val_dset,
+                batch_sampler=self.val_sampler,
+                ensemble_mode=True,
+                ensemble_max_atoms=self.config.get(
+                    "validation_ensemble_max_atoms",
+                    self.config.get("ensemble_max_atoms"),
+                ),
+                shuffle_ensemble_atoms=False,
+                **dl_kwargs,
+            )
+        else:
+            self.dl_val = DataLoader(dataset=self.val_dset, batch_size=self.config.get('validation_batch_size'), shuffle=False, sampler=self.val_sampler, **dl_kwargs)
 
     def _curriculum_config(self):
         cfg = self.config.get("curriculum_importance_sampling", {})

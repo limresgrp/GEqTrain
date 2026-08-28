@@ -129,7 +129,7 @@ def dataset_from_config(
 
         files_to_process = _expand_dataset_input_path(dataset_input)
         is_inmemory = instance_config.get('inmemory', True)
-        key_clean_list = _get_key_clean(instance_config, loss_key)
+        key_clean_list, target_mask_fields = _get_target_specs(instance_config, loss_key)
 
         explicit_frame_workers = instance_config.get(
             f"{prefix}_frame_num_workers",
@@ -153,7 +153,8 @@ def dataset_from_config(
         worker_func = partial(
             _handle_single_file,
             config_dict=instance_config.as_dict(), prefix=prefix, class_name=class_name,
-            inmemory=is_inmemory, key_clean_list=key_clean_list
+            inmemory=is_inmemory, key_clean_list=key_clean_list,
+            target_mask_fields=target_mask_fields,
         )
 
         if n_workers > 1:
@@ -177,12 +178,20 @@ def dataset_from_config(
 # ==================================================================================================
 
 def _get_key_clean(config: Config, loss_key: str):
+    return _get_target_specs(config, loss_key)[0]
+
+
+def _get_target_specs(config: Config, loss_key: str):
     from geqtrain.train.utils import parse_loss_metrics_dict
     loss_keys = set()
+    target_mask_fields = {}
     for loss_dict in config.get(loss_key, []):
-        for key, _, _, _ in parse_loss_metrics_dict(loss_dict):
+        for key, _, _, params in parse_loss_metrics_dict(loss_dict):
             loss_keys.add(key)
-    return list(loss_keys)
+            mask_field = params.get("node_mask_field", params.get("node_mask_key"))
+            if mask_field is not None:
+                target_mask_fields[key] = str(mask_field)
+    return list(loss_keys), target_mask_fields
 
 def _get_class_name(config_dataset_type):
     if inspect.isclass(config_dataset_type): return config_dataset_type
@@ -228,7 +237,15 @@ def _update_config(config, _config_dataset, prefix):
     )
     return _config
 
-def _handle_single_file(file_info: tuple, config_dict: dict, prefix: str, class_name: type, inmemory: bool, key_clean_list: list):
+def _handle_single_file(
+    file_info: tuple,
+    config_dict: dict,
+    prefix: str,
+    class_name: type,
+    inmemory: bool,
+    key_clean_list: list,
+    target_mask_fields: dict,
+):
     """Worker function to process a single data file, including filtering."""
     ensemble_index, dataset_file_name = file_info
     config_dict[f'{prefix}_file_name'] = dataset_file_name
@@ -249,6 +266,7 @@ def _handle_single_file(file_info: tuple, config_dict: dict, prefix: str, class_
         _node_types_to_keep(config_dict),
         *_node_types_to_exclude_from_edges(config_dict),
         *_node_types_to_keep_for_edges(config_dict),
+        target_mask_fields=target_mask_fields,
     )
 
     if instance is None:
@@ -299,6 +317,7 @@ def _filter_dataset(
     exclude_node_types_from_edge_neigh: Optional[torch.Tensor] = None,
     keep_node_types_for_edge_center: Optional[torch.Tensor] = None,
     keep_node_types_for_edge_neigh: Optional[torch.Tensor] = None,
+    target_mask_fields: Optional[dict] = None,
 ) -> Optional[AtomicInMemoryDataset]:
     """
     Filters a dataset by operating on the entire Batch object at once using
@@ -307,20 +326,53 @@ def _filter_dataset(
     data: Batch = dataset.data
     if data is None or data.num_graphs == 0:
         return None
-    has_nan_target_filter = any(
-        key in _NODE_FIELDS
-        and key in data
-        and torch.is_floating_point(data[key])
-        and torch.isnan(data[key]).any()
-        for key in key_clean_list
-    )
+    target_mask_fields = {} if target_mask_fields is None else target_mask_fields
+
+    def expanded_node_field(key: str) -> Optional[torch.Tensor]:
+        if key in data:
+            return data[key]
+        if key not in dataset.fixed_fields:
+            return None
+        value = dataset.fixed_fields[key]
+        if not torch.is_tensor(value) or value.ndim == 0:
+            return None
+        nodes_per_graph = data.num_nodes // data.num_graphs
+        if value.shape[0] != nodes_per_graph:
+            return None
+        repeats = (data.num_graphs,) + (1,) * (value.ndim - 1)
+        return value.repeat(repeats)
+
+    target_center_masks = []
+    for key in key_clean_list:
+        if key not in _NODE_FIELDS:
+            continue
+        target = expanded_node_field(key)
+        if target is None or target.shape[0] != data.num_nodes:
+            continue
+        if torch.is_floating_point(target):
+            valid = torch.isfinite(target)
+            if valid.ndim > 1:
+                valid = valid.reshape(valid.shape[0], -1).all(dim=1)
+        else:
+            valid = torch.ones(data.num_nodes, dtype=torch.bool, device=data.pos.device)
+        mask_field = target_mask_fields.get(key)
+        if mask_field is not None:
+            target_mask = expanded_node_field(mask_field)
+            if target_mask is not None and target_mask.shape[0] == data.num_nodes:
+                target_mask = target_mask.to(dtype=torch.bool)
+                if target_mask.ndim > 1:
+                    target_mask = target_mask.reshape(target_mask.shape[0], -1).all(dim=1)
+                valid &= target_mask
+        target_center_masks.append(valid)
+
+    has_target_filter = bool(target_center_masks) and not torch.stack(target_center_masks).any(dim=0).all()
     if (
         keep_node_types is None
         and exclude_node_types_from_edge_center is None
         and exclude_node_types_from_edge_neigh is None
         and keep_node_types_for_edge_center is None
         and keep_node_types_for_edge_neigh is None
-        and not has_nan_target_filter
+        and not has_target_filter
     ):
         return dataset
 
@@ -330,7 +382,7 @@ def _filter_dataset(
     node_types = data[AtomicDataDict.NODE_TYPE_KEY].flatten() if AtomicDataDict.NODE_TYPE_KEY in data else None
     if node_types is None:
         # Pop the fixed node types from dataset and repeat them for each graph in the batch
-        node_types = dataset.fixed_fields.pop(AtomicDataDict.NODE_TYPE_KEY).flatten().repeat(data.num_graphs)
+        node_types = dataset.fixed_fields[AtomicDataDict.NODE_TYPE_KEY].flatten().repeat(data.num_graphs)
         data[AtomicDataDict.NODE_TYPE_KEY] = node_types
         # Add __slices__ for AtomicDataDict.NODE_TYPE_KEY
         if not hasattr(data, '__slices__'):
@@ -359,18 +411,10 @@ def _filter_dataset(
     # Remove edges where at least one node is not in nodes_to_keep_mask
     edges_to_keep_mask &= nodes_to_keep_mask[edge_index[0]] & nodes_to_keep_mask[edge_index[1]]
 
-    nan_filters = []
-    for key in key_clean_list:
-        if (
-            key in _NODE_FIELDS
-            and key in data
-            and torch.is_floating_point(data[key])
-            and torch.isnan(data[key]).any()
-        ):
-            valid_nodes = torch.all(~torch.isnan(data[key]), dim=-1)
-            nan_filters.append(valid_nodes[edge_index[0]])
-    if nan_filters:
-        edges_to_keep_mask &= torch.all(torch.stack(nan_filters), dim=0)
+    if target_center_masks:
+        # A node remains a center when at least one supervised target is valid.
+        supervised_centers = torch.stack(target_center_masks, dim=0).any(dim=0)
+        edges_to_keep_mask &= supervised_centers[edge_index[0]]
     
     if node_types is not None:
         if keep_node_types_for_edge_center is not None:

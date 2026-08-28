@@ -25,7 +25,13 @@ class Loss:
     """
     A self-contained class that computes the training loss and tracks its statistics.
     """
-    def __init__(self, components: Union[str, List[str], List[dict]]):
+    def __init__(
+        self,
+        components: Union[str, List[str], List[dict]],
+        dataset_mode: str = "single",
+        ensemble_loss_on_aggregate: bool = True,
+        ensemble_aggregation: str = "mean",
+    ):
         self.keys: List[str] = []
         self.coeffs: Dict[str, torch.Tensor] = {}
         self.funcs: Dict[str, torch.nn.Module] = {}
@@ -33,6 +39,8 @@ class Loss:
         self.target_filters: Dict[str, dict] = {}
         self.target_keys: Dict[str, str] = {}
         self.key_pattern = r"\_\d+"
+        self.aggregate_ensemble = dataset_mode == "ensemble" and bool(ensemble_loss_on_aggregate)
+        self.ensemble_aggregation = str(ensemble_aggregation)
 
         self._parse_components_from_yaml(components)
         
@@ -73,6 +81,8 @@ class Loss:
                         node_level_filter=target_filter.get("node_level_filter", "auto"),
                         ignore_nan=target_filter.get("ignore_nan", False),
                         denormalize=False,
+                        aggregate_ensemble=self.aggregate_ensemble,
+                        ensemble_aggregation=self.ensemble_aggregation,
                     )
                     prepared_pred, prepared_ref = prepared.pred, prepared.ref
 

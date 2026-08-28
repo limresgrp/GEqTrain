@@ -12,6 +12,7 @@ deployed/
 _misc/
 results/
 test/
+graphify-out/
 
 *.png
 *.csv

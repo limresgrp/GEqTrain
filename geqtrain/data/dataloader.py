@@ -2,7 +2,7 @@
 """
 
 import torch
-from typing import List
+from typing import Dict, List, Optional
 from geqtrain.data import AtomicDataDict
 from geqtrain.utils.torch_geometric import Batch, Data
 
@@ -17,8 +17,20 @@ class Collater(object):
         exclude_keys: keys to ignore in the input, not copying to the output
     """
 
-    def __init__(self, exclude_keys: List[str] = []):
+    def __init__(
+        self,
+        exclude_keys: List[str] = [],
+        *,
+        ensemble_mode: bool = False,
+        ensemble_max_atoms: Optional[int] = None,
+        shuffle_ensemble_atoms: bool = False,
+    ):
         self._exclude_keys = set(exclude_keys)
+        self.ensemble_mode = bool(ensemble_mode)
+        self.ensemble_max_atoms = None if ensemble_max_atoms is None else int(ensemble_max_atoms)
+        self.shuffle_ensemble_atoms = bool(shuffle_ensemble_atoms)
+        if self.ensemble_max_atoms is not None and self.ensemble_max_atoms < 1:
+            raise ValueError("ensemble_max_atoms must be null or at least 1.")
 
     @staticmethod
     def _is_optional_mask_key(key: str) -> bool:
@@ -57,6 +69,8 @@ class Collater(object):
         """Collate a list of data"""
         batch = self._fill_missing_optional_masks(batch)
 
+        selected_centers = self._select_shared_ensemble_centers(batch)
+
         # Allow to merge ensemble graphs into a batch.
         # Groups graphs by ensemble and adds a mapping tensor for tracking.
         batch_ensemble_index = []  # Tracks which molecule each graph belongs to
@@ -66,7 +80,64 @@ class Collater(object):
         batch_graphs = Batch.from_data_list(batch, exclude_keys=self._exclude_keys.union([AtomicDataDict.ENSEMBLE_INDEX_KEY]))
         _, batch_graphs.ensemble_index = torch.unique(torch.tensor(batch_ensemble_index, dtype=torch.long), return_inverse=True)
 
+        local_atom_indices = [torch.arange(graph.num_nodes, dtype=torch.long) for graph in batch]
+        batch_graphs[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY] = torch.cat(local_atom_indices, dim=0)
+
+        if selected_centers is not None:
+            edge_sources = batch_graphs.edge_index[0]
+            edge_graphs = batch_graphs.batch[edge_sources]
+            local_sources = edge_sources - batch_graphs.ptr[edge_graphs]
+            edge_mask = torch.zeros(batch_graphs.num_edges, dtype=torch.bool, device=edge_sources.device)
+            for graph_idx, center_ids in selected_centers.items():
+                graph_edge_mask = edge_graphs == graph_idx
+                edge_mask |= graph_edge_mask & torch.isin(
+                    local_sources,
+                    center_ids.to(device=local_sources.device),
+                )
+            all_nodes = torch.ones(batch_graphs.num_nodes, dtype=torch.bool, device=edge_sources.device)
+            batch_graphs = batch_graphs.subgraph(
+                subset=all_nodes,
+                edge_index=batch_graphs.edge_index[:, edge_mask],
+            )
+
         return batch_graphs
+
+    def _select_shared_ensemble_centers(self, batch: List[Data]) -> Optional[Dict[int, torch.Tensor]]:
+        """Select the same local center atom IDs in every frame of an ensemble."""
+        if not self.ensemble_mode or self.ensemble_max_atoms is None:
+            return None
+
+        graph_groups: Dict[int, List[int]] = {}
+        for graph_idx, graph in enumerate(batch):
+            graph_groups.setdefault(int(graph.ensemble_index), []).append(graph_idx)
+
+        selected: Dict[int, torch.Tensor] = {}
+        for graph_indices in graph_groups.values():
+            node_counts = {int(batch[idx].num_nodes) for idx in graph_indices}
+            if len(node_counts) != 1:
+                raise ValueError(
+                    "All conformers in an ensemble must have the same atom count for "
+                    "ensemble_max_atoms subsampling."
+                )
+
+            common_centers = None
+            for graph_idx in graph_indices:
+                centers = set(batch[graph_idx].edge_index[0].unique().tolist())
+                common_centers = centers if common_centers is None else common_centers.intersection(centers)
+            common_centers = sorted(common_centers or [])
+            if len(common_centers) == 0:
+                raise ValueError("An ensemble has no center atoms shared by all conformers.")
+
+            center_ids = torch.tensor(common_centers, dtype=torch.long)
+            if center_ids.numel() > self.ensemble_max_atoms:
+                if self.shuffle_ensemble_atoms:
+                    permutation = torch.randperm(center_ids.numel())[: self.ensemble_max_atoms]
+                    center_ids = center_ids[permutation].sort().values
+                else:
+                    center_ids = center_ids[: self.ensemble_max_atoms]
+            for graph_idx in graph_indices:
+                selected[graph_idx] = center_ids
+        return selected
 
     def __call__(self, batch: List[Data]) -> Batch:
         """Collate a list of data"""
@@ -85,6 +156,9 @@ class DataLoader(torch.utils.data.DataLoader):
         shuffle: bool = False,
         batch_sampler=None,
         exclude_keys: List[str] = [],
+        ensemble_mode: bool = False,
+        ensemble_max_atoms: Optional[int] = None,
+        shuffle_ensemble_atoms: bool = False,
         **kwargs,
     ):
         if "collate_fn" in kwargs:
@@ -94,7 +168,12 @@ class DataLoader(torch.utils.data.DataLoader):
             super(DataLoader, self).__init__(
                 dataset,
                 batch_sampler=batch_sampler,
-                collate_fn=Collater(exclude_keys=exclude_keys),
+                collate_fn=Collater(
+                    exclude_keys=exclude_keys,
+                    ensemble_mode=ensemble_mode,
+                    ensemble_max_atoms=ensemble_max_atoms,
+                    shuffle_ensemble_atoms=shuffle_ensemble_atoms,
+                ),
                 **kwargs,
             )
         else:
@@ -102,6 +181,11 @@ class DataLoader(torch.utils.data.DataLoader):
                 dataset,
                 batch_size,
                 shuffle,
-                collate_fn=Collater(exclude_keys=exclude_keys),
+                collate_fn=Collater(
+                    exclude_keys=exclude_keys,
+                    ensemble_mode=ensemble_mode,
+                    ensemble_max_atoms=ensemble_max_atoms,
+                    shuffle_ensemble_atoms=shuffle_ensemble_atoms,
+                ),
                 **kwargs,
             )

@@ -83,6 +83,64 @@ def _finite_row_mask(pred_key: torch.Tensor, ref_key: torch.Tensor) -> torch.Ten
     return finite
 
 
+def _ensemble_group_ids(
+    pred: dict,
+    ref: dict,
+    row_count: int,
+    center_nodes: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Map node rows to a stable ``(ensemble, atom)`` group."""
+    sources = (pred, ref)
+
+    def get_aligned(key: str) -> Optional[torch.Tensor]:
+        for source in sources:
+            if key in source:
+                value = source[key]
+                if torch.is_tensor(value):
+                    return _align_rows(value.squeeze(-1), row_count, center_nodes)
+        return None
+
+    atom_indices = get_aligned(AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY)
+    graph_indices = get_aligned(AtomicDataDict.BATCH_KEY)
+    ensemble_indices = None
+    for source in sources:
+        if AtomicDataDict.ENSEMBLE_INDEX_KEY in source:
+            ensemble_indices = source[AtomicDataDict.ENSEMBLE_INDEX_KEY]
+            break
+
+    if atom_indices is None or graph_indices is None or ensemble_indices is None:
+        return None
+    ensemble_indices = torch.as_tensor(ensemble_indices, device=atom_indices.device).reshape(-1)
+    graph_indices = graph_indices.to(device=atom_indices.device, dtype=torch.long)
+    if graph_indices.numel() and int(graph_indices.max().item()) >= ensemble_indices.numel():
+        return None
+    row_ensembles = ensemble_indices.to(dtype=torch.long)[graph_indices]
+    pairs = torch.stack([row_ensembles, atom_indices.to(dtype=torch.long)], dim=1)
+    _, group_ids = torch.unique(pairs, dim=0, sorted=True, return_inverse=True)
+    return group_ids
+
+
+def _aggregate_ensemble_rows(
+    pred_key: torch.Tensor,
+    ref_key: torch.Tensor,
+    node_types: Optional[torch.Tensor],
+    group_ids: torch.Tensor,
+    aggregation: str,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    if aggregation == "mean":
+        reduce = scatter_mean
+    elif aggregation == "sum":
+        reduce = scatter_sum
+    else:
+        raise ValueError("ensemble_aggregation must be one of: mean, sum")
+
+    pred_key = reduce(pred_key, group_ids, dim=0)
+    ref_key = reduce(ref_key, group_ids, dim=0)
+    if node_types is not None:
+        node_types = scatter_max(node_types.to(dtype=torch.long), group_ids, dim=0)
+    return pred_key, ref_key, node_types
+
+
 def resolve_node_type_indices(params: dict, owner: str) -> Optional[torch.Tensor]:
     node_type_indices = params.get("node_type_indices", None)
     node_type_names = params.get("node_type_names", None)
@@ -131,6 +189,8 @@ def prepare_target(
     ignore_nan: bool = False,
     denormalize: bool = False,
     normalization_fields: Optional[Dict[str, Dict]] = None,
+    aggregate_ensemble: bool = False,
+    ensemble_aggregation: str = "mean",
 ) -> PreparedTarget:
     """Build and apply one row mask for a loss/metric target."""
     ref = {} if ref is None else ref
@@ -151,6 +211,15 @@ def prepare_target(
         prepared_pred[pred_key_name] = pred_key
         prepared_ref[key] = ref_key
         return PreparedTarget(prepared_pred, prepared_ref, pred_key, ref_key)
+
+    ensemble_group_ids = None
+    if aggregate_ensemble and key in _NODE_FIELDS:
+        ensemble_group_ids = _ensemble_group_ids(pred, ref, row_count, center_nodes)
+        if ensemble_group_ids is None:
+            raise ValueError(
+                f"Cannot aggregate ensemble target '{key}': batch, ensemble_index, or "
+                "ensemble_atom_index metadata is missing or misaligned."
+            )
 
     masks = []
     node_types = None
@@ -209,6 +278,8 @@ def prepare_target(
         ref_key = ref_key[final_mask]
         if node_types is not None:
             node_types = node_types.to(device=final_mask.device)[final_mask]
+        if ensemble_group_ids is not None:
+            ensemble_group_ids = ensemble_group_ids.to(device=final_mask.device)[final_mask]
 
     prepared_pred = dict(pred)
     prepared_ref = dict(ref)
@@ -226,6 +297,20 @@ def prepare_target(
         ref_key = denormalize_tensor(ref_key.clone(), prepared_ref, key, spec)
         prepared_pred[pred_key_name] = pred_key
         prepared_ref[key] = ref_key
+
+    if ensemble_group_ids is not None and pred_key.numel() > 0:
+        pred_key, ref_key, node_types = _aggregate_ensemble_rows(
+            pred_key,
+            ref_key,
+            node_types,
+            ensemble_group_ids.to(device=pred_key.device),
+            ensemble_aggregation,
+        )
+        prepared_pred[pred_key_name] = pred_key
+        prepared_ref[key] = ref_key
+        if node_types is not None:
+            prepared_pred[AtomicDataDict.NODE_TYPE_KEY] = node_types.reshape(-1, 1)
+            prepared_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types.reshape(-1, 1)
 
     return PreparedTarget(prepared_pred, prepared_ref, pred_key, ref_key, node_types, final_mask)
 

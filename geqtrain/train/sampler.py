@@ -19,42 +19,71 @@ def _group_by_ensemble(n_observations, ensemble_indices):
 
     return list(ensemble_dict.values())
 
-class EnsembleSampler(Sampler):
-    """
-    Ensures that all conformations of a molecule (from the same npz file)
-    appear in the same batch.
-    The ensembled batch is created following the order of batch['dataset_raw_file_name']
-    """
-    def __init__(self, dataset, batch_size):
-        self.dataset = dataset
-        self.batch_size = batch_size
+class EnsembleBatchSampler(Sampler):
+    """Batch complete ensembles without splitting their conformers.
 
-        # Group indices by ensemble (each molecule)
-        self.ensemble_indices = _group_by_ensemble(self.dataset.n_observations, self.dataset.ensemble_indices)
-        self.n_obs = self.dataset.n_observations.sum()
+    ``batch_size`` counts ensembles (systems), not individual conformers.
+    ``max_structures`` optionally samples a fixed number of conformers from
+    each system on every training epoch.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        *,
+        shuffle: bool = True,
+        seed: int = 0,
+        max_structures: int = None,
+    ):
+        if int(batch_size) < 1:
+            raise ValueError("Ensemble batch_size must be at least 1.")
+        if max_structures is not None and int(max_structures) < 1:
+            raise ValueError("ensemble_max_structures must be null or at least 1.")
+
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.max_structures = None if max_structures is None else int(max_structures)
+        self.epoch = 0
+        self.ensemble_indices = _group_by_ensemble(
+            self.dataset.n_observations,
+            self.dataset.ensemble_indices,
+        )
+
+    def set_epoch(self, epoch: int):
+        self.epoch = max(0, int(epoch))
 
     def __iter__(self):
-        """
-        np.random.shuffle is called once per epoch (once for train and once for val)
-        yields batches, called once per batch step while iteraing dloader
-        Returns batches, ensuring all conformations of a molecule appear together.
-        """
-        np.random.shuffle(self.ensemble_indices)  # Shuffle infra npzs
+        rng = np.random.default_rng(self.seed + self.epoch)
+        ensemble_order = np.arange(len(self.ensemble_indices))
+        if self.shuffle:
+            rng.shuffle(ensemble_order)
+
         batch = []
+        for order_idx, ensemble_idx in enumerate(ensemble_order):
+            structures = np.asarray(self.ensemble_indices[int(ensemble_idx)], dtype=np.int64)
+            if self.max_structures is not None and len(structures) > self.max_structures:
+                if self.shuffle:
+                    structures = rng.choice(structures, size=self.max_structures, replace=False)
+                else:
+                    structures = structures[:self.max_structures]
+            batch.extend(structures.tolist())
 
-        for ensemble in self.ensemble_indices: # list of idxs of 1 npz possibily shufflable
-            np.random.shuffle(ensemble)  # Shuffle inside npz
-            batch.extend(ensemble)
-            while len(batch)>= self.batch_size:
-                yield batch[:self.batch_size]  # Yield a full batch
-                batch = batch[self.batch_size:]  # Keep remaining elements for next batch
+            if (order_idx + 1) % self.batch_size == 0:
+                yield batch
+                batch = []
 
-        if batch:  # Yield any remaining elements
+        if batch:
             yield batch
 
     def __len__(self):
-        # Return the number of batches
-        return (self.n_obs + self.batch_size - 1) // self.batch_size
+        return (len(self.ensemble_indices) + self.batch_size - 1) // self.batch_size
+
+
+# Backwards-compatible name for external imports.
+EnsembleSampler = EnsembleBatchSampler
 
 
 

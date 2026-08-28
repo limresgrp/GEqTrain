@@ -14,7 +14,14 @@ from .loss import Loss
 
 class _Metric:
     """Internal helper class to manage the state and logic for a single metric."""
-    def __init__(self, func: callable, params: dict):
+    def __init__(
+        self,
+        func: callable,
+        params: dict,
+        *,
+        aggregate_ensemble: bool = False,
+        ensemble_aggregation: str = "mean",
+    ):
         self.func = func
         self.params = params
         self.accumulator: Union[RunningStats, StatefulMetric, None] = None
@@ -24,6 +31,8 @@ class _Metric:
             "node_level_filter",
             getattr(self.func, "node_level_filter", "auto"),
         )
+        self.aggregate_ensemble = aggregate_ensemble
+        self.ensemble_aggregation = ensemble_aggregation
 
         # If the metric is stateful, it acts as its own accumulator
         if isinstance(self.func, StatefulMetric):
@@ -79,6 +88,8 @@ class _Metric:
             ignore_nan=ignore_nan,
             denormalize=True,
             normalization_fields=normalization_fields,
+            aggregate_ensemble=self.aggregate_ensemble,
+            ensemble_aggregation=self.ensemble_aggregation,
         )
 
         if feature_indices is not None:
@@ -176,8 +187,16 @@ class Metrics(Loss):
         components: Union[str, List[str], List[dict]],
         normalization_fields: dict = None,
         target_irreps: dict = None,
+        dataset_mode: str = "single",
+        ensemble_loss_on_aggregate: bool = True,
+        ensemble_aggregation: str = "mean",
     ):
-        super().__init__(components)
+        super().__init__(
+            components,
+            dataset_mode=dataset_mode,
+            ensemble_loss_on_aggregate=ensemble_loss_on_aggregate,
+            ensemble_aggregation=ensemble_aggregation,
+        )
         self.normalization_fields = {} if normalization_fields is None else normalization_fields
         self.target_irreps = self._resolve_target_irreps(target_irreps or {})
         self.enable_irrep_breakdown = False
@@ -199,7 +218,12 @@ class Metrics(Loss):
                 reductions = {'mean': Reduction.MEAN, 'rms': Reduction.RMS}
                 params['reduction'] = reductions.get(reduction_str, Reduction.MEAN)
             
-            self.metrics[key] = _Metric(func, dict(params))
+            self.metrics[key] = _Metric(
+                func,
+                dict(params),
+                aggregate_ensemble=self.aggregate_ensemble,
+                ensemble_aggregation=self.ensemble_aggregation,
+            )
             self._register_irrep_breakdown_metrics(key, func, params)
 
     def __call__(self, pred: Dict[str, torch.Tensor], ref: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -343,7 +367,12 @@ class Metrics(Loss):
                 metric_key = f"{self.remove_suffix(key)}_{label}_{disambiguator}{suffix}"
                 disambiguator += 1
             self.target_keys[metric_key] = target_key
-            self.metrics[metric_key] = _Metric(func, dict(base_params))
+            self.metrics[metric_key] = _Metric(
+                func,
+                dict(base_params),
+                aggregate_ensemble=self.aggregate_ensemble,
+                ensemble_aggregation=self.ensemble_aggregation,
+            )
             self.irrep_metric_specs[metric_key] = {
                 "target_key": target_key,
                 "feature_indices": indices,

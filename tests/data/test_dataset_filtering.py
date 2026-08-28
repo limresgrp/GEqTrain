@@ -115,6 +115,23 @@ def test_nan_targets_remove_edge_centers_but_keep_neighbors_by_default(tmp_path)
     assert torch.isnan(data["cs_iso"][node_types == C]).any()
 
 
+def test_multiple_target_availability_is_combined_with_logical_or(tmp_path):
+    dataset = _fixture_dataset(tmp_path, "target_union")
+    data = dataset.data
+    data["aux_target"] = torch.full_like(data["cs_iso"], torch.nan)
+    # Supervise one node that has no cs_iso target.
+    missing_cs_node = torch.isnan(data["cs_iso"].view(-1)).nonzero()[0]
+    data["aux_target"][missing_cs_node] = 1.0
+    register_fields(node_fields=["aux_target"])
+
+    filtered = _filter_dataset(dataset, ["cs_iso", "aux_target"])
+
+    assert filtered is not None
+    centers = filtered.data.edge_index[0].unique()
+    assert torch.isfinite(filtered.data["aux_target"][centers]).any()
+    assert torch.isnan(filtered.data["cs_iso"][centers]).any()
+
+
 def test_keep_node_types_and_keep_type_names_prune_nodes_and_empty_frames(tmp_path):
     by_index = _filter_dataset(
         _fixture_dataset(tmp_path, "keep_node_types"),
