@@ -12,9 +12,6 @@ from .auto_init import instantiate
 
 
 _latest_global_config = {}
-_fields_registered = False
-
-
 def set_global_options(config, warn_on_override: bool = False) -> None:
     """Set global options for torch, e3nn, etc. Does NOT register fields."""
     global _latest_global_config
@@ -52,14 +49,16 @@ def set_global_options(config, warn_on_override: bool = False) -> None:
 
 
 def register_all_fields(config):
-    """Register fields for AtomicData. Idempotent."""
-    global _fields_registered
-    if not _fields_registered:
-        instantiate(register_fields, all_args=config)
-        _fields_registered = True
+    """Register fields for AtomicData.
+
+    ``register_fields`` updates sets and is itself idempotent. Calling it for
+    every configuration also supports multiple trainers or datasets with
+    different custom fields in the same Python process.
+    """
+    instantiate(register_fields, all_args=config)
 
 
 def apply_global_config(config, warn_on_override: bool = False):
-    """Set global options and register fields, only once per process."""
+    """Set global options and register fields for the current configuration."""
     set_global_options(config, warn_on_override=warn_on_override)
     register_all_fields(config)

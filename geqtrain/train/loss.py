@@ -151,8 +151,19 @@ class Loss:
                 except Exception:
                     # If not found locally, assume it's a full path to a user's class
                     loss_class = _instantiate_from_path(func)
-            # Instantiate the custom class. We assume a constructor that accepts params.
-            instance = loss_class(**func_params)
+            # Node selection is a framework concern handled by ``prepare_target``;
+            # do not leak those options into custom loss/metric constructors.
+            constructor_params = dict(func_params)
+            for filter_key in (
+                "node_type_indices",
+                "node_type_names",
+                "type_names",
+                "node_mask_field",
+                "node_mask_key",
+                "node_level_filter",
+            ):
+                constructor_params.pop(filter_key, None)
+            instance = loss_class(**constructor_params)
 
         if instance is None:
             raise NotImplementedError(f"Could not instantiate loss/metric function '{func}'")

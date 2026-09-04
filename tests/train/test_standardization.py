@@ -220,6 +220,28 @@ def test_metrics_with_species_filter_still_denormalize_per_type():
     assert value == pytest.approx(1.0)
 
 
+def test_per_type_denormalization_preserves_one_dimensional_node_shape():
+    from geqtrain.utils.normalization import denormalize_tensor
+
+    mean_key, std_key = get_per_type_stat_keys("target")
+    values = torch.tensor([0.0, 1.0, -1.0])
+    ref = {
+        AtomicDataDict.NODE_TYPE_KEY: torch.tensor([1, 2, 1]),
+        mean_key: torch.tensor([[0.0], [10.0], [20.0]]),
+        std_key: torch.tensor([[1.0], [2.0], [3.0]]),
+    }
+
+    result = denormalize_tensor(
+        values,
+        ref,
+        "target",
+        {"mode": "per_type", "transform": {"name": "none"}},
+    )
+
+    assert result.shape == values.shape
+    assert torch.allclose(result, torch.tensor([10.0, 23.0, 8.0]))
+
+
 def test_per_type_normalization_ignores_nan_node_targets(tmp_path):
     register_fields(node_fields=["target"])
 

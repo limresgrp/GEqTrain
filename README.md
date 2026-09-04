@@ -134,6 +134,9 @@ The main groups are:
 - `config/train`: losses, metrics, optimization, batching, and logging.
 - `config/experiment`: complete experiment compositions.
 
+See [ensemble training](docs/ensemble_training.md) for multi-conformer batching,
+prediction aggregation, and the structure/atom memory controls.
+
 ## NMR Tutorial
 
 The repository includes a self-contained chemical-shift tutorial under

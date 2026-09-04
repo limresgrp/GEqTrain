@@ -379,3 +379,62 @@ def test_fixed_node_target_mask_inherits_fixed_status_and_preserves_alignment(tm
         batch["cs_iso"][torch.isfinite(batch["cs_iso"])],
         torch.zeros(4),
     )
+
+
+def test_graph_filter_promotes_and_aligns_fixed_node_fields(tmp_path):
+    register_fields(node_fields=["cs_iso", "atom_role_ids"])
+    npz_path = tmp_path / "fixed_fields_with_pruned_neighbors.npz"
+    np.savez(
+        npz_path,
+        coords=np.array(
+            [
+                [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            ],
+            dtype=np.float32,
+        ),
+        atom_types=np.array([H, C, N], dtype=np.int64),
+        atom_role_ids=np.array([10, 20, 30], dtype=np.int64),
+        chemical_shifts=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+    )
+    dataset = NpzDataset(
+        root=str(tmp_path / "fixed_fields_with_pruned_neighbors_dataset"),
+        ensemble_index=0,
+        file_name=str(npz_path),
+        key_mapping={
+            "coords": AtomicDataDict.POSITIONS_KEY,
+            "atom_types": AtomicDataDict.NODE_TYPE_KEY,
+            "atom_role_ids": "atom_role_ids",
+            "chemical_shifts": "cs_iso",
+        },
+        extra_fixed_fields={AtomicDataDict.R_MAX_KEY: 1.0},
+        node_attributes={
+            AtomicDataDict.NODE_TYPE_KEY: {"fixed": True, "num_types": 8},
+            "atom_role_ids": {"fixed": True, "num_types": 31},
+            "cs_iso": {"fixed": True, "attribute_type": "numerical"},
+        },
+    )
+
+    keep_center, keep_neigh = _node_types_to_keep_for_edges(
+        {"keep_type_names_for_edge_center": ["H"], "type_names": TYPE_NAMES}
+    )
+    dataset = _filter_dataset(
+        dataset,
+        ["cs_iso"],
+        keep_node_types_for_edge_center=keep_center,
+        keep_node_types_for_edge_neigh=keep_neigh,
+    )
+
+    assert dataset is not None
+    assert AtomicDataDict.NODE_TYPE_KEY not in dataset.fixed_fields
+    assert "atom_role_ids" not in dataset.fixed_fields
+    assert "cs_iso" not in dataset.fixed_fields
+    assert dataset.data.ptr.diff().tolist() == [2, 2]
+
+    first, second = dataset[0], dataset[1]
+    assert first[AtomicDataDict.NODE_TYPE_KEY].view(-1).tolist() == [H, C]
+    assert second[AtomicDataDict.NODE_TYPE_KEY].view(-1).tolist() == [H, N]
+    assert first["atom_role_ids"].view(-1).tolist() == [10, 20]
+    assert second["atom_role_ids"].view(-1).tolist() == [10, 30]
+    assert first["cs_iso"].view(-1).tolist() == [1.0, 2.0]
+    assert second["cs_iso"].view(-1).tolist() == [1.0, 3.0]

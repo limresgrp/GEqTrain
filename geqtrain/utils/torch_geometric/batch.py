@@ -238,7 +238,7 @@ class Batch(Data):
         Returns a new Batch object containing only the nodes in `subset`
         and the edges between them.
         """
-        from geqtrain.data import _EDGE_FIELDS, _GRAPH_FIELDS, _NODE_FIELDS
+        from geqtrain.data import _EDGE_FIELDS, _FIXED_FIELDS, _GRAPH_FIELDS, _NODE_FIELDS
         
         ignore_keys = ignore_keys or []
 
@@ -260,12 +260,41 @@ class Batch(Data):
         node_map = torch.full((self.num_nodes,), -1, dtype=torch.long, device=subset.device)
         node_map[subset] = torch.arange(subset.sum(), device=subset.device)
 
+        retained_graph_indices = self.batch[subset]
+        unique_graphs, new_batch_tensor, new_graph_node_counts = torch.unique(
+            retained_graph_indices,
+            sorted=True,
+            return_inverse=True,
+            return_counts=True,
+        )
+        if len(unique_graphs) == 0:
+            return None
+
+        def select_graph_items(key, value):
+            if key not in self.__slices__ or not torch.is_tensor(value):
+                return value
+            cat_dim = self.__cat_dims__.get(key)
+            if cat_dim is None:
+                return value[unique_graphs]
+            slices = self.__slices__[key]
+            chunks = [
+                value.narrow(cat_dim, slices[int(idx)], slices[int(idx) + 1] - slices[int(idx)])
+                for idx in unique_graphs
+            ]
+            return torch.cat(chunks, dim=cat_dim) if chunks else value.narrow(cat_dim, 0, 0)
+
         new_data_kwargs = {}
         for key, value in self:
             if key in ['batch', 'ptr'] or key in ignore_keys: continue
             
             if key == 'edge_index':
                 new_data_kwargs[key] = node_map[value[:, edge_mask]]
+            elif key in _NODE_FIELDS and torch.is_tensor(value):
+                new_data_kwargs[key] = value[subset]
+            elif key in _EDGE_FIELDS and torch.is_tensor(value):
+                new_data_kwargs[key] = value[edge_mask]
+            elif key in _GRAPH_FIELDS or key in _FIXED_FIELDS:
+                new_data_kwargs[key] = select_graph_items(key, value)
             elif torch.is_tensor(value) and value.size(0) == self.num_nodes:
                 new_data_kwargs[key] = value[subset]
             elif torch.is_tensor(value) and value.size(0) == self.num_edges:
@@ -273,11 +302,7 @@ class Batch(Data):
             else:
                 new_data_kwargs[key] = value
 
-        new_batch_tensor = self.batch[subset]
         new_ptr = torch.cat([torch.tensor([0], device=new_batch_tensor.device), torch.cumsum(torch.bincount(new_batch_tensor), 0)])
-        unique_graphs, new_graph_node_counts = torch.unique(new_batch_tensor, return_counts=True)
-        
-        if len(unique_graphs) == 0: return None
 
         new_slices, new_cumsum = {}, {}
         graph_map = torch.full((self.num_graphs,), -1, dtype=torch.long, device=new_batch_tensor.device)
@@ -305,8 +330,8 @@ class Batch(Data):
                 edge_batch = self.batch[self.edge_index[0, edge_mask]]
                 new_item_sizes = torch.bincount(graph_map[edge_batch], minlength=len(unique_graphs))
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
-            elif key in _GRAPH_FIELDS:
-                new_item_sizes = torch.ones(len(unique_graphs), dtype=torch.long, device=self.batch.device)
+            elif key in _GRAPH_FIELDS or key in _FIXED_FIELDS:
+                new_item_sizes = item_sizes[unique_graphs]
                 new_cumsum[key] = [0] * (len(unique_graphs) + 1)
             else:
                 new_item_sizes = item_sizes[unique_graphs]

@@ -389,6 +389,33 @@ def _filter_dataset(
     ):
         return dataset
 
+    # Fixed node fields are stored once and reattached by ``dataset.get``.
+    # Once graph filtering can retain a different node subset per frame, they
+    # must become batched node fields so the same subgraph mask is applied.
+    node_counts = data.ptr.diff()
+    promoted_fixed_node_fields = set(getattr(dataset, "promoted_fixed_node_fields", set()))
+    for field, value in list(dataset.fixed_fields.items()):
+        if (
+            field not in _NODE_FIELDS
+            or field in data
+            or not torch.is_tensor(value)
+            or value.ndim == 0
+        ):
+            continue
+        if not torch.all(node_counts == int(value.shape[0])):
+            raise ValueError(
+                f"Fixed node field '{field}' has {value.shape[0]} rows, but the "
+                f"unfiltered frame node counts are {node_counts.tolist()}."
+            )
+        repeats = (data.num_graphs,) + (1,) * (value.ndim - 1)
+        data[field] = value.repeat(repeats)
+        data.__slices__[field] = data.ptr.tolist()
+        data.__cumsum__[field] = [0] * (data.num_graphs + 1)
+        data.__cat_dims__[field] = data.__cat_dim__(field, data[field])
+        del dataset.fixed_fields[field]
+        promoted_fixed_node_fields.add(field)
+    dataset.promoted_fixed_node_fields = promoted_fixed_node_fields
+
     # --- 1. Compute the final node mask based on all conditions ---
     nodes_to_keep_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=data.pos.device)
     

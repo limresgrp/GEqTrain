@@ -4,6 +4,7 @@ import torch
 import logging
 import numpy as np
 from geqtrain.data import InMemoryConcatDataset, LazyLoadingConcatDataset
+from geqtrain.data.dataset import compute_per_type_statistics
 from e3nn.o3 import Irreps
 from geqtrain.data._build import dataset_from_config
 from geqtrain.data import AtomicDataDict
@@ -12,10 +13,12 @@ from geqtrain.utils.normalization import (
     PER_TYPE_MODE,
     apply_forward_transform,
     denormalize_tensor,
+    fit_transform_parameters,
     get_global_stat_keys,
     get_per_type_stat_keys,
     get_transform_param_key,
     resolve_normalization_map,
+    serialize_transform_params,
 )
 
 def save_txt_file(filename, arrays):
@@ -50,6 +53,8 @@ class DatasetBuilder:
         self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.output = output
         self.dataset_rng = dataset_rng
+        self._resolved_train_dset = None
+        self._resolved_val_dset = None
 
     def _get_default_train_split_fraction(self) -> float:
         train_split_fraction = self.config.get("train_split_fraction", 0.8)
@@ -93,11 +98,18 @@ class DatasetBuilder:
         self.logger.info("Building final datasets from indices...")
 
         # Now, instantiate the full, potentially in-memory datasets
-        train_dset = dataset_from_config(self.config, prefix="train")
-        try:
-            val_dset = dataset_from_config(self.config, prefix="validation")
-        except KeyError:
-            val_dset = None
+        train_dset = self._resolved_train_dset
+        val_dset = self._resolved_val_dset
+        self._resolved_train_dset = None
+        self._resolved_val_dset = None
+
+        if train_dset is None:
+            train_dset = dataset_from_config(self.config, prefix="train")
+        if val_dset is None:
+            try:
+                val_dset = dataset_from_config(self.config, prefix="validation")
+            except KeyError:
+                val_dset = None
 
         if val_dset is not None:
             self._align_target_normalization_to_train(train_dset=train_dset, target_dset=val_dset, target_name="validation")
@@ -196,6 +208,11 @@ class DatasetBuilder:
             val_dset_meta = dataset_from_config(self.config, prefix="validation", metadata_only=True)
         except KeyError:
             val_dset_meta = None
+        # ``dataset_from_config`` currently returns complete datasets for this
+        # path. Reuse them during final indexing instead of loading both splits
+        # a second time.
+        self._resolved_train_dset = train_dset_meta
+        self._resolved_val_dset = val_dset_meta
         
         if train_idcs is not None: # But val_idcs is None
             self.logger.info("Generating validation set from data points not used for training.")
@@ -366,24 +383,189 @@ class DatasetBuilder:
         if len(train_dset.datasets) == 0 or len(target_dset.datasets) == 0:
             return
 
-        train_by_ensemble = {getattr(ds, "ensemble_index", idx): ds for idx, ds in enumerate(train_dset.datasets)}
-        fallback_train_ds = train_dset.datasets[0]
+        reference_fixed_fields = self._fit_train_normalization_reference(
+            train_dset.datasets,
+            normalization_specs,
+        )
+        if not reference_fixed_fields:
+            return
 
-        for idx, target_ds in enumerate(target_dset.datasets):
-            ensemble_id = getattr(target_ds, "ensemble_index", idx)
-            train_ref_ds = train_by_ensemble.get(ensemble_id, fallback_train_ds)
-            if ensemble_id not in train_by_ensemble:
-                self.logger.warning(
-                    "No train normalization reference found for %s ensemble %s; falling back to first train dataset.",
-                    target_name,
-                    ensemble_id,
-                )
+        # Individual NPZ datasets are normalized while their caches are built.
+        # Re-express every train system using the single reference fitted above.
+        for train_ds in train_dset.datasets:
+            self._restandardize_dataset_to_reference(
+                target_ds=train_ds,
+                reference_fixed_fields=reference_fixed_fields,
+                normalization_specs=normalization_specs,
+                target_name="training",
+            )
+
+        for target_ds in target_dset.datasets:
             self._restandardize_dataset_to_reference(
                 target_ds=target_ds,
-                reference_fixed_fields=train_ref_ds.fixed_fields,
+                reference_fixed_fields=reference_fixed_fields,
                 normalization_specs=normalization_specs,
                 target_name=target_name,
             )
+
+        self.logger.info(
+            "Applied one train-fitted normalization reference to %d training and %d %s datasets.",
+            len(train_dset.datasets),
+            len(target_dset.datasets),
+            target_name,
+        )
+
+    @staticmethod
+    def _representative_rows(atom_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return one row per physical atom and an inverse expansion index."""
+        _, inverse, counts = torch.unique(
+            atom_ids.to(dtype=torch.long),
+            sorted=True,
+            return_inverse=True,
+            return_counts=True,
+        )
+        order = torch.argsort(inverse)
+        starts = torch.cumsum(counts, dim=0) - counts
+        return order[starts], inverse
+
+    def _compact_field_with_node_types(self, dataset, field: str):
+        """Read a normalized node target once per physical atom.
+
+        Fixed ensemble targets are stored once, while promoted fixed targets are
+        repeated for every conformer. This helper gives both representations the
+        same compact view and records how a promoted field must be expanded.
+        """
+        data = getattr(dataset, "data", None)
+        fixed_fields = getattr(dataset, "fixed_fields", None)
+        if data is None or fixed_fields is None:
+            return None
+
+        if AtomicDataDict.NODE_TYPE_KEY in data:
+            all_node_types = data[AtomicDataDict.NODE_TYPE_KEY].to(dtype=torch.long).squeeze(-1)
+        elif AtomicDataDict.NODE_TYPE_KEY in fixed_fields:
+            all_node_types = fixed_fields[AtomicDataDict.NODE_TYPE_KEY].to(dtype=torch.long).squeeze(-1)
+        else:
+            return None
+
+        promoted = set(getattr(dataset, "promoted_fixed_node_fields", set()))
+        if field in data:
+            values = data[field]
+            node_types = all_node_types
+            expand_indices = None
+            if field in promoted and AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY in data:
+                representatives, expand_indices = self._representative_rows(
+                    data[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY]
+                )
+                values = values[representatives]
+                node_types = node_types[representatives]
+            return values, node_types, expand_indices, "data"
+
+        if field not in fixed_fields:
+            return None
+        values = fixed_fields[field]
+        if not torch.is_tensor(values) or values.ndim == 0:
+            return None
+
+        if all_node_types.shape[0] == values.shape[0]:
+            node_types = all_node_types
+        elif AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY in data:
+            atom_ids = data[AtomicDataDict.ENSEMBLE_ATOM_INDEX_KEY].to(dtype=torch.long)
+            representatives, _ = self._representative_rows(atom_ids)
+            unique_atom_ids = atom_ids[representatives]
+            representative_types = all_node_types[representatives]
+            if values.shape[0] == unique_atom_ids.shape[0]:
+                node_types = representative_types
+            elif unique_atom_ids.numel() and int(unique_atom_ids.max().item()) < values.shape[0]:
+                values = values[unique_atom_ids]
+                node_types = representative_types
+            else:
+                return None
+        else:
+            return None
+        return values, node_types, None, "fixed"
+
+    def _fit_train_normalization_reference(
+        self,
+        train_datasets,
+        normalization_specs: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Fit one normalization reference from all finite training targets."""
+        reference: Dict[str, Any] = {}
+        num_types = len(self.config.get("type_names", []))
+
+        for field, spec in normalization_specs.items():
+            raw_chunks = []
+            type_chunks = []
+            for dataset in train_datasets:
+                compact = self._compact_field_with_node_types(dataset, field)
+                if compact is None:
+                    continue
+                values, node_types, _, _ = compact
+                current_ref = dict(dataset.fixed_fields)
+                current_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types
+                raw_chunks.append(denormalize_tensor(values.clone(), current_ref, field, spec))
+                type_chunks.append(node_types)
+
+            if not raw_chunks:
+                continue
+            raw_values = torch.cat(raw_chunks, dim=0)
+            node_types = torch.cat(type_chunks, dim=0).to(dtype=torch.long)
+            finite_rows = torch.isfinite(raw_values)
+            if finite_rows.ndim > 1:
+                finite_rows = finite_rows.reshape(finite_rows.shape[0], -1).all(dim=1)
+            if not finite_rows.any():
+                continue
+            raw_values = raw_values[finite_rows]
+            node_types = node_types[finite_rows]
+
+            irreps_str = spec.get("irreps")
+            irreps = Irreps(irreps_str) if irreps_str else None
+            transform_cfg = fit_transform_parameters(
+                raw_values,
+                spec.get("transform", {"name": "none"}),
+                irreps=irreps,
+            )
+            transformed = apply_forward_transform(raw_values, transform_cfg, irreps=irreps)
+            reference.update(serialize_transform_params(field, transform_cfg))
+
+            mode = spec.get("mode")
+            if mode == PER_TYPE_MODE:
+                if num_types <= 0:
+                    num_types = int(node_types.max().item()) + 1
+                stats_data = [{field: transformed, AtomicDataDict.NODE_TYPE_KEY: node_types.reshape(-1, 1)}]
+                means, stds = compute_per_type_statistics(
+                    stats_data,
+                    field,
+                    num_types,
+                    irreps=irreps,
+                )
+                if irreps is not None:
+                    means = means.clone()
+                    component = 0
+                    for _, ir in irreps:
+                        if ir.l > 0:
+                            means[:, component:component + 1] = 0.0
+                        component += 1
+                mean_key, std_key = get_per_type_stat_keys(field)
+                reference[mean_key] = means
+                reference[std_key] = stds
+            elif mode == GLOBAL_MODE:
+                if irreps is not None:
+                    raise NotImplementedError(
+                        "Train-wide global normalization for equivariant fields is not implemented; use per_type."
+                    )
+                finite_values = transformed[torch.isfinite(transformed)]
+                mean = finite_values.mean()
+                std = finite_values.std()
+                if not torch.isfinite(std) or std < 1.0e-8:
+                    std = torch.ones_like(mean)
+                mean_key, std_key = get_global_stat_keys(field)
+                reference[mean_key] = mean
+                reference[std_key] = std
+            else:
+                raise ValueError(f"Unsupported normalization mode '{mode}' for field '{field}'.")
+
+        return reference
 
     def _resolve_reference_transform_cfg(
         self,
@@ -450,6 +632,10 @@ class DatasetBuilder:
 
             mean_bc = means_expanded
             std_bc = stds_expanded
+            if mean_bc.numel() == out.numel():
+                mean_bc = mean_bc.reshape(out.shape)
+                std_bc = std_bc.reshape(out.shape)
+                return (out - mean_bc) / std_bc
             if mean_bc.dim() == 1:
                 mean_bc = mean_bc.unsqueeze(-1)
             if std_bc.dim() == 1:
@@ -524,23 +710,22 @@ class DatasetBuilder:
     ):
         if getattr(target_ds, "data", None) is None or getattr(target_ds, "fixed_fields", None) is None:
             return
-        if AtomicDataDict.NODE_TYPE_KEY not in target_ds.data:
-            return
-
-        # Build a ref mapping that denormalize_tensor can consume (stats + node types).
-        current_ref = dict(target_ds.fixed_fields)
-        current_ref[AtomicDataDict.NODE_TYPE_KEY] = target_ds.data[AtomicDataDict.NODE_TYPE_KEY]
-        node_types = target_ds.data[AtomicDataDict.NODE_TYPE_KEY].to(dtype=torch.long).squeeze(-1)
 
         for field, spec in normalization_specs.items():
-            if field not in target_ds.data:
+            compact = self._compact_field_with_node_types(target_ds, field)
+            if compact is None:
                 continue
+            values, node_types, expand_indices, storage = compact
+
+            # Build a ref mapping that denormalize_tensor can consume.
+            current_ref = dict(target_ds.fixed_fields)
+            current_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types
 
             irreps_str = spec.get("irreps")
             irreps = Irreps(irreps_str) if irreps_str else None
             # 1) Recover raw-space values from current (possibly split-specific) normalization.
             raw_values = denormalize_tensor(
-                target_ds.data[field].clone(),
+                values.clone(),
                 current_ref,
                 field,
                 spec,
@@ -555,15 +740,23 @@ class DatasetBuilder:
                 raw_values,
                 reference_transform_cfg,
                 irreps=irreps,
-            ).to(target_ds.data[field].dtype)
+            ).to(values.dtype)
             # 3) Apply reference standardization (fitted on train).
-            target_ds.data[field] = self._apply_standardization_with_reference(
+            standardized = self._apply_standardization_with_reference(
                 values=transformed,
                 field=field,
                 spec=spec,
                 reference_fixed_fields=reference_fixed_fields,
                 node_types=node_types,
-            ).to(target_ds.data[field].dtype)
+            ).to(values.dtype)
+            if storage == "data":
+                target_ds.data[field] = (
+                    standardized[expand_indices]
+                    if expand_indices is not None
+                    else standardized
+                )
+            else:
+                target_ds.fixed_fields[field] = standardized
 
             # 4) Replace fixed fields for inverse transform/denormalization at eval time.
             self._copy_reference_normalization_keys(
@@ -573,7 +766,7 @@ class DatasetBuilder:
                 target_fixed_fields=target_ds.fixed_fields,
             )
 
-        self.logger.info(
+        self.logger.debug(
             "Aligned %s dataset normalization to train-fitted statistics for ensemble %s.",
             target_name,
             getattr(target_ds, "ensemble_index", "unknown"),

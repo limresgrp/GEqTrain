@@ -83,6 +83,28 @@ def test_metrics_stateful_node_type_names_filters_selected_species():
     assert torch.allclose(metric.accumulator.last_ref, torch.tensor([[2.0]]))
 
 
+def test_stateful_metric_constructor_does_not_receive_framework_mask_options():
+    register_fields(node_fields=["assignment_mask", "backbone_class_mask"])
+    metrics = Metrics(
+        components=[
+            {
+                "assignment_mask": [
+                    "geqtrain.train.BinaryAUROCMetric",
+                    {"node_mask_field": "backbone_class_mask", "ensemble_mode": "never"},
+                ]
+            }
+        ]
+    )
+    ref = _make_ref()
+    ref["assignment_mask"] = torch.tensor([[0.0], [0.0], [1.0]])
+    ref["backbone_class_mask"] = torch.tensor([True, False, True])
+    pred = {"assignment_mask": torch.tensor([[-2.0], [5.0], [2.0]])}
+
+    metrics(pred=pred, ref=ref)
+
+    assert metrics.current_result()["assignment_mask_0"].item() == 1.0
+
+
 def test_metrics_per_species_node_type_names_uses_selected_species_even_if_not_centers():
     metrics = Metrics(
         components=[

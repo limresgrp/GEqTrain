@@ -597,8 +597,13 @@ class AtomicInMemoryDataset(AtomicDataset):
         self.file_name = getattr(type(self), "FILE_NAME", None) if file_name is None else file_name
         self.url = getattr(type(self), "URL", url)
 
-        ignore_fields.extend([AtomicDataDict.R_MAX_KEY, AtomicDataDict.DATASET_RAW_FILE_NAME])
-        self.ignore_fields = ignore_fields
+        # Never mutate a caller-owned/default list: this constructor is invoked
+        # thousands of times for directory-backed NPZ datasets and the list is
+        # part of the processed-cache key.
+        self.ignore_fields = list(ignore_fields)
+        for field in (AtomicDataDict.R_MAX_KEY, AtomicDataDict.DATASET_RAW_FILE_NAME):
+            if field not in self.ignore_fields:
+                self.ignore_fields.append(field)
         self.extra_fixed_fields = extra_fixed_fields
         self.include_frames = include_frames
         self.target_indices = target_indices

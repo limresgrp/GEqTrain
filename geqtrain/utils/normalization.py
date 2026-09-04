@@ -477,7 +477,7 @@ def _inverse_standardize_per_type(
     node_types = ref_data[AtomicDataDict.NODE_TYPE_KEY]
     if not torch.is_tensor(node_types):
         return values
-    node_types = node_types.to(device=values.device, dtype=torch.long).squeeze(-1)
+    node_types = node_types.to(device=values.device, dtype=torch.long).reshape(-1)
     if values.dim() == 0 or values.shape[0] != node_types.shape[0]:
         return values
 
@@ -510,6 +510,10 @@ def _inverse_standardize_per_type(
 
     mean_bc = means_expanded
     std_bc = stds_expanded
+    if mean_bc.numel() == out.numel():
+        mean_bc = mean_bc.reshape(out.shape)
+        std_bc = std_bc.reshape(out.shape)
+        return out * std_bc + mean_bc
     if mean_bc.dim() == 1:
         mean_bc = mean_bc.unsqueeze(-1)
     if std_bc.dim() == 1:
