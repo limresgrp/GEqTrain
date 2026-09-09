@@ -15,8 +15,21 @@ validation_dataset_list:
 node_fields: [forces]
 graph_fields: [energy]
 fixed_fields: [node_types]
-# Preserve native target units in this introductory experiment.
-normalization: {}
+# Normalize energies
+normalization:
+  energy:
+    mode: global
+    transform: yeo_johnson
+    grid_min: -5
+    grid_max: 5
+    grid_steps: 151
+# Fit one reference across all training NPZ files and reuse it for validation
+# and test. This is the default, but it is explicit here because it is critical
+# for directory-backed datasets whose per-file caches are built independently.
+share_train_normalization_across_splits: true
+
+
 # The NPZ uses atomic numbers, NOT contiguous H/C/N = 0/1/2.
 num_types: 8
 type_names: [X, H, He, Li, Be, B, C, N]
+
