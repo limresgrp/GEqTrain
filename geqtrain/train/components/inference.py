@@ -44,7 +44,7 @@ def get_output_keys(loss_fn: Loss):
     output_keys, per_node_outputs_keys = [], []
     if loss_fn is not None:
         for key in loss_fn.keys:
-            key_clean = loss_fn.remove_suffix(key)
+            key_clean = loss_fn.get_target_key(key) if hasattr(loss_fn, "get_target_key") else loss_fn.remove_suffix(key)
             if key_clean in _NODE_FIELDS.union(_GRAPH_FIELDS).union(_EDGE_FIELDS):
                 output_keys.append(key_clean)
             if key_clean in _NODE_FIELDS:
@@ -283,7 +283,7 @@ def run_inference(
         for k in model_to_check.ref_data_keys:
             if k in out:
                 target = out[k]
-                key_clean = k.replace("_target", "")
+                key_clean = k[:-len("_target")] if k.endswith("_target") else k
                 ref_data[key_clean] = target
 
     # For pure inference (no loss function), expose predictions in original units by default.

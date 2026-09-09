@@ -1,0 +1,95 @@
+# @package _global_
+# Geometry reconstruction uses ordinary readout heads and loss components.
+defaults:
+  - /model/stack_blocks: common
+  - _self_
+
+masked_geometry_enabled: true
+geometry_mask_fraction: 0.15
+
+model:
+  stack:
+    - ${stack_blocks.node_input_attrs}
+    - ${stack_blocks.edge_radial_attrs}
+    - ${stack_blocks.edge_angular_attrs}
+    # Mask before EmbeddingAttrs copies geometry into edge_attrs/edge_eq_attrs.
+    - _target_: geqtrain.nn.MaskEdgeFeatures
+      name: mask_radial
+      field: radial_emb
+      out_field: radial_reconstruction
+      enabled: ${masked_geometry_enabled}
+      mask_fraction: ${geometry_mask_fraction}
+    - _target_: geqtrain.nn.MaskEdgeFeatures
+      name: mask_angular
+      field: spharms_emb
+      out_field: angular_reconstruction
+      enabled: ${masked_geometry_enabled}
+      mask_fraction: ${geometry_mask_fraction}
+    - _target_: geqtrain.nn.EmbeddingAttrs
+      name: attrs
+      node_out_irreps: 16x0e
+      edge_out_irreps: 8x0e
+      edge_eq_out_irreps: 2x1o+2x2e
+      edge_emb_kwargs:
+        include_edge_radial: true
+      edge_eq_emb_kwargs:
+        include_edge_spharm: true
+    - _target_: geqtrain.nn.InteractionModule
+      name: interaction
+      num_layers: 2
+      latent_dim: 16
+      eq_latent_multiplicity: 2
+      output_ls: [0, 1, 2]
+      latent_module_kwargs:
+        mlp_latent_dimensions: [16]
+    - _target_: geqtrain.nn.ReadoutModule
+      name: radial_head
+      field: edge_features
+      out_field: radial_reconstruction
+      out_irreps: 8x0e
+      strict_irreps: false
+      readout_latent_kwargs:
+        mlp_latent_dimensions: [16]
+    - _target_: geqtrain.nn.ReadoutModule
+      name: angular_head
+      field: edge_features
+      out_field: angular_reconstruction
+      out_irreps: 1x0e+1x1o+1x2e
+      normalize_equivariant_output: false
+      readout_latent_kwargs:
+        mlp_latent_dimensions: [16]
+    - ${stack_blocks.edge_pooling}
+    # Add the usual task head(s) here when combining with supervised training.
+
+r_max: 5.0
+num_basis: 8
+l_max: 2
+parity: o3_full
+irreps_edge_sh: null
+pooling_use_attention: false
+node_attributes:
+  node_types:
+    embedding_mode: one_hot
+    num_types: 4
+num_types: 4
+
+# In an experiment these entries can instead live in its train config.
+loss_coeffs:
+  - radial_reconstruction:
+    - 0.1
+    - MSELoss
+    - mask_field: radial_reconstruction_mask
+    - name: radial_geometry
+  - angular_reconstruction:
+    - 0.1
+    - MSELoss
+    - mask_field: angular_reconstruction_mask
+    - name: angular_geometry
+
+metrics_components:
+  - radial_reconstruction:
+    - L1Loss
+    - mask_field: radial_reconstruction_mask
+  - angular_reconstruction:
+    - L1Loss
+    - mask_field: angular_reconstruction_mask

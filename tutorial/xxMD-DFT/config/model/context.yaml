@@ -1,0 +1,75 @@
+# @package _global_
+defaults:
+  - blocks
+  - _self_
+mask_geometry: false
+mask_fraction: 0.15
+blocks:
+  mask_radial:
+    _target_: geqtrain.nn.MaskEdgeFeatures
+    name: mask_radial
+    field: radial_emb
+    out_field: radial_reconstruction
+    enabled: ${mask_geometry}
+    mask_fraction: ${mask_fraction}
+    mask_in_eval: false
+  mask_angular:
+    _target_: geqtrain.nn.MaskEdgeFeatures
+    name: mask_angular
+    field: spharms_emb
+    out_field: angular_reconstruction
+    enabled: ${mask_geometry}
+    mask_fraction: ${mask_fraction}
+    mask_in_eval: false
+  context:
+    _target_: geqtrain.nn.InteractionModule
+    name: context
+    num_layers: 1
+    latent_dim: 32
+    eq_latent_multiplicity: 4
+    output_ls: [0, 1, 2]
+    # Pooled directions from other edges provide context for masked edges.
+    node_equivariant_field: node_features
+    latent_module_kwargs:
+      mlp_latent_dimensions: [64]
+  final_pool:
+    _target_: geqtrain.nn.EdgewiseReduce
+    name: final_pool
+    field: edge_features
+    out_field: node_features
+    use_attention: false
+  radial_head:
+    _target_: geqtrain.nn.ReadoutModule
+    name: radial_head
+    field: edge_features
+    out_field: radial_reconstruction
+    out_irreps: 8x0e
+    strict_irreps: false
+    readout_latent_kwargs:
+      mlp_latent_dimensions: [64]
+  angular_head:
+    _target_: geqtrain.nn.ReadoutModule
+    name: angular_head
+    field: edge_features
+    out_field: angular_reconstruction
+    out_irreps: 1x0e+1x1o+1x2e
+    normalize_equivariant_output: false
+    readout_latent_kwargs:
+      mlp_latent_dimensions: [64]
+model:
+  stack:
+    - ${blocks.input}
+    - ${blocks.radial}
+    - ${blocks.angular}
+    - ${blocks.mask_radial}
+    - ${blocks.mask_angular}
+    - ${blocks.attrs}
+    - ${blocks.interaction}
+    - ${blocks.pool}
+    - ${blocks.context}
+    - ${blocks.radial_head}
+    - ${blocks.angular_head}
+    - ${blocks.final_pool}
+    - ${blocks.energy_head}
+    - ${blocks.energy_sum}
+    - ${blocks.force_head}

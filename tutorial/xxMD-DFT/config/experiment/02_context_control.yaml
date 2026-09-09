@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /base
+  - /data: azo
+  - /model: context
+  - /train: reconstruction
+  - _self_
+run_name: 02_context_control
+experiment_description: "xxMD tutorial: 02_context_control"
+mask_geometry: false

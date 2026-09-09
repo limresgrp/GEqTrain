@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /base
+  - /data: azo
+  - /model: baseline
+  - /train: supervised
+  - _self_
+run_name: 01_baseline
+experiment_description: "xxMD tutorial: 01_baseline"

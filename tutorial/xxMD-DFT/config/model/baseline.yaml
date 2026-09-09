@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - blocks
+  - _self_
+model:
+  stack:
+    - ${blocks.input}
+    - ${blocks.radial}
+    - ${blocks.angular}
+    - ${blocks.attrs}
+    - ${blocks.interaction}
+    - ${blocks.pool}
+    - ${blocks.energy_head}
+    - ${blocks.energy_sum}
+    - ${blocks.force_head}

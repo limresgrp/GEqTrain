@@ -1,0 +1,17 @@
+# Plain YAML for geqtrain-evaluate, which merges this into the saved run config.
+# Run from the GEqTrain repository root.
+test_dataset_list:
+  - dataset: npz
+    dataset_input: tutorial/xxMD-DFT/data/azo_test.npz
+    key_mapping:
+      coords: pos
+      atom_types: node_types
+      energy: energy
+      forces: forces
+# Evaluate physical targets only, also for the reconstruction model.
+loss_coeffs:
+  - energy: [1.0, MSELoss]
+  - forces: [1.0, MSELoss]
+metrics_components:
+  - energy: [L1Loss]
+  - forces: [L1Loss]

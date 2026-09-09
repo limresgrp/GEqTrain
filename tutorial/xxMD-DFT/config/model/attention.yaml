@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - baseline
+  - _self_
+# The shared block is interpolated into the baseline stack.
+blocks:
+  interaction:
+    use_attention: true
+    attention_mode: node_feature_query
+    attention_head_dim: 8
+    node_state_use_residual: true
+    node_state_pooling: mean
+# Keep the final explicit pool in both variants to hold readout semantics fixed.
+# Intermediate node states supply contextual scalar attention queries.

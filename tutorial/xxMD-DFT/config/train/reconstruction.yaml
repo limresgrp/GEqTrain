@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - supervised
+  - _self_
+# Hydra replaces lists; repeat the supervised terms rather than dropping them.
+loss_coeffs:
+  - energy: [1.0, MSELoss]
+  - forces: [1.0, MSELoss]
+  - radial_reconstruction:
+    - 0.05
+    - MSELoss
+    - mask_field: radial_reconstruction_mask
+  - angular_reconstruction:
+    - 0.05
+    - MSELoss
+    - mask_field: angular_reconstruction_mask
+# Validation is clean: auxiliary masks are empty. Keep epoch metrics physical.
+metrics_components:
+  - energy: [L1Loss]
+  - forces: [L1Loss]

@@ -1,0 +1,13 @@
+# @package _global_
+seed: 42
+dataset_seed: 42
+default_dtype: float32
+mixed_precision: false
+root: results/tutorial_xxmd
+verbose: info
+wandb: false
+append: true
+log_batch_csv: false
+log_batch_freq: 20
+dataset_num_workers: 1
+data_root: tutorial/xxMD-DFT/data

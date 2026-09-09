@@ -1,0 +1,22 @@
+# @package _global_
+train_dataset_list:
+  - dataset: npz
+    dataset_input: ${data_root}/azo_train.npz
+    key_mapping: &mapping
+      coords: pos
+      atom_types: node_types
+      energy: energy
+      forces: forces
+validation_dataset_list:
+  - dataset: npz
+    dataset_input: ${data_root}/azo_val.npz
+    key_mapping: *mapping
+
+node_fields: [forces]
+graph_fields: [energy]
+fixed_fields: [node_types]
+# Preserve native target units in this introductory experiment.
+normalization: {}
+# The NPZ uses atomic numbers, NOT contiguous H/C/N = 0/1/2.
+num_types: 8
+type_names: [X, H, He, Li, Be, B, C, N]

@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - /base
+  - /data: azo
+  - /model: context
+  - /train: reconstruction
+  - _self_
+run_name: 02_masked_geometry
+experiment_description: "xxMD tutorial: 02_masked_geometry"
+mask_geometry: true

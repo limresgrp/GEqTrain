@@ -1,0 +1,80 @@
+# @package _global_
+r_max: 5.0
+num_basis: 8
+l_max: 2
+parity: o3_full
+node_attributes:
+  node_types:
+    embedding_mode: one_hot
+    num_types: ${num_types}
+
+blocks:
+  input:
+    _target_: geqtrain.nn.EmbeddingInputAttrs
+    name: node_input
+    attributes: ${node_attributes}
+    out_field: node_input_attrs
+  radial:
+    _target_: geqtrain.nn.BasisEdgeRadialAttrs
+    name: radial
+    basis_kwargs:
+      r_max: ${r_max}
+      num_basis: ${num_basis}
+      # Reconstruction targets must not drift with trainable basis frequencies.
+      trainable: false
+    cutoff_kwargs:
+      r_max: ${r_max}
+  angular:
+    _target_: geqtrain.nn.SphericalHarmonicEdgeAngularAttrs
+    name: angular
+    irreps_edge_sh: null
+    l_max: ${l_max}
+    parity: ${parity}
+  attrs:
+    _target_: geqtrain.nn.EmbeddingAttrs
+    name: attrs
+    node_out_irreps: 32x0e
+    edge_emb_kwargs:
+      include_edge_radial: true
+    edge_eq_emb_kwargs:
+      include_edge_spharm: true
+  interaction:
+    _target_: geqtrain.nn.InteractionModule
+    name: interaction
+    num_layers: 2
+    latent_dim: 32
+    eq_latent_multiplicity: 4
+    output_ls: [0, 1, 2]
+    use_attention: false
+    latent_module_kwargs:
+      mlp_latent_dimensions: [64]
+      mlp_nonlinearity: silu
+  pool:
+    _target_: geqtrain.nn.EdgewiseReduce
+    name: edge_pooling
+    field: edge_features
+    out_field: node_features
+    use_attention: false
+  energy_head:
+    _target_: geqtrain.nn.ReadoutModule
+    name: energy_head
+    field: node_features
+    out_field: node_energy
+    out_irreps: 1x0e
+    strict_irreps: false
+    readout_latent_kwargs:
+      mlp_latent_dimensions: [64]
+  energy_sum:
+    _target_: geqtrain.nn.NodewiseReduce
+    name: energy_sum
+    field: node_energy
+    out_field: energy
+  force_head:
+    _target_: geqtrain.nn.ReadoutModule
+    name: force_head
+    field: node_features
+    out_field: forces
+    out_irreps: 1x1o
+    normalize_equivariant_output: false
+    readout_latent_kwargs:
+      mlp_latent_dimensions: [64]

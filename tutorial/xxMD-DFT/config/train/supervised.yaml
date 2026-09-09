@@ -1,0 +1,28 @@
+# @package _global_
+loss_coeffs:
+  - energy: [1.0, MSELoss]
+  - forces: [1.0, MSELoss]
+metrics_components:
+  - energy: [L1Loss]
+  - forces: [L1Loss]
+metrics_key: validation_loss
+metric_criteria: decreasing
+
+batch_size: 4
+validation_batch_size: 4
+dataloader_num_workers: 0
+max_epochs: 100
+learning_rate: 0.0001
+optimizer_name: AdamW
+optimizer_params:
+  weight_decay: 0.0
+lr_scheduler_name: ExponentialLR
+lr_scheduler_gamma: 0.99
+max_gradient_norm: 1.0
+gradient_clipping_mode: fixed
+use_ema: false
+warmup_epochs: 1
+early_stopping_patiences:
+  validation_loss: 20
+# Energy is a graph-level target: do not split the graph into center chunks.
+chunking: false

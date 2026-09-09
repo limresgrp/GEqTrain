@@ -53,6 +53,10 @@ pip install scipy matplotlib pandas plotly
 
 ## Basic Usage
 
+New to GEqTrain? Follow the [incremental tutorials](tutorial/README.md): start
+with energy/force regression on the bundled xxMD data, add attention, then learn
+masked-geometry reconstruction with ordinary heads and losses.
+
 Single-GPU training:
 
 ```bash

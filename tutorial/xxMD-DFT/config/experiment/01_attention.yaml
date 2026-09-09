@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /base
+  - /data: azo
+  - /model: attention
+  - /train: supervised
+  - _self_
+run_name: 01_attention
+experiment_description: "xxMD tutorial: 01_attention"
