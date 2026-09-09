@@ -3,7 +3,7 @@ defaults:
   - blocks
   - _self_
 mask_geometry: false
-mask_fraction: 0.15
+mask_fraction: 0.05
 blocks:
   mask_radial:
     _target_: geqtrain.nn.MaskEdgeFeatures
@@ -25,13 +25,13 @@ blocks:
     _target_: geqtrain.nn.InteractionModule
     name: context
     num_layers: 1
-    latent_dim: 32
-    eq_latent_multiplicity: 4
+    latent_dim: 256
+    eq_latent_multiplicity: 8
     output_ls: [0, 1, 2]
     # Pooled directions from other edges provide context for masked edges.
     node_equivariant_field: node_features
     latent_module_kwargs:
-      mlp_latent_dimensions: [64]
+      mlp_latent_dimensions: [1024]
   final_pool:
     _target_: geqtrain.nn.EdgewiseReduce
     name: final_pool
@@ -46,7 +46,7 @@ blocks:
     out_irreps: ${num_basis}x0e
     strict_irreps: false
     readout_latent_kwargs:
-      mlp_latent_dimensions: [64]
+      mlp_latent_dimensions: [1024]
   angular_head:
     _target_: geqtrain.nn.ReadoutModule
     name: angular_head
@@ -55,7 +55,13 @@ blocks:
     out_irreps: 1x0e+1x1o+1x2e
     normalize_equivariant_output: false
     readout_latent_kwargs:
-      mlp_latent_dimensions: [64]
+      mlp_latent_dimensions: [1024]
+  interaction:
+    use_attention: true
+    attention_mode: node_feature_query
+    attention_head_dim: 64
+    node_state_use_residual: true
+    node_state_pooling: mean
 model:
   stack:
     - ${blocks.enable_gradients}

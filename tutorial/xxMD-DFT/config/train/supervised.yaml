@@ -1,7 +1,7 @@
 # @package _global_
 loss_coeffs:
   - energy: [1.0, MSELoss]
-  - forces: [1.0, MSELoss]
+  - forces: [1000.0, MSELoss]
 metrics_components:
   - energy: [L1Loss]
   - forces: [L1Loss]

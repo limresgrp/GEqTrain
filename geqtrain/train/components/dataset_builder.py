@@ -494,51 +494,202 @@ class DatasetBuilder:
         num_types = len(self.config.get("type_names", []))
 
         for field, spec in normalization_specs.items():
-            raw_chunks = []
-            type_chunks = []
-            for dataset in train_datasets:
-                compact = self._compact_field_with_node_types(dataset, field)
-                if compact is None:
-                    continue
-                values, node_types, _, _ = compact
-                current_ref = dict(dataset.fixed_fields)
-                current_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types
-                raw_chunks.append(denormalize_tensor(values.clone(), current_ref, field, spec))
-                type_chunks.append(node_types)
-
-            if not raw_chunks:
-                continue
-            raw_values = torch.cat(raw_chunks, dim=0)
-            node_types = torch.cat(type_chunks, dim=0).to(dtype=torch.long)
-            finite_rows = torch.isfinite(raw_values)
-            if finite_rows.ndim > 1:
-                finite_rows = finite_rows.reshape(finite_rows.shape[0], -1).all(dim=1)
-            if not finite_rows.any():
-                continue
-            raw_values = raw_values[finite_rows]
-            node_types = node_types[finite_rows]
-
-            irreps_str = spec.get("irreps")
-            irreps = Irreps(irreps_str) if irreps_str else None
-            transform_cfg = fit_transform_parameters(
-                raw_values,
-                spec.get("transform", {"name": "none"}),
-                irreps=irreps,
-            )
-            transformed = apply_forward_transform(raw_values, transform_cfg, irreps=irreps)
-            reference.update(serialize_transform_params(field, transform_cfg))
-
             mode = spec.get("mode")
+
+            # ------------------------------------------------------------
+            # GLOBAL normalization:
+            # valid for graph/node/edge/extra/fixed fields.
+            # No node-type information is needed.
+            # ------------------------------------------------------------
+            if mode == GLOBAL_MODE:
+                raw_chunks = []
+
+                for dataset in train_datasets:
+                    data = dataset.data
+                    fixed_fields = dataset.fixed_fields
+
+                    if field in data:
+                        values = data[field]
+                    elif field in fixed_fields:
+                        values = fixed_fields[field]
+                    else:
+                        continue
+
+                    if not torch.is_tensor(values):
+                        values = torch.as_tensor(values)
+
+                    current_ref = dict(fixed_fields)
+
+                    # denormalize_tensor may use node types for an existing
+                    # per-type normalization, so provide them when available.
+                    if AtomicDataDict.NODE_TYPE_KEY in data:
+                        current_ref[AtomicDataDict.NODE_TYPE_KEY] = data[
+                            AtomicDataDict.NODE_TYPE_KEY
+                        ]
+
+                    raw_values = denormalize_tensor(
+                        values.clone(),
+                        current_ref,
+                        field,
+                        spec,
+                    )
+                    raw_chunks.append(raw_values)
+
+                if not raw_chunks:
+                    continue
+
+                raw_values = torch.cat(
+                    [x.reshape(-1) for x in raw_chunks],
+                    dim=0,
+                )
+
+                finite_values = raw_values[torch.isfinite(raw_values)]
+                if finite_values.numel() == 0:
+                    continue
+
+                irreps_str = spec.get("irreps")
+                irreps = Irreps(irreps_str) if irreps_str else None
+
+                transform_cfg = fit_transform_parameters(
+                    raw_values,
+                    spec.get("transform", {"name": "none"}),
+                    irreps=irreps,
+                )
+                transformed = apply_forward_transform(
+                    raw_values,
+                    transform_cfg,
+                    irreps=irreps,
+                )
+
+                reference.update(
+                    serialize_transform_params(
+                        field,
+                        transform_cfg,
+                    )
+                )
+
+                if irreps is not None:
+                    raise NotImplementedError(
+                        "Train-wide global normalization for equivariant fields "
+                        "is not implemented."
+                    )
+
+                finite_values = transformed[torch.isfinite(transformed)]
+                if finite_values.numel() == 0:
+                    continue
+
+                mean = finite_values.mean()
+                std = finite_values.std()
+
+                if not torch.isfinite(std) or std < 1.0e-8:
+                    std = torch.ones_like(mean)
+
+                mean_key, std_key = get_global_stat_keys(field)
+                reference[mean_key] = mean
+                reference[std_key] = std
+
+                continue
+
+            # ------------------------------------------------------------
+            # PER-TYPE normalization:
+            # only valid for node fields.
+            # ------------------------------------------------------------
             if mode == PER_TYPE_MODE:
+                raw_chunks = []
+                type_chunks = []
+
+                for dataset in train_datasets:
+                    compact = self._compact_field_with_node_types(
+                        dataset,
+                        field,
+                    )
+                    if compact is None:
+                        continue
+
+                    values, node_types, _, field_storage = compact
+
+                    # per_type normalization is only meaningful for node fields.
+                    # _compact_field_with_node_types may also resolve fixed/
+                    # promoted fields, so explicitly require a node-compatible
+                    # number of values here.
+                    if values.shape[0] != node_types.shape[0]:
+                        raise ValueError(
+                            f"Normalization mode 'per_type' is only supported "
+                            f"for node fields, but field '{field}' has "
+                            f"{values.shape[0]} values and "
+                            f"{node_types.shape[0]} node types."
+                        )
+
+                    current_ref = dict(dataset.fixed_fields)
+                    current_ref[AtomicDataDict.NODE_TYPE_KEY] = node_types
+
+                    raw_values = denormalize_tensor(
+                        values.clone(),
+                        current_ref,
+                        field,
+                        spec,
+                    )
+
+                    raw_chunks.append(raw_values)
+                    type_chunks.append(node_types)
+
+                if not raw_chunks:
+                    continue
+
+                raw_values = torch.cat(raw_chunks, dim=0)
+                node_types = torch.cat(type_chunks, dim=0).to(dtype=torch.long)
+
+                finite_rows = torch.isfinite(raw_values)
+                if finite_rows.ndim > 1:
+                    finite_rows = (
+                        finite_rows.reshape(finite_rows.shape[0], -1)
+                        .all(dim=1)
+                    )
+
+                if not finite_rows.any():
+                    continue
+
+                raw_values = raw_values[finite_rows]
+                node_types = node_types[finite_rows]
+
+                irreps_str = spec.get("irreps")
+                irreps = Irreps(irreps_str) if irreps_str else None
+
+                transform_cfg = fit_transform_parameters(
+                    raw_values,
+                    spec.get("transform", {"name": "none"}),
+                    irreps=irreps,
+                )
+                transformed = apply_forward_transform(
+                    raw_values,
+                    transform_cfg,
+                    irreps=irreps,
+                )
+
+                reference.update(
+                    serialize_transform_params(
+                        field,
+                        transform_cfg,
+                    )
+                )
+
                 if num_types <= 0:
                     num_types = int(node_types.max().item()) + 1
-                stats_data = [{field: transformed, AtomicDataDict.NODE_TYPE_KEY: node_types.reshape(-1, 1)}]
+
+                stats_data = [
+                    {
+                        field: transformed,
+                        AtomicDataDict.NODE_TYPE_KEY: node_types.reshape(-1, 1),
+                    }
+                ]
+
                 means, stds = compute_per_type_statistics(
                     stats_data,
                     field,
                     num_types,
                     irreps=irreps,
                 )
+
                 if irreps is not None:
                     means = means.clone()
                     component = 0
@@ -546,24 +697,16 @@ class DatasetBuilder:
                         if ir.l > 0:
                             means[:, component:component + 1] = 0.0
                         component += 1
+
                 mean_key, std_key = get_per_type_stat_keys(field)
                 reference[mean_key] = means
                 reference[std_key] = stds
-            elif mode == GLOBAL_MODE:
-                if irreps is not None:
-                    raise NotImplementedError(
-                        "Train-wide global normalization for equivariant fields is not implemented; use per_type."
-                    )
-                finite_values = transformed[torch.isfinite(transformed)]
-                mean = finite_values.mean()
-                std = finite_values.std()
-                if not torch.isfinite(std) or std < 1.0e-8:
-                    std = torch.ones_like(mean)
-                mean_key, std_key = get_global_stat_keys(field)
-                reference[mean_key] = mean
-                reference[std_key] = std
-            else:
-                raise ValueError(f"Unsupported normalization mode '{mode}' for field '{field}'.")
+
+                continue
+
+            raise ValueError(
+                f"Unsupported normalization mode '{mode}' for field '{field}'."
+            )
 
         return reference
 

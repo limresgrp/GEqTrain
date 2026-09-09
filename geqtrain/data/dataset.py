@@ -971,35 +971,80 @@ class AtomicInMemoryDataset(AtomicDataset):
             raise ValueError("Invalid return from `self.get_data()`")
 
         normalization_specs = copy.deepcopy(self._normalization_specs)
-        distribution_fields = self._select_distribution_fields(data_list, normalization_specs)
+
+        distribution_fields = self._select_distribution_fields(
+            data_list,
+            normalization_specs,
+        )
         raw_distribution_samples = self._collect_data_list_distribution_samples(
             data_list,
             distribution_fields,
         )
+
+        # Resolve where each field actually lives in this dataset.
+        field_types = {}
+        field_types.update({k: "node" for k in node_fields})
+        field_types.update({k: "edge" for k in edge_fields})
+        field_types.update({k: "graph" for k in graph_fields})
+        field_types.update({k: "extra" for k in extra_fields})
+        field_types.update({k: "fixed" for k in fixed_fields})
+
         for field, spec in normalization_specs.items():
-            if field not in data_list[0]:
-                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+            if field not in field_types:
+                raise ValueError(
+                    f"Cannot normalize: field `{field}` not found in "
+                    f"node, edge, graph, extra, or fixed fields."
+                )
+
+            field_type = field_types[field]
+
+            # per_type normalization is only meaningful for node fields.
+            if spec.get("mode") == PER_TYPE_MODE and field_type != "node":
+                raise ValueError(
+                    f"Normalization mode 'per_type' is only supported for node fields, "
+                    f"but field '{field}' is a {field_type} field."
+                )
 
             irreps_str = spec.get("irreps")
             irreps = Irreps(irreps_str) if irreps_str else None
+
+            # Collect the values used to fit the transform.
+            if field_type == "fixed":
+                fit_values = fixed_fields[field]
+                if not torch.is_tensor(fit_values):
+                    fit_values = torch.as_tensor(fit_values)
+            else:
+                fit_values = torch.cat(
+                    [entry[field] for entry in data_list],
+                    dim=0,
+                )
+
             transform_cfg = fit_transform_parameters(
-                values=torch.cat([entry[field] for entry in data_list], dim=0),
+                values=fit_values,
                 transform_cfg=spec.get("transform", {"name": "none"}),
                 irreps=irreps,
             )
             spec["transform"] = transform_cfg
 
+            # Apply transform before batching.
             if transform_cfg.get("name", "none") != "none":
-                for entry in data_list:
-                    entry[field] = apply_forward_transform(
-                        entry[field],
+                if field_type == "fixed":
+                    fixed_fields[field] = apply_forward_transform(
+                        fit_values,
                         transform_cfg,
                         irreps=irreps,
-                    ).to(entry[field].dtype)
+                    ).to(fit_values.dtype)
+                else:
+                    for entry in data_list:
+                        entry[field] = apply_forward_transform(
+                            entry[field],
+                            transform_cfg,
+                            irreps=irreps,
+                        ).to(entry[field].dtype)
 
-            fixed_fields.update(serialize_transform_params(field, transform_cfg))
-            if field in fixed_fields:
-                fixed_fields[field] = data_list[0][field].detach().clone()
+            fixed_fields.update(
+                serialize_transform_params(field, transform_cfg)
+            )
 
         fixed_fields = {
             field: value
@@ -1019,13 +1064,32 @@ class AtomicInMemoryDataset(AtomicDataset):
 
         for field, spec in normalization_specs.items():
             field_is_batched = field in data
-            if not field_is_batched and field not in fixed_fields:
-                raise ValueError(f"Cannot normalize: field `{field}` not in data.")
+            field_is_fixed = field in fixed_fields
+
+            if not field_is_batched and not field_is_fixed:
+                raise ValueError(
+                    f"Cannot normalize: field `{field}` not in data or fixed_fields."
+                )
+
+            field_type = field_types[field]
             field_values = data[field] if field_is_batched else fixed_fields[field]
 
             mode = spec.get("mode")
             irreps_str = spec.get("irreps")
             irreps = Irreps(irreps_str) if irreps_str else None
+
+            if mode not in [PER_TYPE_MODE, GLOBAL_MODE]:
+                raise ValueError(
+                    f"Invalid normalization mode '{mode}' for field '{field}'. "
+                    f"Must be one of: '{PER_TYPE_MODE}', '{GLOBAL_MODE}'."
+                )
+
+            # per_type is only valid for node fields.
+            if mode == PER_TYPE_MODE and field_type != "node":
+                raise ValueError(
+                    f"Normalization mode 'per_type' is only supported for node fields, "
+                    f"but field '{field}' is a {field_type} field."
+                )
 
             if mode not in [PER_TYPE_MODE, GLOBAL_MODE]:
                 raise ValueError(
@@ -1094,27 +1158,64 @@ class AtomicInMemoryDataset(AtomicDataset):
                 logging.info(f"Standardized field '{field}' per type.")
 
             elif mode == GLOBAL_MODE:
-                mean_val, std_val = compute_global_statistics(data_list, field, irreps=irreps)
-                self.means[field] = mean_val
-                self.stds[field] = std_val
-                
-                if std_val > 1e-8:
-                    if irreps:
-                        raise NotImplementedError("Global standardization for equivariant fields is not yet implemented.")
+                if field_type == "fixed":
+                    # Fixed fields have one value for the whole dataset.
+                    values_for_stats = field_values.reshape(-1)
+                    finite_values = values_for_stats[torch.isfinite(values_for_stats)]
+
+                    if finite_values.numel() == 0:
+                        mean_val = 0.0
+                        std_val = 1.0
                     else:
+                        mean_val = finite_values.mean().item()
+                        std_val = finite_values.std().item() if finite_values.numel() > 1 else 1.0
+
+                    if not np.isfinite(std_val) or std_val < 1.e-8:
+                        std_val = 1.0
+
+                    field_values = (field_values - mean_val) / std_val
+                    fixed_fields[field] = field_values
+
+                else:
+                    mean_val, std_val = compute_global_statistics(
+                        data_list,
+                        field,
+                        irreps=irreps,
+                    )
+
+                    self.means[field] = mean_val
+                    self.stds[field] = std_val
+
+                    if std_val > 1e-8:
+                        if irreps:
+                            raise NotImplementedError(
+                                "Global standardization for equivariant fields "
+                                "is not yet implemented."
+                            )
+
                         field_values -= mean_val
                         field_values /= std_val
+
                         if not field_is_batched:
                             fixed_fields[field] = field_values
 
-                    # Store stats in fixed_fields
-                    mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
-                    std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
-                    fixed_fields[mean_key] = torch.tensor(mean_val)
-                    fixed_fields[std_key] = torch.tensor(std_val)
-                    logging.info(f"Standardized field '{field}' globally with mean={mean_val:.4f} and std={std_val:.4f}.")                    
-                else:
-                    logging.warning(f"Standard deviation of field '{field}' is very small ({std_val:.4f}), skipping standardization.")
+                # Store stats for inverse normalization.
+                mean_key = f"{MEAN_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
+                std_key = f"{STD_KEY_PREFIX}.{GLOBAL_PREFIX}.{field}"
+
+                fixed_fields[mean_key] = torch.tensor(
+                    mean_val,
+                    dtype=torch.get_default_dtype(),
+                )
+                fixed_fields[std_key] = torch.tensor(
+                    std_val,
+                    dtype=torch.get_default_dtype(),
+                )
+
+                logging.info(
+                    f"Standardized field '{field}' globally "
+                    f"with mean={mean_val:.4f} and std={std_val:.4f}."
+                )
 
         normalized_distribution_samples = {}
         if len(normalization_specs) > 0:
