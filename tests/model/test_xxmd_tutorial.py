@@ -22,6 +22,34 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "tutorial/xxMD-DFT/config"
 EXPERIMENTS = ["01_baseline", "01_attention", "02_context_control", "02_masked_geometry"]
 
 
+@pytest.mark.parametrize("num_basis", [8, 16])
+def test_radial_reconstruction_head_tracks_basis_width(num_basis):
+    config = load_hydra_config(
+        str(CONFIG_ROOT / "experiment/02_masked_geometry.yaml"),
+        overrides=[f"num_basis={num_basis}"],
+    )
+    model, _ = model_from_config(config, initialize=False)
+    assert model.irreps_out["radial_reconstruction"] == model.irreps_out["radial_reconstruction_target"]
+    # Exercise the nonempty-mask loss, not only clean validation's zero loss.
+    masker = model._modules["mask_radial"]
+    head = model._modules["radial_head"]
+    masker.train()
+    masker.mask_fraction = 1.0
+    data = {
+        "edge_index": torch.tensor([[0, 1, 2], [1, 2, 0]]),
+        "radial_emb": torch.randn(3, num_basis),
+        "edge_features": head.irreps_in["edge_features"].randn(3, -1),
+    }
+    out = head(masker(data))
+    ref = {"radial_reconstruction": out["radial_reconstruction_target"]}
+    from geqtrain.train.loss import Loss
+    loss = Loss([{"radial_reconstruction": ["MSELoss", {"mask_field": "radial_reconstruction_mask"}]}])
+    value, _ = loss(out, ref)
+    assert torch.isfinite(value)
+    value.backward()
+    assert any(p.grad is not None for p in head.parameters())
+
+
 @pytest.fixture
 def small_data(tmp_path):
     rng = np.random.default_rng(42)

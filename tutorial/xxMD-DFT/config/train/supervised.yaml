@@ -8,8 +8,8 @@ metrics_components:
 metrics_key: validation_loss
 metric_criteria: decreasing
 
-batch_size: 4
-validation_batch_size: 4
+batch_size: 16
+validation_batch_size: 32
 dataloader_num_workers: 0
 max_epochs: 100
 learning_rate: 0.0001

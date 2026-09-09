@@ -83,12 +83,12 @@ reading `edge_features`. Their output irreps exactly match their targets:
 
 | Prediction | Target shape per edge | Irreps |
 | --- | --- | --- |
-| `radial_reconstruction` | 8 basis values | `8x0e` |
+| `radial_reconstruction` | `num_basis` basis values | `${num_basis}x0e` |
 | `angular_reconstruction` | 9 SH components, including l=0 | `1x0e+1x1o+1x2e` |
 
 The radial basis has `trainable: false` in all tutorial variants, so these
-reconstruction targets have a stable definition. If changing `num_basis`, update
-the radial head's irreps. If changing `l_max` or parity, update the angular head
+reconstruction targets have a stable definition. The radial head's irreps follow
+`num_basis` automatically through YAML interpolation. If changing `l_max` or parity, update the angular head
 to the exact SH representation, not just a matching flattened dimension.
 
 [`train/reconstruction.yaml`](config/train/reconstruction.yaml) extends the

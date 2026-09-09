@@ -4,6 +4,7 @@ defaults:
   - _self_
 model:
   stack:
+    - ${blocks.enable_gradients}
     - ${blocks.input}
     - ${blocks.radial}
     - ${blocks.angular}
@@ -13,3 +14,5 @@ model:
     - ${blocks.energy_head}
     - ${blocks.energy_sum}
     - ${blocks.force_head}
+
+model_requires_grads: true

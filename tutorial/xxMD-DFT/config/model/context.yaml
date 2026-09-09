@@ -43,7 +43,7 @@ blocks:
     name: radial_head
     field: edge_features
     out_field: radial_reconstruction
-    out_irreps: 8x0e
+    out_irreps: ${num_basis}x0e
     strict_irreps: false
     readout_latent_kwargs:
       mlp_latent_dimensions: [64]
@@ -58,6 +58,7 @@ blocks:
       mlp_latent_dimensions: [64]
 model:
   stack:
+    - ${blocks.enable_gradients}
     - ${blocks.input}
     - ${blocks.radial}
     - ${blocks.angular}
@@ -73,3 +74,5 @@ model:
     - ${blocks.energy_head}
     - ${blocks.energy_sum}
     - ${blocks.force_head}
+
+model_requires_grads: true

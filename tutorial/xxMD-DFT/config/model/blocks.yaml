@@ -1,6 +1,6 @@
 # @package _global_
-r_max: 5.0
-num_basis: 8
+r_max: 16.0
+num_basis: 16
 l_max: 2
 parity: o3_full
 node_attributes:
@@ -9,6 +9,11 @@ node_attributes:
     num_types: ${num_types}
 
 blocks:
+  enable_gradients:
+    _target_: geqtrain.nn.EnableGradients
+    name: enable_gradients
+    gradient_of: energy
+    gradient_wrt: pos
   input:
     _target_: geqtrain.nn.EmbeddingInputAttrs
     name: node_input
@@ -33,7 +38,7 @@ blocks:
   attrs:
     _target_: geqtrain.nn.EmbeddingAttrs
     name: attrs
-    node_out_irreps: 32x0e
+    node_out_irreps: 256x0e
     edge_emb_kwargs:
       include_edge_radial: true
     edge_eq_emb_kwargs:
@@ -42,12 +47,12 @@ blocks:
     _target_: geqtrain.nn.InteractionModule
     name: interaction
     num_layers: 2
-    latent_dim: 32
-    eq_latent_multiplicity: 4
+    latent_dim: 256
+    eq_latent_multiplicity: 8
     output_ls: [0, 1, 2]
     use_attention: false
     latent_module_kwargs:
-      mlp_latent_dimensions: [64]
+      mlp_latent_dimensions: [1024]
       mlp_nonlinearity: silu
   pool:
     _target_: geqtrain.nn.EdgewiseReduce
