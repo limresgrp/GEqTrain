@@ -78,6 +78,7 @@ class Loss:
                         ref_key=ref_key,
                         node_type_indices=target_filter.get("node_type_indices"),
                         node_mask_field=target_filter.get("node_mask_field"),
+                        mask_field=target_filter.get("mask_field"),
                         node_level_filter=target_filter.get("node_level_filter", "auto"),
                         ignore_nan=target_filter.get("ignore_nan", False),
                         denormalize=False,
@@ -160,6 +161,7 @@ class Loss:
                 "type_names",
                 "node_mask_field",
                 "node_mask_key",
+                "mask_field",
                 "node_level_filter",
             ):
                 constructor_params.pop(filter_key, None)
@@ -177,6 +179,7 @@ class Loss:
         return {
             "node_type_indices": resolve_node_type_indices(params, "loss"),
             "node_mask_field": params.get("node_mask_field", params.get("node_mask_key", None)),
+            "mask_field": params.get("mask_field"),
             "node_level_filter": params.get("node_level_filter", "auto"),
             "ignore_nan": bool(params.get("ignore_nan", False)),
         }

@@ -185,6 +185,7 @@ def prepare_target(
     ref_key: torch.Tensor,
     node_type_indices: Optional[torch.Tensor] = None,
     node_mask_field: Optional[str] = None,
+    mask_field: Optional[str] = None,
     node_level_filter: object = "auto",
     ignore_nan: bool = False,
     denormalize: bool = False,
@@ -265,6 +266,17 @@ def prepare_target(
                     f"Cannot apply node mask field '{node_mask_field}' for '{key}': mask could not be aligned to {row_count} rows."
                 )
             masks.append(node_mask)
+
+    if mask_field is not None:
+        mask_source = pred if mask_field in pred else ref
+        if mask_field not in mask_source:
+            raise KeyError(f"Required mask_field '{mask_field}' is missing for '{key}'.")
+        row_mask = torch.as_tensor(mask_source[mask_field], device=pred_key.device, dtype=torch.bool)
+        if row_mask.ndim == 2 and row_mask.shape[1] == 1:
+            row_mask = row_mask[:, 0]
+        if row_mask.ndim != 1 or row_mask.shape[0] != row_count:
+            raise ValueError(f"mask_field '{mask_field}' for '{key}' must have {row_count} rows.")
+        masks.append(row_mask)
 
     if ignore_nan:
         masks.append(_finite_row_mask(pred_key, ref_key))
@@ -352,6 +364,7 @@ class LossWrapper:
         self.ignore_nan = self.params.pop("ignore_nan", False)
         self.node_level_filter = self.params.pop("node_level_filter", "auto")  # node filtering mode: 'auto', True, or False
         self.node_mask_field = self.params.pop("node_mask_field", self.params.pop("node_mask_key", None))
+        self.mask_field = self.params.pop("mask_field", None)
         self.node_type_indices = self._resolve_node_type_indices()
 
         # New: Handle deep supervision parameters
@@ -478,6 +491,7 @@ class LossWrapper:
             ref_key=ref_key,
             node_type_indices=self.node_type_indices,
             node_mask_field=self.node_mask_field,
+            mask_field=self.mask_field,
             node_level_filter=self.node_level_filter,
             ignore_nan=False,
             denormalize=False,
@@ -543,6 +557,7 @@ class LossWrapper:
                 ref_key=ref_key,
                 node_type_indices=self.node_type_indices,
                 node_mask_field=self.node_mask_field,
+                mask_field=self.mask_field,
                 node_level_filter=self.node_level_filter,
                 ignore_nan=self.ignore_nan,
                 denormalize=not mean,

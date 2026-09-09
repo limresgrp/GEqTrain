@@ -28,6 +28,7 @@ from ._gradient import EnableGradients, ComputeGradient
 from .mace import MACEModule
 from ._equivariant_scalar_mlp import EquivariantScalarMLP
 from .recycling import RecyclingModule
+from ._mask import MaskEdgeFeatures
 
 __all__ = [
     GraphModuleMixin,
@@ -69,6 +70,7 @@ __all__ = [
     MACEModule,
     EquivariantScalarMLP,
     RecyclingModule,
+    MaskEdgeFeatures,
     select_nonlinearity,
     select_nonlinearity_module,
 ]

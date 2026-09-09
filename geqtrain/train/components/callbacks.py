@@ -179,6 +179,7 @@ class ValidationBatchPredictionLogger(Callback):
         self._header_written = {}
         self._keys = []
         self._loss_func_by_key = {}
+        self._target_filter_by_key = {}
         self._capture_active = False
         self._pred_cache = {}
         self._ref_cache = {}
@@ -192,12 +193,13 @@ class ValidationBatchPredictionLogger(Callback):
         loss = self.trainer.loss
         seen = set()
         for loss_key in loss.keys:
-            clean_key = loss.remove_suffix(loss_key)
+            clean_key = loss.get_target_key(loss_key)
             if clean_key in seen:
                 continue
             seen.add(clean_key)
             self._keys.append(clean_key)
             self._loss_func_by_key[clean_key] = loss.funcs[loss_key]
+            self._target_filter_by_key[clean_key] = loss.target_filters.get(loss_key, {})
             safe_key = clean_key.replace("/", "_")
             log_path = self.trainer.output.open_logfile(
                 f"pred_target_batch_{ABBREV[VALIDATION]}_{safe_key}.csv",
@@ -246,6 +248,7 @@ class ValidationBatchPredictionLogger(Callback):
 
     def _extract_pred_ref(self, key, batch_output, ref_data):
         loss_func = self._loss_func_by_key.get(key)
+        target_filter = self._target_filter_by_key.get(key, {})
         pred_key_name = key
         if loss_func is not None and hasattr(loss_func, "_get_pred_key_name"):
             pred_key_name = loss_func._get_pred_key_name(key)
@@ -275,10 +278,11 @@ class ValidationBatchPredictionLogger(Callback):
             pred_key_name=pred_key_name,
             pred_key=pred_key,
             ref_key=ref_key,
-            node_type_indices=getattr(loss_func, "node_type_indices", None),
-            node_mask_field=getattr(loss_func, "node_mask_field", None),
-            node_level_filter=getattr(loss_func, "node_level_filter", "auto"),
-            ignore_nan=getattr(loss_func, "ignore_nan", False),
+            node_type_indices=target_filter.get("node_type_indices", getattr(loss_func, "node_type_indices", None)),
+            node_mask_field=target_filter.get("node_mask_field", getattr(loss_func, "node_mask_field", None)),
+            mask_field=target_filter.get("mask_field", getattr(loss_func, "mask_field", None)),
+            node_level_filter=target_filter.get("node_level_filter", getattr(loss_func, "node_level_filter", "auto")),
+            ignore_nan=target_filter.get("ignore_nan", getattr(loss_func, "ignore_nan", False)),
             denormalize=True,
             normalization_fields=self._normalization_fields,
         )

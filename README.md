@@ -137,6 +137,9 @@ The main groups are:
 See [ensemble training](docs/ensemble_training.md) for multi-conformer batching,
 prediction aggregation, and the structure/atom memory controls.
 
+See [masked geometry reconstruction](docs/masked_geometry.md) for optional
+radial/angular feature masking with ordinary readout heads, losses and metrics.
+
 ## NMR Tutorial
 
 The repository includes a self-contained chemical-shift tutorial under
