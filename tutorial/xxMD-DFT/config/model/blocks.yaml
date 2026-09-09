@@ -70,11 +70,10 @@ blocks:
     field: node_energy
     out_field: energy
   force_head:
-    _target_: geqtrain.nn.ReadoutModule
-    name: force_head
-    field: node_features
+    _target_: geqtrain.nn.ComputeGradient
+    name: compute_gradients
+    gradient_of: energy
+    gradient_wrt: pos
     out_field: forces
-    out_irreps: 1x1o
-    normalize_equivariant_output: false
-    readout_latent_kwargs:
-      mlp_latent_dimensions: [64]
+    sign: -1
+    scales: null
